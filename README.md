@@ -93,7 +93,7 @@ export PATH="$PWD/.venv/bin:$PATH"
 ```
 
 Make the same directory available in the environment that starts Cockpit and your
-agents. Install or link `src/cockpit/skills/cockpit` into your agent's skills directory
+agents. Install or link `src/cockpit/skills/cockpit` and `src/cockpit/skills/writing-style` into your agent's skills directory
 so it can load the bundled instructions. For Claude Code, the usual location is
 `~/.claude/skills/cockpit`; for Codex, it is `~/.codex/skills/cockpit`.
 
