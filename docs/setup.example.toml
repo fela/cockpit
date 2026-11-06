@@ -1,0 +1,54 @@
+# Example local setup. Prefer `cockpit setup --local --provider codex` to generate
+# paths for your checkout. If using this file, copy it to
+# ~/.config/cockpit/setup.toml, adjust paths and keep it private (chmod 600).
+# Paths must be absolute or begin with ~/.
+
+name = "Sam"
+# Local mode requires an address-shaped identifier; it sends no email.
+# For Google mode, use the Google account allowed to sign in.
+email = "sam@localhost"
+origin = "http://127.0.0.1:8790"
+auth_mode = "local"
+providers = ["codex"] # ["claude"] or ["claude", "codex"] also work
+default_provider = "codex"
+codex_command = "codex" # executable name or absolute path; uses existing login; models come from SESSION_OPTIONS
+
+# Optional Claude socket directory override. Empty uses the platform default.
+claude_sockets_dir = ""
+
+# Folder of checkouts offered to new sessions; the sweeper runs here.
+checkouts = "~/dev"
+# Checkout whose docs/SPEC.md the spec page reads and edits.
+spec_repo = "~/dev/cockpit"
+# Bundled skills: one directory per skill, each containing SKILL.md.
+# The Skills page commits and pushes edits to skills_branch in skills_repo.
+skills_repo = "~/dev/cockpit"
+skills_folder = "src/cockpit/skills"
+skills_branch = "main"
+
+# Optional branch used by `cockpit deploy` for a macOS service installation.
+# Omit or leave empty to disable that command. This branch must match the checkout.
+# deploy_branch = "main"
+
+# Optional: Claude accounts taken out of use for good, by name. New work stops going to them, the page stops
+# mentioning them, and their stopped sessions resume on the default account.
+# retired_accounts = ["work"]
+
+# Command for opening a Claude session in your terminal. {session} is its ID.
+attach = "cockpit attach {session}"
+# Remote example, if you configured an SSH host named workstation:
+# attach = "ssh -t workstation \"bash -lc 'cockpit attach {session}'\""
+
+# Timezone for displayed times and optional collaborator briefings.
+timezone = "UTC"
+
+# Optional usage horizon per account. Empty uses each account's normal reset.
+last_use = {}
+
+# For HTTPS hosting, replace these three values above:
+# auth_mode = "google"
+# email = "sam@example.com"
+# origin = "https://cockpit.example.com"
+# Create a Google OAuth web application client with redirect URI
+# <origin>/auth/google/callback. Store its JSON privately at
+# ~/.config/cockpit/google-oauth-client.json (chmod 600).

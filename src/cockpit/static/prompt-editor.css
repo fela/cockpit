@@ -1,0 +1,28 @@
+/* CodeMirror's base styles carry a per-response CSP nonce. The app's skin stays here. */
+.prompt-field { min-width: 0; }
+.prompt-field > textarea[hidden] { display: none; }
+.prompt-field .cm-editor { margin-top: 4px; background: transparent; color: var(--text); font-size: inherit; }
+.prompt-field .cm-editor.cm-focused { outline: none; }
+.prompt-field .cm-scroller { max-height: 40vh; min-height: 72px; font-family: var(--font-mono, ui-monospace, monospace); line-height: 1.5; }
+.prompt-field .cm-content { padding: 4px 0; caret-color: var(--text); }
+.prompt-field .cm-line { padding: 0 2px; }
+.prompt-field .cm-placeholder { color: var(--text-3); }
+.prompt-field .cm-cursor { border-left-color: var(--text); }
+.prompt-field .cm-fat-cursor { background: var(--text); color: var(--bg); outline-color: var(--text); }
+.prompt-field .cm-editor:not(.cm-focused) .cm-fat-cursor { background: transparent; color: inherit; }
+.prompt-field .cm-editor.cm-focused .cm-selectionBackground,
+.prompt-field .cm-selectionBackground { background: color-mix(in srgb, var(--focus) 25%, transparent); }
+.prompt-field .cm-panels { background: transparent; color: var(--text-2); border-color: var(--line); }
+.prompt-field .cm-vim-panel { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; padding: 4px 0; font: var(--fs-meta)/1.5 ui-monospace, monospace; }
+.prompt-field .cm-vim-panel input { min-width: 0; color: inherit; font: inherit; }
+.prompt-field .cm-searchMatch { background: var(--accent-bg); outline: 1px solid var(--accent-line); }
+.prompt-field .tok-heading { color: var(--accent-text); font-weight: 600; }
+.prompt-field .tok-strong { font-weight: 700; }
+.prompt-field .tok-emphasis { font-style: italic; }
+.prompt-field .tok-link, .prompt-field .tok-url { color: var(--working); text-decoration: underline; }
+.prompt-field .tok-comment, .prompt-field .tok-meta { color: var(--text-3); }
+.prompt-field .tok-strikethrough { text-decoration: line-through; }
+.composer:has(.cm-focused) { outline: 2px solid var(--focus); outline-offset: 1px; }
+.composer:not(.filled):not(:focus-within) .cm-scroller { min-height: 28px; }
+.composer:not(.filled):not(:focus-within) .cm-panels { display: none; }
+@media (pointer: coarse) { .prompt-field .cm-editor { font-size: 16px; } }

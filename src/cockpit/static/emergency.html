@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>Cockpit emergency session</title>
+  <link rel="icon" href="/static/icon.svg" type="image/svg+xml">
+  <!-- SPEC SESSION-21: this page loads only its own stylesheet and script, none of the main page's. -->
+  <link rel="stylesheet" href="/static/emergency.css">
+  <script src="/static/local-auth.js"></script>
+  <script src="/static/emergency.js" defer></script>
+</head>
+<body>
+  <main>
+    <header>
+      <h1>Emergency session</h1>
+      <a href="/">Back to Cockpit</a>
+    </header>
+    <p class="about">One Claude or Codex session you can talk to while the main Cockpit page is broken. It keeps its conversation between messages. Each message runs on the model, effort and Claude account you pick below. The agent cannot ask you for permission here, so a call that needs it is refused and shows in red.</p>
+    <p id="where" class="about"></p>
+    <section id="turns" aria-live="polite"></section>
+    <form id="compose">
+      <fieldset id="agents" hidden><legend>Agent</legend></fieldset>
+      <div class="picks">
+        <label>Model <select id="model"></select></label>
+        <label>Effort <span id="effort-bars"></span><select id="effort"></select></label>
+      </div>
+      <fieldset id="accounts"><legend>Run this message on</legend></fieldset>
+      <label for="text" class="hidden">Message</label>
+      <textarea id="text" rows="4" placeholder="Tell it what is broken" required></textarea>
+      <div class="actions">
+        <button id="send" type="submit">Send</button>
+        <button id="stop" type="button" hidden>Stop it</button>
+        <button id="close" type="button" class="quiet">Close session</button>
+        <span id="status" role="status"></span>
+      </div>
+    </form>
+    <noscript><p class="problem">This page needs JavaScript.</p></noscript>
+  </main>
+</body>
+</html>

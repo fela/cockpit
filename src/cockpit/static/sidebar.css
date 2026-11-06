@@ -1,0 +1,693 @@
+/* The page with the list of items at its left (VIEW-26, sidebar.js). The list takes the place of the status lights
+   above the card and of the queue and the list of work below it; the card stays as it is. */
+
+.sidebar:empty { display: none; }
+
+/* One rail at the left for everything the top bar held */
+body[data-layout="sidebar"] { --rail-w: 280px; }
+body[data-layout="sidebar"] #header { display: none; }
+body[data-layout="sidebar"] .layout {
+  max-width: none;
+  margin: 0;
+  padding: 0;
+  grid-template-columns: var(--rail-w) minmax(0, 1fr);
+  column-gap: 0;
+  min-height: 100vh;
+}
+/* Patterns, Your time and Permissions stay on the classic page; Priorities and Pinned moved into the rail. */
+body[data-layout="sidebar"] .layout > .side { display: none; }
+body[data-layout="sidebar"] #overview { display: none; }
+
+.rail {
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  padding: 10px 8px 0;
+  background: var(--margin);
+}
+.rail-top { display: flex; align-items: center; gap: 2px; min-height: 32px; }
+.rail .brand-menu { margin: 0 4px 0 0; }
+.rail .brand { margin: 0; }
+/* The menu under the logo lists every page at every width, with Feedback beside it in the top line. */
+:root .rail .brand-menu .menu-list > a.phone-only { display: flex; }
+:root .rail .brand-menu .menu-list > #feedback-menu { display: none; }
+.rail .brand-menu .menu-list > a[href="/skills"] { margin-bottom: 4px; box-shadow: 0 1px 0 0 var(--margin-line); }
+/* The logo turns into the menu's three lines while the pointer is on it, it has the keyboard's focus or the menu is
+   open; an unread briefing lights its corner, as the menu's Briefing entry does. */
+:root .rail .brand:is(:hover, :focus-visible) .brand-mark::after, :root .rail .brand-menu[open] .brand-mark::after { --glyph: var(--mark-menu); width: 20px; height: 20px; }
+.rail .brand-mark { position: relative; }
+body[data-briefing-unread] .rail .brand-mark::before { content: ""; position: absolute; top: 4px; right: 4px; width: 6px; height: 6px; border-radius: 50%; background: var(--brand-amber); }
+.rail-actions { display: flex; align-items: center; gap: 2px; margin-left: auto; }
+/* Feedback is the same square key as +: its count of notes for the sweep stays in its hover. */
+.rail-actions > #feedback-mode .feedback-count { display: none; }
+.rail-search .command-trigger { width: 100%; height: 32px; margin: 0; padding: 0 6px 0 10px; justify-content: space-between; color: var(--text-3); background: var(--surface); box-shadow: inset 0 0 0 1px var(--margin-line); }
+.rail-search .command-trigger:hover { color: var(--text); }
+
+/* Priorities sit above Search as one line (UI-65); Pinned shows its list in the rail. */
+.rail > #goals, .rail > #pinned { flex: none; margin: 0; padding: 0; border: 0; background: none; box-shadow: none; }
+.rail > #pinned:empty { display: none; }
+.rail > #pinned > .section-head { display: flex; align-items: center; gap: 6px; min-height: 30px; margin: 0; padding: 0 2px 0 10px; border-radius: var(--radius-sm, 6px); }
+:root .rail > #pinned > .section-head h2 { margin: 0; font: inherit; font-family: var(--sans); font-size: var(--fs-meta); font-weight: 600; color: var(--text-2); letter-spacing: normal; text-transform: none; }
+.rail > #pinned > .section-head h2::before { display: none; }
+.rail > #pinned { max-height: 40vh; padding-bottom: 10px; overflow-y: auto; }
+
+.sidebar {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  /* The list runs to both edges of the rail: rows are square bands, and a row's side bar sits on the
+     rail's own left edge. */
+  margin: 0 -8px;
+  padding: 0 0 8px;
+}
+
+
+.rail-foot { display: flex; flex-direction: column; gap: 6px; margin: 0 -8px; padding: 8px; box-shadow: 0 -1px 0 0 var(--margin-line); }
+.rail-line { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; min-height: 32px; }
+.rail-line > #usage { display: flex; flex: 1 1 140px; flex-wrap: wrap; align-items: center; row-gap: 6px; margin: 0; background: none; box-shadow: none; }
+:root .rail-line > #usage { gap: 10px; }
+.rail-line > #usage > .usage { flex: 1 1 0; }
+
+.rail-line > #usage > .usage.caps { gap: 10px; }
+.rail-foot .fam { flex: var(--units) 1 20px; }
+.rail-foot .lane { flex: 1 1 0; width: auto; min-width: 40px; }
+.rail-keys { display: contents; }
+/* Sweeps are paused: a line of its own above the foot's readouts, in the accent's colours so it is noticed (SPEC
+   SWEEP-11). It takes room from the list rather than cover its last rows, and the notices above the foot stand on it. */
+.sweeps-paused { display: flex; align-items: center; gap: 8px; min-height: 32px; padding: 3px 3px 3px 10px; border-radius: 6px; background: var(--accent-bg); color: var(--accent-text); box-shadow: inset 0 0 0 1px var(--accent-line); }
+.sweeps-paused[hidden] { display: none; }
+.sweeps-paused-words { flex: 1 1 auto; min-width: 0; font-size: 13px; user-select: text; }
+.sweeps-paused #resume-sweeps { flex-shrink: 0; }
+.rail-keys > .live-dot { margin: 0 4px; }
+.rail-keys > .live-dot.ok { display: none; }
+.rail-foot .menu-list { top: auto; bottom: calc(100% + 6px); }
+/* Notices sit just above the foot, as wide as the list: "N waiting to send" lowest, the toast (an Undo,
+   a send's notice) above it. They cover the list's last rows; the waiting note lets clicks through. The rail keeps
+   the foot's height in --rail-foot-h (sidebar.js). */
+.rail-foot { position: relative; }
+.rail-foot #unsent { position: absolute; left: 8px; right: 8px; bottom: calc(100% + 8px); z-index: 4; box-shadow: var(--shadow-pop); pointer-events: none; }
+/* The toast stands --notice-lift above the foot: higher while the waiting note shows. It stays there while the
+   feedback box is open, which on a wide screen is in the other corner. */
+body[data-layout="sidebar"] { --notice-lift: 8px; }
+body[data-layout="sidebar"]:has(.rail-foot #unsent:not([hidden])) { --notice-lift: 36px; }
+/* At the list's full width, the words fill the toast and its button keeps the right end. */
+body[data-layout="sidebar"] .toast > span { flex: 1 1 auto; }
+@media (min-width: 1001px) {
+  body[data-layout="sidebar"] .toast, body[data-layout="sidebar"]:has(#pick-box:not([hidden])) .toast {
+    top: auto; left: 8px; right: auto; bottom: calc(var(--rail-foot-h, 48px) + var(--notice-lift)); width: calc(var(--rail-w) - 16px); max-width: none;
+  }
+}
+/* On a phone the feedback box spans the screen's foot, so while it is open the toast keeps its place under the header. */
+@media (max-width: 1000px) {
+  body[data-layout="sidebar"].phone-list:not(:has(#pick-box:not([hidden]))) .toast {
+    top: auto; left: 8px; right: 8px; bottom: calc(var(--rail-foot-h, 48px) + var(--notice-lift)); width: auto; max-width: none;
+  }
+}
+
+
+/* The picked row in the list stands out in the accent's own family, so it is found at a glance and stays in the
+   page's warm colours (UI-58): a deep burnt amber with light text on the light page, a light amber with dark text on
+   the dark one. Its age, pencil, red title and working dot take shades that read on that ground. */
+:root {
+  --picked-bg: oklch(0.42 0.11 48);
+  --picked-text: oklch(0.982 0.005 85);
+  --picked-text-2: oklch(0.87 0.04 70);
+  --picked-accent: oklch(0.88 0.1 80);
+  --picked-fail: oklch(0.87 0.08 22);
+  --picked-working: oklch(0.8 0.1 255);
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --picked-bg: oklch(0.8 0.1 65);
+    --picked-text: oklch(0.195 0.006 65);
+    --picked-text-2: oklch(0.36 0.04 60);
+    --picked-accent: oklch(0.4 0.12 48);
+    --picked-fail: oklch(0.4 0.17 27);
+    --picked-working: oklch(0.43 0.17 262);
+  }
+}
+.sidebar-groups { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+
+/* Motion in the list (motion.js): a row that changes group glides there over the rows between, on the page's colour;
+   what a poll changed lights up in the accent's tint; a group's count that changed turns amber for a moment. */
+.sidebar-list > li.motion-moving { background: var(--bg); }
+.sidebar-list > li.changed::after { background: var(--accent-bg); }
+.sidebar-group > summary.changed .group-count { animation: count-flash 1400ms ease-out; }
+@keyframes count-flash { 0%, 40% { color: var(--accent-text); font-weight: 600; } }
+
+.sidebar-group > summary {
+  display: flex; align-items: baseline; gap: 6px; padding: 2px 18px; list-style: none; cursor: pointer;
+  color: var(--text-3); font-size: var(--fs-meta); font-weight: 600; user-select: none;
+}
+.sidebar-group > summary::-webkit-details-marker { display: none; }
+.sidebar-group > summary:hover { color: var(--text); }
+.sidebar-group > summary::before { content: "▸"; width: 8px; font-size: 9px; transition: transform .12s; }
+.sidebar-group[open] > summary::before { transform: rotate(90deg); }
+.sidebar-group .group-count { font-weight: 400; font-variant-numeric: tabular-nums; }
+/* The heading's icon says whose move it is: amber for the user's own, the handed-off arrow's blue for
+   agents, green for finished, grey for work that waits on others. */
+.sidebar-group > summary > .icon { width: 13px; height: 13px; align-self: center; color: var(--text-3); }
+.sidebar-group.queue > summary > .icon { color: var(--accent); }
+/* Inbox's "N more" row (SPEC VIEW-30): the ready-next steps folded into one line in the group heading's grey, set in
+   with the rows' titles. */
+.sidebar-list > li.sidebar-more > .side-row { display: block; padding-left: 40px; color: var(--text-3); font-size: var(--fs-meta); }
+.sidebar-list > li.sidebar-more > .side-row:hover { color: var(--text); }
+.sidebar-group.busy > summary > .icon { color: var(--working); }
+.sidebar-group.done > summary > .icon { color: var(--ok); }
+.sidebar-group.emergency > summary > .icon { color: var(--fail); }
+
+.sidebar-list { list-style: none; margin: 2px 0 0; padding: 0; display: flex; flex-direction: column; gap: 1px; }
+/* The queue's rows while the page catches up after the tab comes back (SPEC UI-60; style.css has the cards and the
+   line's motion): inert (app.js), then blurred and faded under a thin moving line. */
+body.catching-up:not([data-catch-up-kept~="sidebar"]) .sidebar-group.queue .sidebar-list { position: relative; }
+body.catching-up:not([data-catch-up-kept~="sidebar"]) .sidebar-group.queue .sidebar-list > li {
+  transition: filter .25s ease, opacity .25s ease;
+}
+body.catch-up-veiled:not([data-catch-up-kept~="sidebar"]) .sidebar-group.queue .sidebar-list > li {
+  filter: blur(4px) saturate(.6); opacity: .45; user-select: none;
+}
+body.catch-up-veiled:not([data-catch-up-kept~="sidebar"]) .sidebar-group.queue .sidebar-list:not(:empty)::before {
+  content: ""; position: absolute; inset: 0 16px auto 18px; z-index: 1; height: 2px; border-radius: 1px;
+  background: linear-gradient(90deg, transparent 0%, var(--accent) 50%, transparent 100%) 0 0 / 40% 100% no-repeat,
+    var(--line);
+  animation: catch-up-line 1.1s ease-in-out infinite;
+}
+.sidebar-list .side-row {
+  display: grid; grid-template-columns: 14px minmax(0, 1fr); grid-auto-flow: column; grid-auto-columns: auto; column-gap: 8px; align-items: center;
+  width: 100%; padding: 4px 16px 4px 18px; border: 0; border-radius: 0; background: none;
+  color: var(--text); font: inherit; text-align: left; cursor: pointer;
+}
+.sidebar-list a.side-row { text-decoration: none; }
+/* A part of Waiting: a small heading over the rows that wait for the same kind of thing, in the group
+   heading's grey and size, set in under it so it reads as part of Waiting, with a little room above each but the first. */
+.sidebar-list > li.sidebar-sub {
+  display: flex; align-items: baseline; gap: 6px; padding: 6px 16px 1px 32px;
+  color: var(--text-3); font-size: var(--fs-meta); user-select: none; cursor: default;
+}
+.sidebar-list > li.sidebar-sub:first-child { padding-top: 2px; }
+/* The list reaches the rail's edges, where the list's scroll box would cut a focus ring drawn outside the row. */
+.sidebar :is(.side-row, .sidebar-group > summary):focus-visible { outline-offset: -2px; }
+.sidebar-list .side-row:hover { background: var(--hover); }
+/* The keyboard's highlight in the list is the row's own tint and edge, not an outline around the row and its
+   sessions. */
+.sidebar .keyboard-current { outline: none !important; }
+.sidebar-list li.keyboard-current:not(.sel) > .side-row { background: var(--hover); box-shadow: inset 3px 0 0 0 var(--accent-line); }
+.sidebar-list li.sel:not(.warn-row) > .side-row { background: var(--picked-bg); color: var(--picked-text); }
+.sidebar-list li.sel:not(.warn-row) .sidebar-age { color: var(--picked-text-2); }
+.sidebar-list li.sel:not(.warn-row) .sidebar-draft { color: var(--picked-accent); }
+.sidebar-list li.sel.urgent .sidebar-title { color: var(--picked-fail); }
+.sidebar-list li.sel .sidebar-working { background: var(--picked-working); }
+/* The Cockpit logo is amber too, so on the picked row it gets a thin ring in the row's words' colour. */
+.sidebar-list li.sel:not(.warn-row) .sidebar-lead .cockpit-mark { box-shadow: 0 0 0 1px var(--picked-text); }
+.sidebar-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--fs-body); line-height: 20px; }
+/* The row's start holds the Cockpit tag on an item of Cockpit's own work: its key alone, as in the other compact
+   lists (UI-43), and nothing on other work, so every title starts at the same place. */
+.sidebar-lead { display: grid; place-items: center; }
+.sidebar-lead > .chip.cockpit { padding: 0; box-shadow: none; background: none; }
+.sidebar-lead > .chip.cockpit > .chip-words { display: none; }
+/* A project's logo (SPEC VIEW-34) leads each task's row: the logo Cockpit designed, or until then the project's first
+   letter on a grey square. Both are the Cockpit mark's size and corners, and get its ring on the picked row. */
+.project-logo { display: block; flex: none; width: 14px; height: 14px; border-radius: var(--radius-xs); }
+.project-letter {
+  display: grid; place-items: center; background: color-mix(in oklab, var(--text-3), transparent 72%); color: var(--text);
+  font: 700 9px/1 var(--sans); letter-spacing: 0; user-select: none;
+}
+.sidebar-list li.sel:not(.warn-row) .sidebar-lead .project-logo { box-shadow: 0 0 0 1px var(--picked-text); }
+/* Inbox's settings key sits at the heading's right, quiet until the heading is hovered or the key focused. */
+.sidebar-group > summary > .inbox-settings-open { margin: -3px -8px -3px auto; align-self: center; color: var(--text-3); }
+.sidebar-group > summary > .inbox-settings-open .icon { width: 13px; height: 13px; }
+.sidebar-group > summary:not(:hover) > .inbox-settings-open:not(:focus-visible) { opacity: .55; }
+/* An item holding words the user did not send: a pencil in the user's amber before its age. */
+.sidebar-draft { display: inline-flex; color: var(--accent-text); }
+.sidebar-draft[hidden] { display: none; }
+.sidebar-draft .icon { width: 13px; height: 13px; }
+/* A snoozed step in Waiting: a small clock in the user's amber before the time until it wakes. */
+.sidebar-snoozed { display: inline-flex; color: var(--accent-text); }
+.sidebar-snoozed .icon { width: 13px; height: 13px; }
+.sidebar-list li.sel:not(.warn-row) .sidebar-snoozed { color: var(--picked-accent); }
+.sidebar-age { color: var(--text-3); font-size: var(--fs-meta); font-variant-numeric: tabular-nums; }
+.sidebar-list li.urgent .sidebar-title, .sidebar-list li.high .sidebar-title { font-weight: 600; }
+.sidebar-list li.urgent .sidebar-title { color: var(--fail); }
+
+/* While one of its sessions works, a row ends with a small dot that fades slowly down and back, with no ring (UI-49). */
+.sidebar-working { width: 6px; height: 6px; border-radius: 50%; background: var(--working); animation: lamp-pulse 2.4s ease-in-out infinite; }
+
+/* The emergency session (SESSION-21) stands apart in red, so it is found at once when it is needed. */
+.sidebar-group.emergency > summary, .sidebar-group.emergency > summary:hover { color: var(--fail); }
+.sidebar-group.emergency .side-row { background: var(--fail-bg); box-shadow: inset 3px 0 0 0 var(--fail); }
+.sidebar-group.emergency .side-row:hover { background: var(--fail-bg); box-shadow: inset 3px 0 0 0 var(--fail), inset 0 0 0 1px var(--fail-line); }
+.sidebar-group.emergency .sidebar-working { background: var(--fail); }
+.sidebar-list li.emergency-row { position: relative; }
+.sidebar-list li.emergency-row > .side-row { padding-right: 44px; }
+.sidebar-list .emergency-close { position: absolute; top: 50%; right: 12px; transform: translateY(-50%); color: var(--fail); }
+
+/* The main column: the card fills the page's height beside the rail, and the reply box stays at the bottom of the
+   screen while the step scrolls above it */
+body[data-layout="sidebar"] .layout > .primary {
+  --section-gap: 12px;
+  width: 100%;
+  max-width: calc(var(--measure) + 88px);
+  margin-inline: auto;
+  min-height: 100vh;
+  min-height: 100dvh;
+  padding: 12px 20px;
+}
+/* Warnings head the card column as cards, ahead of every step (SPEC UI-52), so the rail stays at the top of the page. */
+body[data-layout="sidebar"] .primary > .banner-area { max-width: none; margin: 0 0 4px; padding: 0; display: flex; flex-direction: column; gap: 10px; }
+body[data-layout="sidebar"] .primary > .banner-area > :is(.banner, .warn-card) { margin-top: 0; }
+body[data-layout="sidebar"]:not(.viewing-session) #next:not(:empty), body[data-layout="sidebar"] #session-view:not(:empty) { flex: 1 0 auto; display: flex; flex-direction: column; }
+body[data-layout="sidebar"] #next > .next-card, body[data-layout="sidebar"] #session-view > .session-card { flex: 1 0 auto; display: flex; flex-direction: column; }
+/* The copy a close or Send moves off the page  is laid out as the card was, its reply box at the bottom. */
+body[data-layout="sidebar"] .close-copy.next-card { display: flex; flex-direction: column; }
+/* The main column is the page itself, not a card on it: no frame and no lift, on the page's own colour,
+   set apart from the rail by the rail's colour. The reply box is the one framed field in it. */
+body[data-layout="sidebar"] :is(.next-card, .session-card) { border-radius: 0; background: none; box-shadow: none; }
+/* The main column always shows the one picked task, so it carries no mark of being picked: no orange
+   stripe while its clock runs, no J/K outline. The sidebar row says which task it is. */
+body[data-layout="sidebar"] .next-card.on-clock::after { position: static; inset: auto; border-radius: 0; box-shadow: none; border: 0; }
+/* With no card there is no corner to mark; the reply box stays on screen, and the chip and the row's pencil say it. */
+body[data-layout="sidebar"] .next-card > .draft-corner { display: none; }
+body[data-layout="sidebar"] .next-card { padding: 20px 24px 12px; }
+body[data-layout="sidebar"] .next-card > * { flex: none; }
+/* The row sits in the flow, not stuck to the screen's bottom; its menus open as a sheet across it on a phone. */
+body[data-layout="sidebar"] .next-card > .actions {
+  position: relative; margin: 12px 0 0; padding: 0; background: none; box-shadow: none;
+}
+body[data-layout="sidebar"] .next-card > .actions::before { content: none; }
+/* The reply box: the free space in the card (at least 12 px) goes above it, so it ends the card, and it holds at
+   the screen's bottom while the card runs below it. The ring of card colour round it covers the text that scrolls
+   under it. */
+body[data-layout="sidebar"] .next-card::after { content: ""; order: 1; flex: 1 0 12px; }
+body[data-layout="sidebar"] .next-card > .composer { order: 2; }
+body[data-layout="sidebar"] .next-card > .composer { --ring: 12px; position: sticky; bottom: var(--ring); z-index: 3; margin: 0; }
+/* On the page's colour the reply box is a plain white field in a hairline frame. */
+body[data-layout="sidebar"] :is(.next-card, .session-composer) > .composer:not(.drafted) {
+  border-radius: var(--radius-sm); background: var(--surface); box-shadow: inset 0 0 0 1px var(--line);
+}
+body[data-layout="sidebar"] .next-card > .composer::before {
+  content: ""; position: absolute; inset: calc(-1 * var(--ring)); z-index: -1;
+  border: var(--ring) solid var(--bg); pointer-events: none;
+}
+body[data-layout="sidebar"] .next-card > .details { margin: 12px 0; border-top: 0; }
+body[data-layout="sidebar"] .next-card > .details > .detail { border-bottom: 0; }
+body[data-layout="sidebar"] .next-card > .history { padding-bottom: 0; border-bottom: 0; }
+
+/* An item with no step for the user, laid out as a step: its
+   controls end the card in place of a step's keys and stay where they are. */
+.item-card > .step-context > .context-marks { gap: 6px; }
+.item-card > .item-note { margin: 0 0 12px; }
+.item-card > .item-actions { position: static; margin: 16px 0 0; padding: 0; box-shadow: none; }
+.item-card > .item-actions::before { content: none; }
+.item-card > .item-actions .item-controls { flex: 1 1 auto; margin: 0; }
+.item-card > .item-actions > .close-item { margin-left: auto; }
+.item-card > .session-list { margin-top: 8px; }
+.handed-note { display: flex; flex-direction: column; gap: 6px; margin: 0 0 16px; padding: 12px 14px; border-radius: var(--radius); background: var(--working-bg); }
+.handed-ask { margin: 0; font-weight: 600; }
+.handed-words { display: flex; flex-direction: column; gap: 2px; margin: 0; }
+.handed-label { color: var(--text-3); font-size: var(--fs-meta); }
+.handed-text { white-space: pre-wrap; }
+.handed-note > .button { align-self: flex-start; }
+.new-session-box { margin-bottom: 16px; }
+
+/* The session view: one session's conversation in place of the card. */
+/* The permission and dialog cards above stay: the session may wait on one of them. */
+body.viewing-session #next { display: none; }
+/* Opening a session and going back (sidebar.js, slideView): the session's view comes in from the right while the
+   card leaves to the left, and back the other way, in 240 ms. The rail stays still. */
+:root[data-slide] body:not(.viewing-session) #next, :root[data-slide] body.viewing-session #session-view { view-transition-name: main-panel; }
+:root[data-slide]::view-transition-old(root), :root[data-slide]::view-transition-new(root) { animation: none; }
+:root[data-slide]::view-transition-group(main-panel) { animation-duration: var(--dur-move); animation-timing-function: var(--ease-out); }
+:root[data-slide]::view-transition-old(main-panel) { animation: var(--dur-exit) ease-in both panel-leave; }
+:root[data-slide]::view-transition-new(main-panel) { animation: var(--dur-move) var(--ease-out) both panel-enter; }
+:root[data-slide="in"] { --leave-x: -32px; --enter-x: 64px; }
+:root[data-slide="back"] { --leave-x: 64px; --enter-x: -32px; }
+@keyframes panel-leave { to { opacity: 0; transform: translateX(var(--leave-x)); } }
+@keyframes panel-enter { from { opacity: 0; transform: translateX(var(--enter-x)); } }
+@media (prefers-reduced-motion: reduce) {
+  :root[data-slide] { --leave-x: 0px; --enter-x: 0px; }
+}
+#session-view:empty { display: none; }
+.session-card { position: relative; padding: 0; overflow: clip; }
+body[data-layout="sidebar"] .session-card > .session-log { flex: 1 0 auto; }
+.session-head {
+  position: sticky; top: calc(var(--top-h, var(--header-h)) + 0px); z-index: 3;
+  display: flex; align-items: center; gap: 12px; padding: 12px 20px; flex-wrap: wrap;
+  background: var(--bg); box-shadow: 0 1px 0 0 var(--line);
+}
+.session-head > .button:first-child .label { max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.session-name { display: flex; align-items: center; gap: 8px; flex: 1 1 240px; min-width: 0; }
+.session-name strong { flex: none; max-width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.session-meta { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-3); font-size: var(--fs-meta); }
+
+.session-log { display: flex; flex-direction: column; gap: 14px; padding: 20px 28px 28px; max-width: 54rem; }
+.session-log > .note { margin: 0; color: var(--text-3); font-size: var(--fs-meta); }
+.log-who { display: block; margin-bottom: 4px; color: var(--text-3); font-size: var(--fs-meta); }
+.log-instruction { align-self: flex-end; max-width: 85%; padding: 10px 14px; border-radius: var(--radius); background: var(--accent-bg); box-shadow: inset 0 0 0 1px var(--accent-line); }
+.log-instruction.other { align-self: stretch; max-width: none; background: var(--surface-2); box-shadow: inset 0 0 0 1px var(--line); }
+.log-text { white-space: pre-wrap; overflow-wrap: anywhere; font-size: var(--fs-body); line-height: 21px; max-height: 24em; overflow-y: auto; }
+.log-says { font-size: var(--fs-read); line-height: 24px; }
+.log-says > :last-child { margin-bottom: 0; }
+.log-time { margin: -10px 0 0; color: var(--text-4); font-size: var(--fs-meta); }
+
+.log-calls { border-radius: var(--radius-sm, 6px); }
+.log-calls > summary, .log-call > summary {
+  display: flex; align-items: baseline; gap: 8px; padding: 3px 8px; list-style: none; cursor: pointer;
+  color: var(--text-3); font-size: var(--fs-meta); line-height: 18px; border-radius: var(--radius-xs, 4px);
+}
+.log-calls > summary::-webkit-details-marker, .log-call > summary::-webkit-details-marker { display: none; }
+.log-calls > summary::before, .log-call > summary::before { content: "▸"; font-size: 9px; transition: transform .12s; }
+.log-calls[open] > summary::before, .log-call[open] > summary::before { transform: rotate(90deg); }
+.log-calls > summary:hover, .log-call > summary:hover { background: var(--hover); color: var(--text-2); }
+.log-calls[open] { background: var(--surface-2); box-shadow: inset 0 0 0 1px var(--line); padding-bottom: 4px; }
+.log-calls > .log-call { margin: 0 4px 0 18px; }
+.log-tool { flex: none; color: var(--text-2); font-weight: 600; }
+.log-call-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--mono); }
+.log-call[open] > summary .log-call-title { white-space: normal; overflow-wrap: anywhere; }
+.log-call.failed > summary .log-tool { color: var(--fail); }
+.log-in, .log-out {
+  margin: 4px 8px 8px 18px; padding: 8px 10px; max-height: 22em; overflow: auto;
+  font: var(--fs-meta)/1.45 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere;
+  background: var(--surface); box-shadow: inset 0 0 0 1px var(--line); border-radius: var(--radius-xs, 4px);
+}
+.log-out { color: var(--text-2); }
+.log-call.failed .log-out { color: var(--fail); }
+.log-aside { padding: 10px 14px; border-radius: var(--radius); box-shadow: inset 0 0 0 1px var(--line); }
+.log-question { margin: 0 0 6px; font-weight: 600; }
+.log-working { display: flex; align-items: center; gap: 8px; margin: 0; color: var(--working); font-size: var(--fs-meta); }
+
+.session-composer {
+  position: sticky; bottom: 0; z-index: 3; padding: 12px 20px 16px;
+  background: var(--bg);
+}
+.new-activity { position: fixed; bottom: 120px; left: 50%; transform: translateX(-50%); z-index: 4; box-shadow: var(--shadow-card); }
+
+@media (prefers-reduced-motion: reduce) {
+  .sidebar-group > summary::before, .log-calls > summary::before, .log-call > summary::before { transition: none; }
+  .sidebar-working { animation: none; }
+}
+
+/* On a phone the rail sits above the card, its list at most a quarter of the screen high. */
+@media (max-width: 1000px) {
+  body[data-layout="sidebar"] .layout { grid-template-columns: minmax(0, 1fr); row-gap: 0; }
+  .rail { position: static; height: auto; padding: 8px 8px 0; }
+  .rail .sidebar { flex: none; max-height: 24vh; }
+  body[data-layout="sidebar"] .layout > .primary { padding: 8px 16px; }
+  body[data-layout="sidebar"] .next-card { padding: 16px 16px 8px; }
+  body[data-layout="sidebar"] .next-card > .composer { --ring: 8px; }
+  /* The top bar's phone rules order and stretch these; in the rail's foot they keep their places. */
+  .rail-line > #usage, .rail-keys > * { order: 0; }
+  .rail-line > #usage { flex: 1 1 140px; margin: 0; }
+  /* The top bar's phone rules hide Feedback and give icon keys a header key's width; at the rail's top Feedback
+     shows, and both keys keep the small key's size. */
+  .rail-actions > #feedback-mode { display: inline-flex; }
+  .rail-actions > :is(#feedback-mode, .button.icon-only) { width: 32px; }
+  .session-log { padding: 16px; }
+  .session-head { padding: 10px 12px; }
+  .session-name { flex-wrap: wrap; row-gap: 0; }
+  .session-meta { flex-basis: 100%; padding-left: 16px; }
+  .session-composer { padding: 10px 12px 12px; }
+  .log-instruction { max-width: 100%; }
+}
+
+/* On a phone the list and the item are two screens. The item screen has the
+   page to itself under a slim bar that goes to the list; the list screen has the rail to itself, its list at full
+   length and its foot held at the screen's bottom. Opening one slides it in as a session's view slides in. */
+.phone-bar { display: none; }
+@media (max-width: 1000px) {
+  body[data-layout="sidebar"] .layout > .primary { padding: 0 16px 8px; }
+  /* The page is the card here, under the bar's line: no hairlines of a card of its own (look.css draws them on the
+     classic page), and no gap for warnings while there are none. */
+  :root body[data-layout="sidebar"] #next > .next-card { padding: 4px 16px 8px; box-shadow: none; }
+  body[data-layout="sidebar"] .phone-bar + .banner-area:empty { display: none; }
+  body[data-layout="sidebar"] .phone-bar {
+    position: sticky; top: 0; z-index: 4;
+    display: flex; align-items: center; gap: 6px; min-height: 48px; margin: 0 -16px; padding: 0 12px 0 4px;
+    background: var(--bg); box-shadow: 0 1px 0 0 var(--line);
+  }
+  /* A conversation keeps the bar, with Reload and Add; its own head stands under it. */
+  body[data-layout="sidebar"] .session-head { top: 48px; }
+  .phone-back { height: 40px; margin-right: auto; padding: 0 10px 0 8px; gap: 6px; background: none; box-shadow: none; color: var(--text); font-weight: 600; }
+  .phone-back > .icon { width: 16px; height: 16px; }
+  .phone-count {
+    min-width: 20px; height: 20px; padding: 0 6px; border-radius: 10px; background: var(--accent-bg); color: var(--accent-text);
+    font-size: var(--fs-meta); font-weight: 600; line-height: 20px; text-align: center; font-variant-numeric: tabular-nums;
+  }
+  .phone-count[hidden] { display: none; }
+  .phone-reload[hidden] { display: none; }
+  .phone-add { width: 40px; height: 40px; }
+
+  /* The item screen: the rail is out of sight. */
+  body[data-layout="sidebar"]:not(.phone-list) .rail { display: none; }
+
+  /* The list screen: the column keeps only its warnings, above the rail. */
+  body[data-layout="sidebar"].phone-list .layout > .primary { order: -1; min-height: 0; padding: 0; }
+  /* The card's own rules show it with an id's weight, so the screen's hiding is marked important. */
+  body[data-layout="sidebar"].phone-list .layout > .primary > :not(.banner-area) { display: none !important; }
+  body[data-layout="sidebar"].phone-list .layout > .primary > .banner-area:not(:empty) { padding: 8px 16px 0; background: var(--margin); }
+  body.phone-list .rail { min-height: 100vh; min-height: 100dvh; padding: 8px 8px 0; }
+  body.phone-list .rail .sidebar { flex: 1 0 auto; max-height: none; overflow: visible; }
+  body.phone-list .rail-foot { position: sticky; bottom: 0; z-index: 3; background: var(--margin); }
+  body.phone-list .sidebar-list .side-row { min-height: 44px; }
+  :root[data-slide] body.phone-list .rail { view-transition-name: main-panel; }
+}
+
+/* A row that came into Busy in the last minute, at the top of Busy:
+   it breathes slowly between the accent's tint and a deeper one, with an accent edge, so it is easy to find and act on. The pulse keeps time with
+   the page's clock across redraws (app.js `keepPulses`). The picked row keeps its picked colours instead (UI-58);
+   with reduced motion the tint holds still. */
+.sidebar-list > li.fresh:not(.sel) > .side-row {
+  box-shadow: inset 3px 0 0 0 var(--accent);
+  animation: fresh-pulse 2.4s ease-in-out infinite alternate;
+}
+@keyframes fresh-pulse {
+  from { background-color: var(--accent-bg); }
+  to { background-color: color-mix(in oklab, var(--accent-bg), var(--accent) 22%); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .sidebar-list > li.fresh:not(.sel) > .side-row { animation: none; background-color: var(--accent-bg); }
+}
+
+/* Warnings (SPEC UI-52): each is a row at the top of Inbox, drawn as the other rows are, in the page's own red:
+   a pale red ground that pulses, red words, and the mark in its lead slot in the page's text colour, dark on the
+   light page and light on the dark one, so it reads at a glance */
+:root {
+  --warn-deep: oklch(0.40 0.14 27);
+  --warn-bright: oklch(0.52 0.19 27);
+  --warn-on: oklch(0.97 0.012 27);
+}
+@keyframes warn-pulse { from { background-color: var(--warn-deep); } to { background-color: var(--warn-bright); } }
+@keyframes warn-row-pulse {
+  from { background-color: var(--fail-bg); }
+  to { background-color: color-mix(in oklab, var(--fail-bg), var(--fail) 12%); }
+}
+.sidebar-list li.warn-row > .side-row {
+  background: var(--fail-bg); color: var(--fail);
+  animation: warn-row-pulse 1.4s ease-in-out infinite alternate;
+}
+.sidebar-list li.warn-row .sidebar-title { font-weight: 600; color: var(--fail); }
+.sidebar-list li.warn-row .sidebar-lead > .icon { width: 13px; height: 13px; color: var(--text); }
+.sidebar-list li.warn-row > .side-row:hover { box-shadow: inset 3px 0 0 0 var(--fail); }
+.sidebar-list li.warn-row.sel > .side-row { background: var(--picked-bg); animation: none; }
+.sidebar-list li.warn-row.sel .sidebar-title { color: var(--picked-fail); }
+.sidebar-list li.warn-row.sel .sidebar-lead > .icon { color: var(--picked-text); }
+.sidebar-list li.warn-row > .side-row:focus-visible { outline: 2px solid var(--fail); outline-offset: -2px; }
+
+/* The arrows in the Resorted key's place on Next up's top edge, and under them, on hover or focus, a small card
+   with the next warning's few words and its fix. The card meets the key's lower edge, so the pointer can move
+   onto its button without the card closing. */
+:root .resorted-pin > .reorder.warn-key {
+  width: 28px; height: 28px; padding: 0; justify-content: center; border: 0;
+  transform: translateY(-50%); border-radius: var(--radius-sm);
+  background: var(--warn-deep); color: var(--warn-on); box-shadow: var(--shadow-flat);
+  animation: warn-pulse 1.4s ease-in-out infinite alternate;
+}
+:root .resorted-pin > .reorder.warn-key > .icon { width: 16px; height: 16px; color: currentColor; }
+:root .resorted-pin > .reorder.warn-key:focus-visible { outline: 2px solid var(--warn-bright); outline-offset: 2px; }
+.warn-pin > .warn-peek {
+  position: absolute; top: 14px; right: 22px; z-index: 8; display: none;
+  width: max-content; max-width: min(320px, calc(100vw - 32px)); padding: 10px 12px;
+  border-radius: var(--radius-lg); background: var(--surface-pop);
+  box-shadow: var(--shadow-pop), inset 0 0 0 1px var(--fail-line);
+}
+.warn-pin:hover > .warn-peek, .warn-pin:focus-within > .warn-peek, .warn-pin.peek-open > .warn-peek { display: block; }
+.warn-peek-title { display: flex; align-items: center; gap: 6px; margin: 0; color: var(--text); font-size: var(--fs-body); font-weight: 600; line-height: 20px; }
+.warn-peek-title > .icon { flex: none; width: 14px; height: 14px; color: var(--fail); }
+.warn-peek-actions { display: flex; gap: 6px; margin-top: 8px; }
+.warn-peek-more { margin: 6px 0 0; color: var(--text-3); font-size: var(--fs-meta); }
+/* On Next up the Resorted key and these arrows line up with the card's ⋯ key. On a wide page the ⋯
+   stands 24 px inside the card and 20 px under its top edge, so the 28 px key on the edge stands 22 px in, over the
+   ⋯ and sharing its middle. Up to 1000 px the card's marks stand on its top edge, ⋯ last and 16 px inside the card,
+   with no room above them: the key takes the marks' 24 px at the row's end, its middle on theirs, and the row
+   leaves it that place, the ⋯ 20 px off it so their 44 px tap areas meet without overlapping, as the marks' do
+   (the slot is 44 px less the row's gap). Up to 640 px the card reaches 16 px past #next on each side, so the key
+   stands at #next's edge. Scrolled, the key rides 8 px under the 48 px phone bar, clear of its Add key. The small
+   card hangs from the key's lower edge, its right edge on the key's. */
+body[data-layout="sidebar"] #next > .resorted-pin { padding-right: 22px; }
+@media (max-width: 1000px) {
+  body[data-layout="sidebar"] #next > .resorted-pin { top: 56px; padding-right: 16px; }
+  body[data-layout="sidebar"] #next > .resorted-pin > .reorder { width: 24px; height: 24px; transform: translateY(calc(-50% + 16px)); }
+  body[data-layout="sidebar"] #next:has(> .resorted-pin) > .next-card > .step-context > .context-marks::after { content: ""; flex: none; width: 40px; }
+  .warn-pin > .warn-peek { right: 16px; top: 28px; }
+}
+@media (max-width: 640px) {
+  body[data-layout="sidebar"] #next > .resorted-pin { padding-right: 0; }
+  body[data-layout="sidebar"] #next:has(> .resorted-pin) > .next-card > .step-context > .context-marks::after { width: 38px; }
+  .warn-pin > .warn-peek { right: 0; }
+}
+
+/* An opened warning is a step card; its mark before the words pulses as its row does. */
+.warn-step .warn-step-mark {
+  display: inline-grid; place-items: center; width: 26px; height: 26px; margin-right: 10px; vertical-align: 3px;
+  border-radius: var(--radius-sm); background: var(--warn-deep); color: var(--warn-on);
+  animation: warn-pulse 1.4s ease-in-out infinite alternate;
+}
+.warn-step .warn-step-mark > .icon { width: 15px; height: 15px; }
+.warn-step > .warn-extra { margin-top: 12px; }
+.warn-step > .answers { margin-top: 16px; }
+/* Its ⋯ menu sits at the card's top right, where a step's sits (SPEC UI-72). A snooze asks once more inside the menu. */
+.warn-step > .warn-step-head { position: absolute; top: 18px; right: 18px; }
+.warn-step > .warn-step-head + .ask { padding-right: 28px; }
+.warn-step > .warn-snoozed-note { display: flex; align-items: center; gap: 6px; margin: 8px 0 0; color: var(--accent-text); font-size: var(--fs-meta); }
+.warn-step > .warn-snoozed-note .icon { width: 14px; height: 14px; }
+.sidebar-list li.warn-snoozed .sidebar-lead { color: var(--text-3); }
+.warn-menu .warn-snooze-confirm { display: flex; flex-direction: column; gap: 8px; padding: 6px 4px 8px; max-width: 300px; }
+.warn-menu .warn-snooze-confirm > .menu-note { margin: 0; padding: 0 4px; color: var(--text-2); font-size: var(--fs-meta); line-height: 18px; }
+.warn-menu .warn-snooze-keys { display: flex; gap: 6px; padding: 0 4px; }
+.warn-menu .warn-snooze-keys > .button { display: inline-flex; align-items: center; justify-content: center; width: auto; min-height: 30px; padding: 0 12px; }
+
+@media (prefers-reduced-motion: reduce) {
+  .sidebar-list li.warn-row > .side-row, :root .resorted-pin > .reorder.warn-key, .warn-step .warn-step-mark { animation: none; }
+}
+
+/* A to-do whose Add waits for its Undo time: the row in Busy is one Undo button in the accent's tint.
+   A deeper tint fills it and runs down from right to left over the time (`--undo-ms`); `--undo-delay` picks it up
+   where the last drawing of the row left it. The title stays readable, quieter, between Undo and the seconds left. */
+.sidebar-list .side-row.undo-add {
+  position: relative; isolation: isolate; overflow: hidden;
+  grid-template-columns: 14px auto minmax(0, 1fr) auto;
+  background: var(--accent-bg); box-shadow: inset 0 0 0 1px var(--accent-line); color: var(--accent-text);
+}
+.sidebar-list .side-row.undo-add:hover { background: color-mix(in oklab, var(--accent-bg), var(--accent) 10%); }
+.sidebar-list .side-row.undo-add:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.undo-add-fill {
+  position: absolute; inset: 0; z-index: -1; transform-origin: left center;
+  background: color-mix(in oklab, var(--accent-bg), var(--accent) 24%);
+  animation: undo-run-down var(--undo-ms, 6s) linear var(--undo-delay, 0ms) both;
+}
+@keyframes undo-run-down { from { transform: scaleX(1); } to { transform: scaleX(0); } }
+.undo-add .sidebar-lead .icon { color: var(--accent); }
+.undo-add-label { font-weight: 600; }
+.undo-add .sidebar-title { color: var(--text-2); }
+.undo-add-secs { font-variant-numeric: tabular-nums; font-size: 0.85em; color: var(--accent-text); }
+/* While Busy is folded, the held to-do lights up Busy's heading. The whole line takes the
+   held row's tint; Busy's icon and name stay. The count rolls slowly from the
+   number before the Add up to the new one (the old one rises out, the new one rises in), starting as the Add box's
+   flight lands; the new number then stays bold in the accent and pulses. A small Undo with the seconds left sits at
+   the heading's right; a press undoes and leaves Busy folded. `--since` (time since the Add, negative) lets a redraw
+   pick the roll up where it was. Once Busy is open the heading is plain again and the row in the list is the Undo. */
+.sidebar-group > summary { position: relative; }
+.sidebar-group:not([open]) > summary.holding {
+  isolation: isolate; overflow: hidden;
+  background: var(--accent-bg); box-shadow: inset 0 0 0 1px var(--accent-line); color: var(--accent-text);
+  animation: hold-light 900ms ease-out calc(380ms + var(--since, 0ms)) both;
+}
+.sidebar-group:not([open]) > summary.holding > .icon { color: var(--accent); }
+@keyframes hold-light { from { background: color-mix(in oklab, var(--accent-bg), var(--accent) 45%); } }
+.count-roll {
+  display: inline-grid; justify-items: center; min-width: 1.4em;
+  /* Clips the numbers rising in and out at the line's top and bottom, and leaves room at the sides for the pulse. */
+  clip-path: inset(0 -10px);
+}
+.count-roll > span { grid-area: 1 / 1; }
+.count-roll > .count-was { animation: count-out 1300ms cubic-bezier(.5,0,.3,1) calc(450ms + var(--since, 0ms)) both; }
+.count-roll > .count-now {
+  font-weight: 700; color: var(--accent); transform-origin: center;
+  animation: count-in 1300ms cubic-bezier(.5,0,.3,1) calc(450ms + var(--since, 0ms)) both,
+    count-pulse 850ms ease-in-out calc(1750ms + var(--since, 0ms)) infinite alternate;
+}
+@keyframes count-out { 0%, 35% { opacity: 1; } 85% { opacity: 0; } to { transform: translateY(-115%); opacity: 0; } }
+@keyframes count-in { from { transform: translateY(115%); opacity: 0; } 15% { opacity: 0; } 65% { opacity: 1; } }
+@keyframes count-pulse {
+  from { transform: scale(1); text-shadow: none; }
+  to { transform: scale(1.22); text-shadow: 0 0 6px color-mix(in oklab, var(--accent), transparent 40%); }
+}
+/* The bar runs down inside the Undo only: the button is a light tint and the bar a deeper one over it. */
+.busy-undo {
+  position: relative; isolation: isolate; overflow: hidden;
+  display: inline-flex; align-items: center; gap: 4px; align-self: center; margin-left: auto; padding: 0 7px;
+  border: 0; border-radius: var(--radius-sm, 6px);
+  background: color-mix(in oklab, var(--accent-bg), var(--accent) 8%); color: var(--accent-text);
+  box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--accent-line), var(--accent) 30%);
+  font: inherit; font-weight: 600; line-height: 18px; cursor: pointer;
+}
+.busy-undo:hover { background: color-mix(in oklab, var(--accent-bg), var(--accent) 16%); }
+.busy-undo > .busy-undo-fill { background: color-mix(in oklab, var(--accent-bg), var(--accent) 34%); }
+.busy-undo:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.busy-undo > .icon { width: 12px; height: 12px; color: var(--accent); }
+.busy-undo > .undo-add-secs { font-weight: 400; }
+/* Open, the heading reads Busy and its count as always. */
+.sidebar-group[open] > summary :is(.busy-undo, .busy-reopened, .count-was) { display: none; }
+.busy-reopened { flex: none; font-size: .86em; font-weight: 600; color: var(--accent-text); white-space: nowrap; }
+.sidebar-group[open] > summary > .count-roll > .count-now { animation: none; font-weight: inherit; color: inherit; }
+@media (prefers-reduced-motion: reduce) {
+  .sidebar-group:not([open]) > summary.holding { animation: none; }
+  .count-roll > .count-was { display: none; }
+  .count-roll > .count-now { animation: none; }
+}
+/* A close's Undo in Finished this week: the same row and heading as an Add's Undo, in the close's plum. */
+.sidebar-list .side-row.undo-close { background: var(--complete-bg); box-shadow: inset 0 0 0 1px var(--complete-line); color: var(--complete-text); }
+.sidebar-list .side-row.undo-close:hover { background: color-mix(in oklab, var(--complete-bg), var(--complete) 10%); }
+.sidebar-list .side-row.undo-close:focus-visible { outline-color: var(--complete); }
+.undo-close > .undo-add-fill { background: color-mix(in oklab, var(--complete-bg), var(--complete) 24%); }
+.undo-close .sidebar-lead .icon { color: var(--complete); }
+.undo-close .undo-add-secs { color: var(--complete-text); }
+.sidebar-group.done:not([open]) > summary.holding {
+  background: var(--complete-bg); box-shadow: inset 0 0 0 1px var(--complete-line); color: var(--complete-text);
+  animation-name: hold-light-close;
+}
+.sidebar-group.done:not([open]) > summary.holding > .icon { color: var(--complete); }
+@keyframes hold-light-close { from { background: color-mix(in oklab, var(--complete-bg), var(--complete) 45%); } }
+/* After a close the new count pulses once, up and back, then stays bold in plum while the Undo lasts. */
+.sidebar-group.done .count-roll > .count-now {
+  color: var(--complete); animation-name: count-in, count-pulse-close; animation-iteration-count: 1, 2;
+}
+@keyframes count-pulse-close {
+  from { transform: scale(1); text-shadow: none; }
+  to { transform: scale(1.22); text-shadow: 0 0 6px color-mix(in oklab, var(--complete), transparent 40%); }
+}
+.sidebar-group.done .busy-undo {
+  background: color-mix(in oklab, var(--complete-bg), var(--complete) 8%); color: var(--complete-text);
+  box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--complete-line), var(--complete) 30%);
+}
+.sidebar-group.done .busy-undo:hover { background: color-mix(in oklab, var(--complete-bg), var(--complete) 16%); }
+.sidebar-group.done .busy-undo > .busy-undo-fill { background: color-mix(in oklab, var(--complete-bg), var(--complete) 34%); }
+.sidebar-group.done .busy-undo:focus-visible { outline-color: var(--complete); }
+.sidebar-group.done .busy-undo > .icon { color: var(--complete); }
+.sidebar-group.done .busy-undo > .undo-add-secs { color: var(--complete-text); }
+/* The heading keeps one line in the list's width: the Undo keeps its words together, and the group's name gives up
+   its end first ("Finished this w…"). */
+.sidebar-group > summary.holding > .sidebar-group-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sidebar-group > summary.holding > .busy-undo { flex: none; white-space: nowrap; }
+@media (prefers-reduced-motion: reduce) {
+  .sidebar-group.done .count-roll > .count-now { animation: none; }
+}
+/* The row, or the heading's Undo, waits under the Add box's flight and shows once it lands. */
+.sidebar-list > li.landing > .side-row, .sidebar-group > summary.landing > .busy-undo { visibility: hidden; }
+/* The Add box on its way into the new row: a panel in the row's colours that shrinks onto it, then fades. */
+.add-flight {
+  position: fixed; z-index: 70; pointer-events: none; overflow: hidden; box-sizing: border-box;
+  display: flex; align-items: center; padding: 4px 10px;
+  border-radius: var(--radius-sm, 6px); background: var(--accent-bg); color: var(--accent-text);
+  box-shadow: inset 0 0 0 1px var(--accent-line), 0 8px 24px oklch(0 0 0 / .18);
+}
+.add-flight > span { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-weight: 600; }

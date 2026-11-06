@@ -1,0 +1,7 @@
+.venv/
+__pycache__/
+*.pyc
+.claude/worktrees/
+/data/
+.pytest_cache/
+node_modules/

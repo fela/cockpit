@@ -1,0 +1,472 @@
+/* The spec page (spec.html, spec.js). It loads after style.css and motion.css and uses their
+   tokens and shared parts: buttons, chips, counts, menus, banners, the toast. */
+
+.spec-layout {
+  max-width: 1320px;
+  margin: 0 auto;
+  padding: 16px var(--page-gutter) 48px;
+  display: grid;
+  grid-template-columns: 208px minmax(0, 1fr);
+  gap: 40px;
+  align-items: start;
+}
+/* spec.js measures the sticky header into --spec-top, and the header plus the narrow screens'
+   chip row into --spec-cover; the header's height changes with the width. */
+.spec-toc {
+  position: sticky;
+  top: calc(var(--spec-top, var(--header-h)) + 16px);
+  font-size: var(--fs-meta);
+  max-height: calc(100vh - var(--spec-top, var(--header-h)) - 40px);
+  overflow: auto;
+  scrollbar-width: thin;
+}
+/* A faint rail along the links; the marker on it shows the section in view. */
+.toc-links { position: relative; display: flex; flex-direction: column; gap: 1px; padding-left: 6px; }
+.toc-links::before { content: ""; position: absolute; top: 0; bottom: 0; left: 0; width: 1px; background: var(--line); }
+.spec-toc a {
+  display: flex;
+  gap: 8px;
+  justify-content: space-between;
+  align-items: center;
+  padding: 4px 8px;
+  border-radius: var(--radius-sm);
+  color: var(--text-2);
+  text-decoration: none;
+  transition: color var(--dur-press) var(--ease-out);
+}
+.spec-toc a.sub { padding-left: 20px; color: var(--text-3); }
+.spec-toc a[aria-current] { color: var(--text); }
+/* A section the doc does not show right now (a status filter is on). */
+.spec-toc a[aria-disabled] { color: var(--text-4); pointer-events: none; }
+/* How many of the section's requirements are not live yet: a number; the words are its tooltip. */
+.spec-toc .open-count {
+  flex-shrink: 0;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 4px;
+  border-radius: var(--radius-xs);
+  background: var(--chip);
+  color: var(--text-2);
+  font: var(--readout); font-variant-numeric: tabular-nums; line-height: 18px;
+  font-synthesis: none;
+  text-align: center;
+}
+.spec-toc .open-count:empty { display: none; }
+.spec-toc a[aria-disabled] .open-count { color: var(--text-4); }
+/* A 1 px bar stretched to the current link's height, so moving it animates only its transform. */
+.toc-marker {
+  position: absolute;
+  top: 0;
+  left: -0.5px;
+  width: 2px;
+  height: 1px;
+  background: var(--text);
+  transform-origin: 0 0;
+  opacity: 0;
+  pointer-events: none;
+  transition: transform var(--dur-move) var(--ease-out), opacity var(--dur-pop) var(--ease-out);
+}
+.toc-marker.on { opacity: 1; }
+@media (prefers-reduced-motion: reduce) { .toc-marker { transition: opacity var(--dur-pop) var(--ease-out); } }
+
+/* A column, so a heading's room can sit outside its block without collapsing into its neighbours'. */
+.spec-doc { min-width: 0; max-width: 860px; display: flex; flex-direction: column; }
+/* Headings: the title, the parts, and the areas over their lists of requirements. look.css sets them in
+   the serif, the areas in sepia. */
+.spec-doc :is(h1, h2) { font-family: var(--sans); font-weight: 650; letter-spacing: -.015em; }
+.spec-doc h1 { font-size: 30px; line-height: 1.2; font-weight: 700; letter-spacing: -.022em; }
+.spec-doc h2 { font-size: 21px; line-height: 1.3; }
+.spec-doc h3 { font: var(--readout); font-variant-numeric: tabular-nums; font-synthesis: none; letter-spacing: 1px; text-transform: uppercase; color: var(--sepia); }
+/* The room above and below a heading belongs to its block, so its buttons line up with the text. */
+.block-heading:has(h1) { margin-bottom: 12px; }
+.block-heading:has(h2) { margin: 44px 0 8px; }
+.block-heading:has(h3) { margin: 28px 0 8px; }
+.spec-doc h1, .spec-doc h2, .spec-doc h3, .req { scroll-margin-top: calc(var(--spec-cover, var(--header-h)) + 16px); }
+.spec-doc .prose a, .req a { text-decoration-color: var(--text-4); }
+
+/* The header's filters: All and one per status, a row of tabs like the page tabs, the chosen one
+   filled, each with its status light and its count. */
+.filters { display: flex; flex-shrink: 0; gap: 2px; padding: 2px; border-radius: var(--radius); background: var(--shield-well); box-shadow: var(--shield-well-in); }
+.count.filter, .count.filter:last-child {
+  height: 24px; padding: 0 10px; gap: 6px; border-radius: var(--radius-xs);
+  background: transparent; box-shadow: none; color: var(--shield-label);
+  font: var(--readout); font-variant-numeric: tabular-nums; font-synthesis: none; letter-spacing: 1px; text-transform: uppercase;
+  cursor: pointer;
+}
+.count.filter b { color: var(--shield-text); letter-spacing: 0; }
+.count.filter.on { background: var(--shield-key); color: var(--shield-lit); box-shadow: inset 0 1px 0 0 var(--shield-key-hi), inset 0 -1px 0 0 var(--shield-edge); }
+.count.filter.on b { color: var(--shield-lit); }
+.count.filter .status-mark { width: 7px; height: 7px; }
+/* On the header's second line the filters run to the screen's right edge, scroll sideways when they do
+   not fit, and fade out at that edge. */
+@media (max-width: 1000px) {
+  #summary.counts { margin-right: calc(-1 * var(--page-gutter)); padding-right: var(--page-gutter); }
+}
+@media (max-width: 640px) {
+  /* On a phone the filters are 28 px tall, as the page tabs are. */
+  .count.filter, .count.filter:last-child { height: 28px; }
+}
+/* The "more" menu sits at the header's right edge, so it opens leftwards. */
+.top-right .menu-list { left: auto; right: 0; }
+
+/* A requirement's status as a small round light (look.css): green live, blue in build, a green frame shipped (on,
+   not yet tried), a grey frame not done, grey dropped. */
+.status-mark { display: inline-block; width: 6px; height: 6px; flex-shrink: 0; background: var(--text-4); }
+.status-mark.status-live { background: var(--ok); }
+.count .status-mark.status-live { background: var(--lamp-green); }
+.count .status-mark.status-shipped { box-shadow: inset 0 0 0 1px var(--lamp-green); }
+.count .status-mark.status-in-build { background: var(--lamp-blue); }
+.count .status-mark.status-not-done { box-shadow: inset 0 0 0 1px var(--shield-label); }
+.count .status-mark:not([class*="status-"]) { background: var(--shield-label); }
+.status-mark.status-in-build { background: var(--working); }
+.status-mark.status-shipped { background: transparent; box-shadow: inset 0 0 0 1px var(--ok); }
+.status-mark.status-not-done { background: transparent; box-shadow: inset 0 0 0 1px var(--text-3); }
+
+.block { position: relative; border-radius: var(--radius-sm); }
+.block-line { display: flex; align-items: flex-start; gap: 8px; }
+.block-line > :first-child { flex: 1; min-width: 0; }
+.block-paragraph, .block-item { padding: 2px 0; }
+.block-paragraph .prose p { margin: 0 0 4px; }
+.spec-list { margin: 4px 0 8px; padding-left: 20px; }
+.spec-list.numbered { padding-left: 26px; }
+.spec-list > li { padding: 1px 0; }
+.spec-list > li::marker { color: var(--text-3); }
+
+/* Comment and Edit: icons. Comment carries the block's comment count once it has comments. */
+.block-actions { display: flex; gap: 2px; flex-shrink: 0; opacity: 0; transition: opacity var(--dur-press) var(--ease-out); }
+.block-actions .button.comment-button { gap: 4px; padding: 0 6px; }
+.block-actions .button .icon { margin: 0; color: var(--text-2); }
+.comment-count { font-size: var(--fs-meta); font-weight: 500; color: var(--text-2); font-variant-numeric: tabular-nums; }
+.block:hover > .block-line .block-actions,
+.block:focus-within > .block-line .block-actions,
+.req:hover .block-actions,
+.req:focus-within .block-actions,
+.block-actions.shown { opacity: 1; }
+.block.editing .block-actions, .req.editing .block-actions { opacity: 1; }
+
+/* With a pointer, a prose block keeps its full width: its buttons float at its top right,
+   in the margin beside the text where the screen has room, as a small bar over the line's end
+   where it has not. Hidden, they let clicks through to the text. */
+@media (hover: hover) {
+  .block > .block-line > .block-actions {
+    position: absolute;
+    z-index: 2;
+    top: -5px;
+    right: -4px;
+    padding: 2px;
+    border-radius: var(--radius-sm);
+    background: var(--surface-pop);
+    box-shadow: var(--shadow-pop);
+    pointer-events: none;
+  }
+  .block:hover > .block-line > .block-actions,
+  .block:focus-within > .block-line > .block-actions,
+  .block > .block-line > .block-actions.shown { pointer-events: auto; }
+  /* Over the text, a block's comment count waits for the pointer; its comments show below it anyway. */
+  .block:not(:hover):not(:focus-within) > .block-line > .block-actions.shown { opacity: 0; pointer-events: none; }
+  /* While the block's editor is open, the buttons sit on their own line above it. */
+  .block.editing > .block-line > .block-actions {
+    position: static;
+    flex: 1;
+    justify-content: flex-end;
+    padding: 0;
+    background: none;
+    box-shadow: none;
+    pointer-events: auto;
+  }
+}
+@media (hover: hover) and (min-width: 1280px) {
+  .block > .block-line > .block-actions { top: -2px; right: auto; left: 100%; padding: 0 0 0 12px; background: none; box-shadow: none; }
+  .block:not(:hover):not(:focus-within) > .block-line > .block-actions.shown { opacity: 1; pointer-events: auto; }
+}
+
+/* Without hover, tapping a block selects it and shows its buttons. A prose block keeps its text
+   where it was: the buttons get their own line under it, inside a ring with room around the text. */
+@media (hover: none) {
+  .block-actions { display: none; opacity: 1; gap: 4px; }
+  .selected .block-actions, .block-actions.shown, .editing .block-actions { display: flex; }
+  .block-actions .button { height: 32px; min-width: 32px; }
+  .block-actions .button.comment-button { padding: 0 8px; }
+  .block > .block-line { flex-wrap: wrap; }
+  .block > .block-line > .block-actions { flex-basis: 100%; justify-content: flex-end; }
+  .block.selected { background: var(--surface); box-shadow: 0 0 0 6px var(--surface), 0 0 0 7.5px var(--accent-line); }
+  .req.selected { box-shadow: inset 0 0 0 2px var(--accent-line); }
+  /* On a requirement the taller buttons take no more room than the ID line. */
+  .req-head > .block-actions { margin-block: -6px -5px; }
+  .selected .block-actions { animation: spec-actions-in var(--dur-pop) var(--ease-out); }
+}
+/* A tablet keeps the requirement's room for its buttons, so selecting one does not reflow its text. */
+@media (hover: none) and (min-width: 641px) {
+  .req-head > .block-actions { display: flex; visibility: hidden; }
+  .req.selected > .req-head > .block-actions, .req.editing > .req-head > .block-actions, .req-head > .block-actions.shown { visibility: visible; }
+}
+@keyframes spec-actions-in { from { opacity: 0; transform: translateY(-4px); } }
+@keyframes spec-actions-fade { from { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) { .selected .block-actions { animation-name: spec-actions-fade; } }
+
+.req-list {
+  display: flex;
+  flex-direction: column;
+  margin: 8px 0 16px;
+  background: var(--surface);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-card);
+}
+.req { padding: 12px 16px; }
+.req + .req { border-top: 1px solid var(--line); }
+.req:first-child { border-top-left-radius: var(--radius); border-top-right-radius: var(--radius); }
+.req:last-child { border-bottom-left-radius: var(--radius); border-bottom-right-radius: var(--radius); }
+.req.status-dropped > * { opacity: .55; }
+.req.status-dropped .req-text { text-decoration: line-through; text-decoration-color: var(--text-4); }
+.req-head { display: flex; align-items: flex-start; gap: 12px; }
+.req-id { padding-top: 4px; font: var(--readout); font-variant-numeric: tabular-nums; font-synthesis: none; color: var(--text-3); text-decoration: none; white-space: nowrap; min-width: 76px; }
+.req-text { flex: 1; min-width: 0; font-weight: 500; overflow-wrap: anywhere; }
+.req-text code, .req-note code, .req-field code { font: var(--fs-meta) var(--mono); background: var(--chip); border-radius: var(--radius-xs); padding: 1px 4px; }
+.req-meta { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin: 6px 0 0 88px; }
+.req-note { margin: 6px 0 0 88px; font-size: var(--fs-meta); color: var(--text-2); overflow-wrap: anywhere; }
+.req-more { margin: 4px 0 0 88px; font-size: var(--fs-meta); }
+.req-more > summary { color: var(--text-3); width: fit-content; }
+.req-more[open] > summary { margin-bottom: 4px; }
+.req-field { display: grid; grid-template-columns: 100px minmax(0, 1fr); gap: 8px; padding: 4px 0; overflow-wrap: anywhere; color: var(--text-2); }
+.req-field + .req-field { border-top: 1px solid var(--line); }
+.req-label { color: var(--text-3); line-height: 20px; }
+.plain-cell { margin-right: 12px; }
+
+/* Strength, Status and an agent's Origin: chips that open a menu of their values. */
+details.choice-menu > summary.choice {
+  cursor: pointer;
+  gap: 4px;
+  padding: 0 4px 0 8px;
+  border-radius: var(--radius-xs);
+  transition: box-shadow var(--dur-press) var(--ease-out);
+}
+.choice > .icon-chevron { width: 12px; height: 12px; color: var(--text-4); }
+.choice.choice-strength.value-must { background: var(--surface); color: var(--text); box-shadow: inset 0 0 0 1px var(--line-strong); font-weight: 600; }
+details.choice-menu[open] > summary.choice { box-shadow: inset 0 0 0 1px var(--text-3); }
+.choice-menu .menu-list { min-width: 160px; }
+.choice-menu .menu-list button { align-items: center; gap: 16px; }
+.choice-menu .menu-list .icon-check { width: 12px; height: 12px; color: var(--text-2); }
+
+/* Comments on a block: the user's words, then when and whether an agent has read them. */
+.spec-comments { list-style: none; margin: 8px 0 0 88px; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.block .spec-comments { margin-left: 0; }
+.spec-comments li {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  padding: 6px 10px;
+  border-left: 0;
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  font-size: var(--fs-meta);
+}
+.comment-text { flex: 1; min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.comment-meta { display: inline-flex; align-items: center; gap: 6px; flex-shrink: 0; }
+.comment-state { display: inline-flex; align-items: center; justify-content: center; width: 12px; height: 12px; }
+.comment-state.waiting::before { content: ""; width: 6px; height: 6px; box-shadow: inset 0 0 0 1px var(--text-3); }
+.comment-state.read { color: var(--ok); }
+.comment-state .icon { width: 12px; height: 12px; }
+
+.spec-box { margin: 8px 0 4px; padding: 12px; border-radius: var(--radius-sm); background: var(--surface-2); box-shadow: inset 0 0 0 1px var(--line-strong); }
+.block .spec-box { margin-left: 0; }
+.req > .spec-box { margin-left: 88px; }
+.spec-box .field { width: 100%; }
+.edit-foot { display: flex; align-items: center; justify-content: flex-end; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
+/* The editors take the page's text size, and 16 px on touch screens (style.css), where iOS zooms into smaller text. */
+.edit-all .field { font-family: var(--mono); line-height: 1.5; min-height: 70vh; }
+
+/* A row's editor stands where its text was: the text, the chips, then the other fields. */
+.row-edit { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 8px; }
+.row-edit .field { width: 100%; padding: 6px 8px; }
+/* An editor's box fits its text where the browser can size it so; elsewhere it keeps its rows. */
+textarea.field.grow { field-sizing: content; min-height: 52px; max-height: 60vh; }
+.row-edit > textarea.field:first-child { font-weight: 500; }
+.row-edit .req-meta, .row-edit .req-more { margin: 0; }
+.row-edit .req-more[open] { display: flex; flex-direction: column; gap: 8px; }
+.row-edit .req-more[open] > summary { margin-bottom: 0; }
+.row-edit .edit-foot { margin-top: 0; }
+.edit-field { display: flex; flex-direction: column; gap: 4px; font-size: var(--fs-meta); color: var(--text-3); }
+
+/* Banners: the spec moved under an open editor (amber: the user's text is at stake), and comments
+   whose part has changed since (neutral: they wait for an agent). */
+.banner-line { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding-block: 4px; }
+.banner-line .button.icon-only .icon { color: currentColor; }
+.banner.neutral { background: var(--surface-2); box-shadow: inset 0 0 0 1px var(--line); color: var(--text-2); }
+.banner-head { color: var(--text); font-weight: 600; margin-bottom: 4px; }
+.unplaced-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.unplaced-list li { display: flex; align-items: baseline; gap: 10px; min-width: 0; }
+.unplaced-where { flex-shrink: 0; min-width: 64px; max-width: 30%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-3); }
+.unplaced-where.req-id { min-width: 64px; line-height: inherit; }
+.unplaced-text { flex: 1; min-width: 0; overflow-wrap: anywhere; color: var(--text); }
+
+/* Narrow screens: one column, with the sections as a row of chips that sticks under the header,
+   tucks away while the user reads down and comes back on the way up. The layout is a plain block so
+   the row can stick for the whole page. */
+@media (max-width: 900px) {
+  .spec-layout { display: block; padding: 0 16px 40px; }
+  /* The row runs across the screen under the header, its sections chips in hairline frames, the one in
+     view filled (look.css). */
+  .spec-toc {
+    top: var(--spec-top, var(--header-h));
+    z-index: 5;
+    max-height: none;
+    margin: 0 -16px 16px;
+    padding: 2px 0;
+    overflow: visible;
+    background: var(--shield-well);
+    box-shadow: var(--shield-well-in);
+    transition: transform var(--dur-move) var(--ease-out), opacity var(--dur-move) var(--ease-out);
+  }
+  /* Tucked under the header, the row also fades out, so it stays hidden whatever the header's background. */
+  .spec-toc.tucked:not(:focus-within) { transform: translateY(-100%); opacity: 0; transition-duration: var(--dur-exit); }
+  .toc-links {
+    flex-direction: row;
+    gap: 2px;
+    padding: 0 16px;
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+    scrollbar-width: none;
+  }
+  .toc-links::-webkit-scrollbar { display: none; }
+  .toc-links::before, .toc-marker { display: none; }
+  /* The row fades at an edge where more chips wait beyond it. */
+  .toc-links.fade-end { -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 32px), transparent); mask-image: linear-gradient(to right, #000 calc(100% - 32px), transparent); }
+  .toc-links.fade-start { -webkit-mask-image: linear-gradient(to left, #000 calc(100% - 32px), transparent); mask-image: linear-gradient(to left, #000 calc(100% - 32px), transparent); }
+  .toc-links.fade-start.fade-end {
+    -webkit-mask-image: linear-gradient(to right, transparent, #000 32px, #000 calc(100% - 32px), transparent);
+    mask-image: linear-gradient(to right, transparent, #000 32px, #000 calc(100% - 32px), transparent);
+  }
+  .spec-toc a, .spec-toc a.sub {
+    flex-shrink: 0;
+    align-items: center;
+    height: 36px;
+    padding: 0 10px;
+    border-radius: var(--radius-xs);
+    color: var(--shield-label);
+    font: var(--readout);
+    font-variant-numeric: tabular-nums;
+    font-synthesis: none;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    white-space: nowrap;
+  }
+  .spec-toc a[aria-current] { background: var(--shield-key); color: var(--shield-lit); box-shadow: inset 0 1px 0 0 var(--shield-key-hi), inset 0 -1px 0 0 var(--shield-edge); }
+  .spec-toc a[aria-disabled] { color: color-mix(in oklab, var(--shield-label) 55%, var(--shield-well)); }
+  .spec-toc .open-count { min-width: 0; height: auto; padding: 0; background: none; color: var(--shield-text); font: inherit; letter-spacing: 0; }
+  .spec-toc a[aria-current] .open-count { color: var(--shield-lit); }
+  .spec-toc a[aria-disabled] .open-count { color: inherit; }
+}
+@media (max-width: 900px) and (prefers-reduced-motion: reduce) { .spec-toc { transition: none; } }
+@media (max-width: 900px) and (hover: hover) and (pointer: fine) {
+  .spec-toc a:not([aria-current]):hover { background: var(--shield-well-hover); color: var(--shield-text); }
+}
+
+/* Phones: the requirement's text takes the full width under its ID and buttons. */
+@media (max-width: 640px) {
+  .req-meta, .req-note, .req-more, .spec-comments, .req > .spec-box { margin-left: 0; }
+  .req-head { flex-wrap: wrap; }
+  .req-id { min-width: 0; }
+  .req-text, .row-edit { flex-basis: 100%; order: 3; }
+  .block-actions { margin-left: auto; }
+  .spec-comments li { flex-wrap: wrap; row-gap: 2px; }
+  .unplaced-list li { flex-wrap: wrap; row-gap: 0; }
+  .unplaced-where { max-width: none; }
+  .unplaced-text { flex-basis: 100%; order: 3; }
+}
+
+/* Phones and touch screens: the folded fields' summary is a full-size tap target, its text where it was. */
+@media (max-width: 640px), (hover: none) {
+  .req-more > summary { padding-block: 11px; margin: -7px 0 -11px; }
+  .req-more[open] > summary { margin-bottom: -4px; }
+  .row-edit .req-more > summary { margin: -11px 0; }
+  details.choice-menu > summary.choice { height: 32px; padding: 0 6px 0 10px; }
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .count.filter:not(.on):hover { background: var(--shield-well-hover); color: var(--shield-text); }
+  .req-more > summary:hover { color: var(--text); }
+  .spec-toc a:hover { background: var(--hover); color: var(--text); }
+  .req-id:hover { color: var(--text); }
+  details.choice-menu > summary.choice:hover { box-shadow: inset 0 0 0 1px var(--line-strong); }
+  details.choice-menu > summary.choice.value-must:hover { box-shadow: inset 0 0 0 1px var(--text-3); }
+}
+
+/* Fenced code: whole blocks, their long lines wrapped so all of it reads at any width. */
+.block-code { padding: 2px 0; }
+.block-code .prose pre { margin: 0 0 4px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.block-code + .block-heading:has(h1) { margin-top: 16px; }
+/* A skill's frontmatter shows as its description, above the skill's title. */
+.skill-lead { margin: 0; color: var(--text-2); }
+.skill-back b { color: var(--text); }
+
+/* The skills list (/skills): one column without a table of contents; each skill one line with its
+   name, the start of its description, waiting comments and length. The lines share the list's columns
+   (a subgrid each), so every description starts at one edge and the counts end at one edge; a name longer
+   than 14 rem ends in an ellipsis. On a phone each skill stacks: its name and counts, then its description. */
+.spec-layout.skill-index { grid-template-columns: minmax(0, 1fr); max-width: 908px; padding-top: 24px; }
+.skill-index .spec-toc { display: none; }
+.skill-list {
+  list-style: none; margin: 16px 0 0; padding: 0;
+  display: grid; grid-template-columns: fit-content(14rem) minmax(0, 1fr) auto auto; gap: 2px 12px;
+}
+.skill-list > li { display: grid; grid-column: 1 / -1; grid-template-columns: subgrid; }
+.skill-row {
+  display: grid;
+  grid-column: 1 / -1;
+  grid-template-columns: subgrid;
+  align-items: baseline;
+  margin: 0 -12px;
+  padding: 7px 12px;
+  border-radius: var(--radius-sm);
+  color: inherit;
+  text-decoration: none;
+}
+.skill-name { grid-column: 1; min-width: 0; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.skill-description { grid-column: 2; min-width: 0; color: var(--text-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.skill-waiting { grid-column: 3; display: inline-flex; align-items: center; gap: 3px; }
+.skill-waiting .icon { width: 12px; height: 12px; color: var(--text-2); }
+.skill-words { grid-column: 4; justify-self: end; white-space: nowrap; font-variant-numeric: tabular-nums; }
+#spec-more[hidden] { display: none; }
+@media (max-width: 600px) {
+  .skill-list { display: flex; flex-direction: column; }
+  .skill-list > li { display: block; }
+  .skill-row { display: flex; flex-wrap: wrap; gap: 2px 12px; }
+  .skill-description { flex-basis: 100%; order: 1; }
+}
+@media (hover: hover) {
+  .skill-row:hover { background: var(--hover); }
+}
+
+/* The Skills list's way to the writing examples (/writing, SPEC FEEDBACK-8). */
+.writing-link { display: inline-flex; align-items: center; gap: 6px; align-self: flex-start; margin-top: 4px; color: var(--accent-text); font-weight: 550; text-decoration: none; }
+.writing-link .icon { width: 14px; height: 14px; }
+@media (hover: hover) { .writing-link:hover { text-decoration: underline; } }
+
+/* The writing examples, good writing first and then writing that was hard to understand, each part under its
+   own heading. */
+.spec-doc .writing-part { margin: 44px 0 0; }
+.spec-doc h1 + .writing-part { margin-top: 28px; }
+/* Each part is a column of clippings. The example's own words lead, set at reading size in a
+   measure that reads well; the user's note on why sits beside them in the user's amber, as a margin note. */
+.writing-list { list-style: none; margin: 24px 0 0; padding: 0; display: flex; flex-direction: column; gap: 36px; }
+.writing-empty { margin-top: 24px; color: var(--text-2); }
+.writing-card { min-width: 0; max-width: 72ch; }
+.writing-head { display: flex; align-items: flex-start; gap: 8px; }
+.spec-doc .writing-head h2 { flex: 1; min-width: 0; margin: 0; font-size: 19px; line-height: 1.35; overflow-wrap: anywhere; }
+.writing-meta, .writing-skills { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; margin: 6px 0 0; color: var(--text-3); }
+.writing-skills { gap: 4px 6px; }
+.writing-note { margin: 12px 0 0; padding: 6px 10px 7px; border-left: 3px solid var(--accent); border-radius: 0 var(--radius-sm) var(--radius-sm) 0; background: var(--accent-wash); }
+.writing-note b { display: block; font-size: var(--fs-meta); color: var(--accent-text); font-weight: 600; }
+.writing-text { position: relative; margin: 14px 0 0; font-size: var(--fs-read); line-height: 1.6; overflow-wrap: anywhere; }
+.writing-text.plain { padding: 0 0 0 14px; border-left: 1px solid var(--line-strong); white-space: pre-wrap; color: var(--text); }
+:root .spec-doc .writing-text.prose :is(h1, h2, h3) { margin: 18px 0 6px; font: 650 var(--fs-read)/1.4 var(--sans); letter-spacing: 0; text-transform: none; color: var(--text); }
+/* A step's ask is the card's title already. */
+.writing-text.prose > h1:first-child { display: none; }
+.writing-text.prose > h1:first-child + * { margin-top: 0; }
+.writing-text.prose p { margin: 0 0 10px; }
+/* A long example shows its start, fading out, until the user opens it. */
+.writing-text.clamped { max-height: 15em; overflow: hidden; mask-image: linear-gradient(to bottom, black 70%, transparent); }
+.writing-card > .button { margin-top: 6px; }
+.writing-page { margin: 14px 0 0; }
+.writing-page a { display: inline-flex; align-items: center; gap: 6px; }
+.writing-remove { color: var(--fail); white-space: nowrap; }

@@ -1,0 +1,67 @@
+/* The comment column beside a framed page (page-comments.js, SPEC NEXT-38). It reads as the page's margin: the
+   warm margin tone, each comment a note whose left rule takes the colour of its mark on the page (amber for the
+   user's unsent ones, grey once sent or added). Loads after style.css and uses its tokens. */
+
+.pc-column {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 12px;
+  border-radius: var(--radius);
+  background: var(--margin);
+  box-shadow: inset 0 0 0 1px var(--margin-line);
+}
+
+.pc-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.pc-head h2 { margin: 0; font: 650 14px/20px var(--sans); color: var(--sepia); }
+.pc-key { margin-left: 4px; padding: 0 4px; border-radius: var(--radius-xs); box-shadow: inset 0 0 0 1px var(--line); font: 500 11px/16px var(--sans); color: var(--text-3); }
+.pc-head .button.on .pc-key { color: currentColor; }
+@media (hover: none) { .pc-key { display: none; } }
+
+.pc-hint { margin: 4px 0; font-size: var(--fs-meta); color: var(--text-2); }
+
+.pc-card {
+  position: relative;
+  display: grid;
+  gap: 4px;
+  padding: 8px 10px 8px 12px;
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  box-shadow: inset 3px 0 0 0 var(--line-strong);
+  cursor: pointer;
+}
+.pc-card.own { box-shadow: inset 3px 0 0 0 oklch(0.8 0.15 85); }
+.pc-card.active { outline: 2px solid var(--accent-line); outline-offset: 0; }
+.pc-card:focus-visible { outline: 2px solid var(--field-focus); outline-offset: 0; }
+.pc-card:not(.own) .pc-text { color: var(--text-2); }
+.pc-on { margin: 0; padding-right: 22px; font-size: var(--fs-meta); line-height: 1.4; color: var(--text-3); overflow-wrap: anywhere; }
+.pc-text { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.pc-status { margin: 0; font-size: var(--fs-meta); color: var(--text-3); }
+.pc-delete { position: absolute; top: 4px; right: 4px; }
+
+.pc-draft { cursor: default; background: var(--accent-bg); box-shadow: inset 3px 0 0 0 var(--accent); }
+.pc-draft textarea { width: 100%; resize: vertical; }
+.pc-draft-buttons { display: flex; justify-content: flex-end; gap: 6px; }
+
+.pc-lost { display: grid; gap: 6px; padding-bottom: 8px; border-bottom: 1px solid var(--margin-line); }
+.pc-lost h3 { margin: 0; font: 600 12px/18px var(--sans); color: var(--text-2); }
+
+.pc-error { margin: 0; font-size: var(--fs-meta); color: var(--fail); }
+
+/* The Comment button under selected words; fixed, placed from the frame's box and the selection's. */
+.pc-float { position: fixed; z-index: 30; box-shadow: var(--shadow-pop); }
+
+/* On a step card (app.js): the page comments that go with the answer, folded above the reply box, and the way to
+   comment on a page drawn in the step's text. */
+.page-comments-pending { margin: 0 0 6px; padding: 6px 10px; border-radius: var(--radius-sm); background: var(--margin); box-shadow: inset 3px 0 0 0 oklch(0.8 0.15 85); }
+.page-comments-pending summary { cursor: pointer; }
+.page-comments-pending ul { margin: 6px 0 0; padding: 0; list-style: none; display: grid; gap: 6px; }
+.page-comments-pending li { display: grid; grid-template-columns: minmax(0, 1fr) auto; column-gap: 8px; align-items: start; }
+.page-comments-pending li > a, .page-comment-on { font-size: var(--fs-meta); color: var(--text-2); }
+.page-comments-pending li > a { grid-column: 1; }
+.page-comment-on { grid-column: 1; overflow-wrap: anywhere; }
+.page-comment-text { grid-column: 1; white-space: pre-wrap; overflow-wrap: anywhere; }
+.page-comments-pending li > .button { grid-column: 2; grid-row: 1 / span 3; }
+.figure-comment { display: inline-flex; align-items: center; gap: 4px; margin-top: 4px; font-size: var(--fs-meta); color: var(--text-2); }

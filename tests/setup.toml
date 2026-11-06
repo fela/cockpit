@@ -1,0 +1,12 @@
+# The setup the tests run with: conftest.py points config.SETUP_PATH here.
+name = "Sam"
+email = "sam@example.com"
+origin = "https://cockpit.example.test"
+checkouts = "/home/sam/dev"
+spec_repo = "/srv/cockpit-test/spec"
+skills_repo = "/srv/cockpit-test/skills"
+skills_folder = "skills"
+skills_branch = "skills"
+
+attach = "claude attach {session}"
+timezone = "Etc/GMT-7"

@@ -1,0 +1,279 @@
+/* Motion for the board and the spec page: the tokens, the tooltip, and the
+   <details> opening that CSS does alone. motion.js runs the rest (tooltip timing,
+   button press, menu and toast entrances, steps and rows moving) and keeps its
+   durations in step with these tokens. Exits are faster than entrances; transform
+   and opacity move, plus heights: a section that opens, a row that opens or
+   closes, and the frames (page sections, groups, lists) a redraw changes. */
+
+:root {
+  --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+  --dur-press: 120ms;
+  --dur-pop: 180ms;
+  --dur-move: 240ms;
+  --dur-exit: 120ms;
+}
+
+/* One tooltip for the whole page; motion.js fills, places and shows it. */
+.tip {
+  position: fixed;
+  top: 0;
+  left: 0;
+  z-index: 40;
+  max-width: min(320px, calc(100vw - 16px));
+  padding: 5px 8px;
+  border-radius: 0;
+  background: var(--toast-bg);
+  color: var(--toast-text);
+  box-shadow: var(--shadow-pop);
+  font-size: 12px;
+  line-height: 1.4;
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+  text-wrap: pretty;
+  pointer-events: none;
+}
+.tip[hidden] { display: none; }
+.tip-text, .tip-time { display: block; }
+.tip-time { color: color-mix(in oklab, var(--toast-text) 72%, var(--toast-bg)); }
+.tip-text + .tip-time { margin-top: 2px; }
+/* A control's shortcut after its tooltip text: "Done  D", on a small key. */
+.tip-keys { display: inline-flex; gap: 3px; margin-left: 8px; vertical-align: 1px; white-space: nowrap; }
+.tip kbd {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: var(--radius-xs);
+  background: color-mix(in oklab, var(--toast-text) 14%, var(--toast-bg));
+  box-shadow: inset 0 -1px 0 color-mix(in oklab, var(--toast-text) 8%, var(--toast-bg));
+  color: color-mix(in oklab, var(--toast-text) 86%, var(--toast-bg));
+  font: var(--readout);
+  font-variant-numeric: tabular-nums;
+  font-synthesis: none;
+}
+
+/* What a poll changed (motion.js adds `changed`): a grey wash under the element's
+   content that fades. Grey, since amber means waiting on the user and red a failure, and an
+   orange wash reads as either (SPEC UI-18). It moves nothing, so it runs with reduced
+   motion too. */
+:root { --changed: color-mix(in oklab, var(--text) 9%, var(--surface)); }
+.changed { position: relative; isolation: isolate; }
+.changed::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  border-radius: inherit;
+  background: var(--changed);
+  pointer-events: none;
+  animation: changed 1200ms ease-out forwards;
+}
+/* A side-list entry has no side padding: its wash reaches past the text. */
+.side-list > li.changed::after { inset: 0 -8px; border-radius: var(--radius-xs); }
+@keyframes changed { to { opacity: 0; } }
+
+/* Copies of removed cards, rows and toasts while they fade out. A copy is cheap to
+   draw: no blur behind its actions bar, no open menu. */
+.motion-ghost { pointer-events: none; }
+.motion-ghost .actions { -webkit-backdrop-filter: none; backdrop-filter: none; }
+.motion-ghost .menu-list { display: none; }
+.list > .motion-ghost, .closed-list > .motion-ghost { background: var(--surface); }
+
+/* A frame whose height a redraw animates, or that holds a fading copy or sliding rows:
+   it clips what it holds and places the copies. A section that empties stays shown
+   until it has shrunk away. A list card clips on both axes, to its rounded corners. */
+.motion-frame { position: relative; isolation: isolate; overflow-y: clip; min-height: 0; }
+.list.motion-frame, .closed-list.motion-frame { overflow: clip; }
+.primary > section.motion-frame:empty { display: block; }
+/* The spot a removed list or group leaves: it closes, and clips the copies fading in it. */
+.motion-spot { position: relative; overflow: clip; }
+
+/* While motion.js holds the scroll position through a redraw, the browser's own
+   scroll anchoring rests, so the two never pull against each other. */
+:root.motion-holding { overflow-anchor: none; }
+
+/* A row body clips its content while it opens or closes. */
+.motion-clip, .motion-collapse { overflow: clip; }
+
+/* Sliding rows cover what they pass, and the one the user acted on passes over the rest. */
+.motion-moving { position: relative; z-index: 1; }
+.motion-acted { z-index: 2; }
+.list > .motion-moving, .closed-list > .motion-moving { background: var(--surface); }
+.side-list > .motion-moving { background: var(--bg); }
+
+/* Sections on <details> grow open and shrink closed. Menus open with their own
+   entrance (motion.js), and a <details> drawn already open does not animate. */
+@supports (interpolate-size: allow-keywords) {
+  details:not(.menu) { interpolate-size: allow-keywords; }
+  details:not(.menu)::details-content {
+    height: 0;
+    overflow: clip;
+    transition: height var(--dur-exit) var(--ease-out), content-visibility var(--dur-exit) var(--ease-out) allow-discrete;
+  }
+  details:not(.menu)[open]::details-content {
+    height: auto;
+    overflow: visible;
+    transition-duration: var(--dur-move);
+  }
+  /* While it grows, the content stays clipped to the growing height. */
+  details.motion-opening[open]::details-content { overflow: clip; }
+
+  @media (prefers-reduced-motion: reduce) {
+    details:not(.menu)::details-content { transition: none; }
+  }
+}
+
+/* With reduced motion the disclosure chevrons flip without turning. */
+@media (prefers-reduced-motion: reduce) {
+  :root details > summary::before { transition: none; }
+}
+
+/* Board and Spec cross-fade into each other; the header stays put between them. */
+@media (prefers-reduced-motion: no-preference) {
+  @view-transition { navigation: auto; }
+  .top { view-transition-name: cockpit-header; }
+  ::view-transition-group(*),
+  ::view-transition-old(*),
+  ::view-transition-new(*) { animation-duration: var(--dur-pop); animation-timing-function: var(--ease-out); }
+}
+
+/* Finishing a task (CONTROL-15). Completing has its own colour, a deep plum that no lamp uses, on the
+   last step's Done key, on Task done in its panel, on a closing answer and in the completion: a ring draws itself round a check over
+   the card and bursts, sparks fly and the card lifts away. app.js moves copies, so the page redraws underneath at once. */
+:root {
+  --complete: oklch(0.5 0.16 318);
+  --complete-hover: oklch(0.46 0.155 318);
+  --complete-edge: oklch(0.42 0.14 318);
+  --complete-text: oklch(0.47 0.15 318);
+  --complete-bg: oklch(0.965 0.022 318);
+  --complete-line: oklch(0.84 0.07 318);
+  --on-complete: oklch(1 0 0);
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --complete: oklch(0.6 0.15 318);
+    --complete-hover: oklch(0.65 0.15 318);
+    --complete-edge: oklch(0.5 0.13 318);
+    --complete-text: oklch(0.78 0.11 318);
+    --complete-bg: oklch(0.29 0.045 318);
+    --complete-line: oklch(0.45 0.09 318);
+    --on-complete: oklch(0.99 0.005 318);
+  }
+}
+
+/* After a close or a Send on Next up, the page starts a shade darker under the leaving card's animation
+   and lightens into place as the next step comes in; motion.js's dimNext adds this shade and fades it out. It
+   covers the whole window, the header, the phone bar and the margins beside the column included, and
+   lets every click through. The toast with its Undo (30) and the leaving card's copies (.close-fx and .tear-piece at
+   39) stay over it. */
+:root { --arrive-dim: oklch(0.25 0.01 65 / .16); }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) { --arrive-dim: oklch(0 0 0 / .42); }
+}
+.arrive-shade {
+  position: fixed;
+  inset: 0;
+  z-index: 29;
+  background: var(--arrive-dim);
+  pointer-events: none;
+  opacity: 0;
+}
+
+/* The last step's Task done key: one press completes the task, and its words show; with a last
+   message in the reply box it reads "Task done + send". */
+.step-keys > .button.task-done { gap: 6px; padding: 0 12px 0 10px; font-weight: 600; }
+
+/* A closing answer: the reply and the completion in one press. */
+:root .answers > .button.answer.closes { gap: 6px; padding-left: 10px; font-weight: 600; }
+.answers > .button.answer.closes .icon { flex: none; }
+
+/* The close keys go down as they are pressed; the close animation springs them back. */
+@media (prefers-reduced-motion: no-preference) {
+  :root :is(.step-keys > .button.task-done, .answers > .button.answer.closes, .button.close-item) { transition: transform 140ms cubic-bezier(0.2, 0.9, 0.3, 1.2); }
+  :root :is(.step-keys > .button.task-done, .answers > .button.answer.closes, .button.close-item):active:not(:disabled) { transform: scale(0.94); transition-duration: 70ms; }
+}
+
+/* Closing a task is always explicit (CONTROL-17): every press that ends one is a solid plum key, the page's one
+   solid plum: Task done, a closing answer, Close item in its box and Close in an All work row. Each plays the
+   close (app.js closeAnimation), and the notice after it is plum too. */
+:root :is(.step-keys > .button.task-done, .answers > .button.answer.closes, .button.close-item) {
+  background: var(--complete);
+  color: var(--on-complete);
+  box-shadow: inset 0 1px 0 oklch(1 0 0 / .16), 0 0 0 1px var(--complete-edge), 0 1px 2px oklch(0.4 0.12 318 / .3);
+}
+:root :is(.step-keys > .button.task-done, .answers > .button.answer.closes, .button.close-item) .icon { color: currentColor; }
+@media (hover: hover) {
+  :root :is(.step-keys > .button.task-done, .answers > .button.answer.closes, .button.close-item):hover:not(:disabled) { background: var(--complete-hover); }
+}
+.button.close-item { gap: 6px; padding: 0 12px; font-weight: 600; }
+:root .toast.closed { background: var(--complete); color: var(--on-complete); font-weight: 600; }
+:root .toast.closed button { font-weight: 600; }
+
+/* Close item asks why, and names the item that closes. */
+.close-box { margin-top: 12px; }
+.close-words { margin: 0 0 8px; color: var(--text-2); font-size: var(--fs-body); text-wrap: pretty; }
+.close-words b { color: var(--text); font-weight: 600; }
+.close-box .composer-foot { justify-content: flex-end; gap: 6px; }
+
+/* The completion. */
+/* The close (CONTROL-17): one of seven animations, each built from copies of the card and a few small
+   pieces in boxes fixed over the page (.close-fx). The torn card's pieces are each a copy clipped to its shape, in a box
+   the size of that shape, with a torn edge a shade off the card. */
+.close-fx { position: fixed; z-index: 39; margin: 0; pointer-events: none; will-change: transform, opacity; }
+.close-gpu { will-change: auto; }
+.close-copy { position: absolute; left: 0; top: 0; margin: 0; box-sizing: border-box; }
+.tear-piece { position: fixed; z-index: 39; margin: 0; pointer-events: none; will-change: transform, opacity; }
+.tear-shard { contain: strict; }
+.tear-edge {
+  position: absolute; left: 0; top: 0; overflow: visible;
+  fill: none; stroke: color-mix(in oklab, var(--surface-pop) 65%, var(--text-3)); stroke-width: 2.5; stroke-linejoin: round; stroke-linecap: round;
+}
+.close-stamp {
+  position: absolute; padding: 6px 18px 4px; border: 4px double var(--complete); border-radius: 10px;
+  color: var(--complete); font: 800 44px/1 var(--sans); letter-spacing: .12em; text-transform: uppercase; white-space: nowrap;
+  background: color-mix(in oklab, var(--surface) 30%, transparent);
+  -webkit-mask: var(--close-grunge) 0 0 / 160px 160px; mask: var(--close-grunge) 0 0 / 160px 160px;
+}
+.close-ring { position: absolute; opacity: 0; width: 60px; height: 60px; border-radius: 50%; border: 3px solid var(--complete); box-sizing: border-box; }
+.close-streak { border-radius: 2px; background: linear-gradient(90deg, transparent, var(--complete)); }
+.close-confetti { inset: 0; width: 100vw; height: 100vh; will-change: auto; }
+.close-coin {
+  display: grid; place-items: center; border-radius: 50%; color: white; font: 700 13px/1 var(--sans);
+  background: radial-gradient(circle at 35% 30%, oklch(0.78 0.12 318), var(--complete) 55%, var(--complete-edge));
+  box-shadow: inset 0 0 0 2px oklch(1 0 0 / .35), 0 2px 6px oklch(0.3 0.1 318 / .35);
+}
+/* Clipped, not a scroll box, so the card's sticky keys stay where they are in each slice. */
+.close-slice { overflow: clip; contain: strict; }
+.close-portal {
+  border-radius: 50%;
+  background: radial-gradient(closest-side, oklch(0.2 0.08 318), var(--complete) 70%, transparent);
+  box-shadow: 0 0 18px 4px color-mix(in oklab, var(--complete) 55%, transparent);
+}
+/* The key as it is pressed: light floods it from the middle, and a ring leaves it. */
+.pressing { position: relative; overflow: hidden; will-change: transform; }
+.press-flood {
+  position: absolute; border-radius: 50%; pointer-events: none;
+  background: radial-gradient(closest-side, oklch(1 0 0 / .7), oklch(1 0 0 / .35) 60%, oklch(1 0 0 / 0));
+}
+/* The ring and sparks stay unseen through their delay; their animations make them visible. */
+.press-ring {
+  opacity: 0;
+  position: fixed;
+  z-index: 40;
+  box-shadow: 0 0 0 2px var(--complete), 0 0 14px 2px color-mix(in oklab, var(--complete) 55%, transparent);
+  pointer-events: none;
+}
+.press-spark {
+  opacity: 0;
+  position: fixed;
+  z-index: 40;
+  width: 14px;
+  height: 3px;
+  margin: -1.5px 0 0 -7px;
+  border-radius: 2px;
+  background: var(--complete);
+  pointer-events: none;
+}
+.press-spark.warm { background: var(--accent); }
