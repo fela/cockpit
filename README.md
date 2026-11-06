@@ -1,10 +1,25 @@
+<p align="center"><img src="src/cockpit/static/icon.svg" alt="Cockpit logo" width="80"></p>
+
 # Cockpit
 
-Cockpit is a personal work page for one person directing many Claude Code and Codex
-sessions. It brings agent conversations, GitHub pull requests, Linear tickets and
-Slack threads into one place, with a small queue of actions that need you next.
-Agents update the board through the `cockpit` command. Your replies return to the
-session doing the work.
+Cockpit is an inbox for one person directing many Claude Code and Codex sessions.
+You never choose which session to check on, and you never sit watching one work.
+Each session carries its task on its own and comes to you only when it needs you:
+a decision, an approval, a reply. It arrives as a short card with everything you
+need to answer, already prepared: what the agent did, what it found, the options
+and its recommendation. You answer with one press or a sentence, and your answer
+goes back to the session doing the work.
+
+Your priorities set the order. You write them on the page in plain words, such as
+"Ship the new checkout before the sale". A sweeper session ranks every waiting card
+against them and keeps at most four in your inbox, the most important first.
+Everything else sits below the inbox: under Busy while agents work, and under Waiting
+while it depends on a person, a review or a set time.
+
+![The Cockpit inbox: four cards ready for you, two tasks busy and two waiting](docs/inbox.png)
+
+The same list holds GitHub pull requests, Linear tickets and Slack threads beside
+the agent conversations. Agents update it through the `cockpit` command.
 
 Cockpit was built with Claude Code. It runs on your machine as a Python server
 with a SQLite database and a browser interface. Local sign-in is the default for a
@@ -13,8 +28,9 @@ laptop. Google OAuth is available for an HTTPS deployment.
 ## What it does
 
 - **Items** track pieces of work, their state, priority and next move.
-- **Steps** ask for an action you can take now: decide, approve, reply or finish.
-  You see at most four queued steps at once.
+- **Steps** are the inbox cards: each asks for an action you can take now, such as
+  decide, approve, reply or finish. You see at most four at once.
+- **Priorities** are your goals in plain words; the queue is ranked by them.
 - A **sweeper** is an agent session that checks the board, ranks work and asks each
   owning session to prepare its next step.
 - Session conversations, permission requests and structured questions appear on
