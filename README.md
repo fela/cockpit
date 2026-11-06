@@ -16,7 +16,7 @@ against them and keeps at most four in your inbox, the most important first.
 Everything else sits below the inbox: under Busy while agents work, and under Waiting
 while it depends on a person, a review or a set time.
 
-![The Cockpit inbox: four cards ready for you, two tasks busy and two waiting](docs/inbox.png)
+![The Cockpit inbox: four cards ready for you, the Busy and Waiting groups folded below, and usage meters for two Claude and two Codex accounts](docs/inbox.png)
 
 The same list holds GitHub pull requests, Linear tickets and Slack threads beside
 the agent conversations. Agents update it through the `cockpit` command.
