@@ -10,11 +10,14 @@ need to answer, already prepared: what the agent did, what it found, the options
 and its recommendation. You answer with one press or a sentence, and your answer
 goes back to the session doing the work.
 
-Your priorities set the order. You write them on the page in plain words, such as
-"Ship the new checkout before the sale". A sweeper session ranks every waiting card
-against them and keeps at most four in your inbox, the most important first.
-Everything else sits below the inbox: under Busy while agents work, and under Waiting
-while it depends on a person, a review or a set time.
+A sweeper session does the triage for you. It picks up new asks from your sources
+and checks each waiting card against live state, such as a pull request's reviews,
+to find what needs your attention now and to drop what went stale. It orders your inbox by the priorities you write on the page in plain
+words, such as "Ship the new checkout before the sale", and keeps at most four cards
+there, the most important first. You can still change the order: snooze a card until
+later, raise or lower a task's priority, or send a card back to its agent with a
+message. Everything else sits below the inbox: under Busy while agents work, and
+under Waiting while it depends on a person, a review or a set time.
 
 ![The Cockpit inbox: four cards ready for you, the Busy and Waiting groups folded below, and usage meters for two Claude and two Codex accounts](docs/inbox.png)
 
@@ -31,8 +34,11 @@ laptop. Google OAuth is available for an HTTPS deployment.
 - **Steps** are the inbox cards: each asks for an action you can take now, such as
   decide, approve, reply or finish. You see at most four at once.
 - **Priorities** are your goals in plain words; the queue is ranked by them.
-- A **sweeper** is an agent session that checks the board, ranks work and asks each
-  owning session to prepare its next step.
+- A **sweeper** is an agent session that checks waiting cards against live state,
+  orders your inbox by your priorities and asks each owning session to prepare its
+  next step.
+- **Snooze** moves a card out of the inbox until a time you pick; it comes back on
+  its own.
 - Session conversations, permission requests and structured questions appear on
   the page. You can answer without switching to a terminal.
 - Sessions can share HTML reports and images on an item. Spec and skill pages let
