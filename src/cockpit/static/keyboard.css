@@ -1,0 +1,67 @@
+.command-dialog {
+  width: min(620px, calc(100vw - 32px));
+  max-height: min(78vh, 780px);
+  margin: max(60px, 12vh) auto auto;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  color: var(--text);
+  background: var(--surface-pop);
+  box-shadow: 0 24px 80px #0006;
+  overflow: hidden;
+  font-family: var(--sans, sans-serif);
+}
+.command-dialog::backdrop { background: #05080cb3; backdrop-filter: blur(3px); }
+.command-header { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 16px 20px 8px; }
+.command-header h2 { margin: 0; font-size: 14px; font-weight: 600; letter-spacing: 0; text-transform: none; }
+.command-close { border: 1px solid var(--line); border-radius: 4px; padding: 3px 6px; color: var(--text-2); background: transparent; cursor: pointer; font-size: 11px; }
+.command-search { padding: 8px 16px 16px; }
+.command-search input { box-sizing: border-box; width: 100%; padding: 12px; border: 1px solid var(--line); border-radius: 6px; font: inherit; font-size: 16px; color: inherit; background: var(--bg); }
+.command-search input:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+#cockpit-command-results { max-height: min(48vh, 430px); overflow: auto; margin: 0; padding: 4px 8px 8px; list-style: none; }
+#cockpit-command-results [role="option"] { display: flex; align-items: center; justify-content: space-between; gap: 16px; min-height: 36px; padding: 4px 12px; border-radius: 6px; cursor: pointer; }
+#cockpit-command-results [aria-selected="true"] { background: var(--selected); outline: 1px solid var(--accent); outline-offset: -1px; }
+/* One line per result: a 16 px mark column, then the title. Work's mark is the rail's round item
+   mark, a session's its state's dot in the rail's smaller, quieter session row (sidebar.css .session-row). */
+.command-label { min-width: 0; display: flex; align-items: center; gap: 10px; }
+.command-label > :first-child { flex: 0 0 auto; justify-self: center; }
+.command-label > .icon { width: 16px; height: 16px; color: var(--text-3); }
+.command-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.command-mark { width: 8px; height: 8px; margin: 0 4px; border-radius: 50%; background: var(--text-4); }
+.command-closed .command-mark { background: none; box-shadow: inset 0 0 0 1.5px var(--ok); }
+.command-label > .dot { margin: 0 4px; }
+.command-session { color: var(--text-2); font-size: 13px; }
+#cockpit-command-results .command-session { min-height: 30px; }
+#cockpit-command-results .command-session.under { margin-left: 18px; }
+.command-label > .chip.cockpit { padding: 0 1px; box-shadow: none; background: none; }
+.command-label > .chip.cockpit > .chip-words { display: none; }
+/* The kind gives way first on a narrow screen, so the title stays readable; the option's label holds both. */
+.command-kind { flex: 0 4 auto; min-width: 2em; overflow: hidden; text-overflow: ellipsis; color: var(--text-3); font-size: 11px; white-space: nowrap; }
+.command-keys { display: flex; gap: 4px; flex-shrink: 0; }
+.command-dialog kbd, .command-trigger kbd, .go-hint kbd { font-family: var(--mono, monospace); font-size: 11px; line-height: 1.6; padding: 1px 5px; border: 1px solid var(--line); border-radius: 4px; color: var(--text-2); white-space: nowrap; }
+.command-footer { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px; padding: 12px 20px; border-top: 1px solid var(--line); color: var(--text-2); font-size: 11px; }
+.command-empty { padding: 32px 12px; color: var(--text-2); text-align: center; }
+.command-trigger { display: inline-flex; align-items: center; gap: 8px; margin-left: auto; white-space: nowrap; }
+.shortcut-help { max-height: 58vh; overflow: auto; padding: 0 20px 16px; }
+.shortcut-help h3 { margin: 20px 0 8px; color: var(--text-2); font-size: 11px; letter-spacing: .06em; text-transform: uppercase; }
+.shortcut-binding { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 6px 0; font-size: 13px; }
+/* The part a click moved to: a thin pale-orange outline. Keyboard focus (J/K) draws it in full orange, so it
+   reads against the page. The step on the clock already carries its stripe, so it takes no outline. */
+.keyboard-current { outline: 2px solid var(--accent-line) !important; outline-offset: 2px; scroll-margin: 100px 0 24px; }
+.keyboard-current:focus-visible { outline-color: var(--accent) !important; }
+.motion-ghost.keyboard-current, .motion-ghost .keyboard-current, .on-clock.keyboard-current { outline: none !important; }
+.go-hint { position: fixed; z-index: 100; right: 24px; bottom: 24px; max-width: min(560px, calc(100vw - 48px)); display: flex; flex-wrap: wrap; gap: 12px 16px; padding: 16px; border: 1px solid var(--line); border-radius: 8px; color: var(--text); background: var(--surface-pop); box-shadow: 0 8px 32px #0004; font-size: 12px; }
+.go-hint strong { width: 100%; font-weight: 600; }
+.go-hint[hidden], .command-dialog [hidden] { display: none !important; }
+@media (max-width: 640px) {
+  .command-trigger { padding: 6px; }
+  .command-trigger kbd { display: none; }
+  .command-dialog { margin-top: 24px; max-height: 88vh; }
+  .command-instructions { display: none; }
+}
+@media (prefers-reduced-motion: reduce) { .keyboard-current { scroll-behavior: auto; } }
+/* Include closed (VIEW-21), beside the words: the menu then also lists closed work, and the page's filter too. */
+.command-search { display: flex; align-items: center; gap: 12px; }
+.command-search input[type="search"] { flex: 1 1 auto; min-width: 0; }
+.command-closed { display: inline-flex; flex-shrink: 0; align-items: center; gap: 6px; font-size: 13px; color: var(--text-2); cursor: pointer; white-space: nowrap; }
+.command-search .command-closed input { width: auto; padding: 0; margin: 0; accent-color: var(--accent); }

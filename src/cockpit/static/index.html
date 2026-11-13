@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <meta name="cockpit-style-nonce" content="__COCKPIT_STYLE_NONCE__">
+  <meta name="theme-color" media="(prefers-color-scheme: light)" content="#f8f7f4">
+  <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#141210">
+  <title>Cockpit</title>
+  <link rel="icon" href="/static/icon.svg" type="image/svg+xml">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="Cockpit">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <script src="/static/local-auth.js"></script>
+  <script src="/static/launch.js"></script>
+  <script src="/static/errors.js"></script>
+  <script src="/static/reply.js"></script>
+  <script src="/static/uses.js" defer></script>
+  <script src="/static/boot.js"></script>
+  <link rel="stylesheet" href="/static/style.css">
+  <link rel="stylesheet" href="/static/motion.css">
+  <link rel="stylesheet" href="/static/marks.css">
+  <link rel="stylesheet" href="/static/look.css">
+  <link rel="stylesheet" href="/static/keyboard.css">
+  <link rel="stylesheet" href="/static/prompt-editor.css">
+  <link rel="stylesheet" href="/static/page-comments.css">
+  <link rel="stylesheet" href="/static/page-overlay.css">
+  <link rel="stylesheet" href="/static/sidebar.css">
+  <link rel="stylesheet" href="/static/center.css">
+  <!-- part styles -->
+  <link rel="stylesheet" href="/static/loading.css">
+  <link rel="stylesheet" href="/static/launch.css">
+  <script src="/static/icons.js"></script>
+  <script src="/static/views.js"></script>
+  <script src="/static/loading.js" defer></script>
+  <script src="/static/keyboard.js" defer></script>
+  <script src="/static/editor-loader.js" defer></script>
+  <script src="/static/prefs.js" defer></script>
+  <script src="/static/pick.js" defer></script>
+  <script src="/static/motion.js" defer></script>
+  <script src="/static/presence.js" defer></script>
+  <script src="/static/shell.js" defer></script>
+  <script src="/static/page-comments.js" defer></script>
+  <script src="/static/page-choices.js" defer></script>
+  <script src="/static/page-overlay.js" defer></script>
+  <script src="/static/sidebar.js" defer></script>
+  <script src="/static/center.js" defer></script>
+  <!-- part scripts -->
+  <script src="/static/close-gpu.js" defer></script>
+  <script src="/static/app.js" defer></script>
+  <script src="/static/flashes.js" defer></script>
+</head>
+<body>
+  <div id="launch" class="launch" aria-hidden="true">
+    <div class="launch-half launch-top"></div>
+    <div class="launch-half launch-bottom"></div>
+    <div class="launch-line"></div>
+    <div class="launch-glint"></div>
+    <svg class="launch-mark" viewBox="0 0 32 32"><defs><linearGradient id="launch-amber" gradientUnits="userSpaceOnUse" x1="0" y1="9.5" x2="0" y2="20.5"><stop stop-color="#ffbe5c"/><stop offset="1" stop-color="#ef9f2f"/></linearGradient></defs><g fill="none" stroke="url(#launch-amber)" stroke-width="2.2"><circle cx="16" cy="16.25" r="4.1"/><path d="M4.5 16.25h7.4M20.1 16.25h7.4M16 12.15V9.5"/></g></svg>
+  </div>
+  <header id="header" class="top">
+    <div class="top-inner">
+      <details class="menu brand-menu">
+        <summary class="brand" title="Cockpit" aria-label="Cockpit"><span class="brand-mark"></span></summary>
+        <div class="menu-list">
+          <button id="feedback-menu" class="phone-only" type="button"><span class="menu-label"><svg class="icon icon-pick" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="8" r="4.5"/><path d="M8 1.5v3M8 11.5v3M1.5 8h3M11.5 8h3"/><circle cx="8" cy="8" r="0.85" fill="currentColor" stroke="none"/></svg>Feedback on a part of the page<span class="feedback-count" hidden></span></span></button>
+          <a class="phone-only" href="/briefing"><span class="menu-label"><svg class="icon icon-log" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 4h7.5M6 8h7.5M6 12h7.5"/><circle cx="3" cy="4" r="1" fill="currentColor" stroke="none"/><circle cx="3" cy="8" r="1" fill="currentColor" stroke="none"/><circle cx="3" cy="12" r="1" fill="currentColor" stroke="none"/></svg>Briefing</span></a>
+          <a class="phone-only" href="/pages"><span class="menu-label"><svg class="icon icon-chart" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 13.5h12M4.5 11V8M8 11V3.5M11.5 11V6"/></svg>Pages</span></a>
+          <a class="phone-only" href="/usage"><span class="menu-label"><svg class="icon icon-meter" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 11.5a5.5 5.5 0 1 1 11 0"/><path d="M8 11.5l2.8-3.4"/><circle cx="8" cy="11.5" r="1.1" fill="currentColor" stroke="none"/><path d="M2 14h12"/></svg>Usage</span></a>
+          <a class="phone-only" href="/spec"><span class="menu-label"><svg class="icon icon-doc" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4.5 1.75h5l3 3v8.75a1 1 0 0 1-1 1h-7a1 1 0 0 1-1-1V2.75a1 1 0 0 1 1-1z"/><path d="M9.5 1.75v3h3M6 8.5h4M6 11h4"/></svg>Spec</span></a>
+          <a class="phone-only" href="/skills"><span class="menu-label"><svg class="icon icon-bolt" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 1.5L3.5 9H8l-1 5.5L12.5 7H8z"/></svg>Skills</span></a>
+          <a href="/emergency" title="A plain page for when this one is broken"><span class="menu-label"><svg class="icon icon-lifebuoy" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="8" r="6"/><circle cx="8" cy="8" r="2.5"/><path d="M3.8 3.8l2.4 2.4M9.8 9.8l2.4 2.4M12.2 3.8L9.8 6.2M6.2 9.8l-2.4 2.4"/></svg>Emergency session</span></a>
+          <form method="post" action="/auth/sign-out"><button type="submit"><span class="menu-label"><svg class="icon icon-logout" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6.5 2.5H4A1.5 1.5 0 0 0 2.5 4v8A1.5 1.5 0 0 0 4 13.5h2.5M10 5l3 3-3 3M13 8H6.5"/></svg>Sign out</span></button></form>
+        </div>
+      </details>
+      <nav class="page-tabs" aria-label="Pages"><a href="/" data-view="cockpit" aria-current="page">Cockpit</a><a href="/classic#sessions" data-view="sessions">Sessions</a><a href="/briefing">Briefing</a><a href="/pages">Pages</a><a href="/usage">Usage</a><a href="/spec">Spec</a><a href="/skills">Skills</a></nav>
+      <div id="usage"></div>
+      <div class="top-right">
+        <button id="reload" class="button accent icon-only" type="button" title="A newer Cockpit is running; reloading keeps your drafts" hidden><svg class="icon icon-retry" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9l1.6 1.6"/><path d="M13.5 2.5v3.2h-3.2"/></svg><span class="label"><span class="reload-news">New version · </span>Reload</span></button>
+        <span id="unsent" class="unsent" role="status" hidden></span>
+        <span id="live" class="live-dot" role="img" aria-label="Connecting" title="Connecting"></span>
+        <button id="resume-sweeps" class="button resume-sweeps" type="button" aria-label="Restart sweeps" hidden><svg class="icon icon-play" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 3.3v9.4L12.5 8z" fill="currentColor"/></svg><span class="label">Restart sweeps</span></button>
+        <div class="key-tray">
+          <button id="feedback-mode" class="button icon-only" type="button" title="Feedback: pick a part of the page, then add a to-do about it" aria-label="Feedback" data-key="F"><svg class="icon icon-pick" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="8" r="4.5"/><path d="M8 1.5v3M8 11.5v3M1.5 8h3M11.5 8h3"/><circle cx="8" cy="8" r="0.85" fill="currentColor" stroke="none"/></svg><span class="feedback-count" hidden></span></button>
+          <button id="update" class="button update" type="button" aria-label="Update"><svg class="icon icon-retry" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9l1.6 1.6"/><path d="M13.5 2.5v3.2h-3.2"/></svg><span id="update-sub" class="update-sub"></span></button>
+          <div id="sweep-status" class="sweep-status"></div>
+        </div>
+        <button id="add" class="button primary add-button" type="button" title="Add a to-do; a session starts on it" data-key="A"><svg class="icon icon-plus" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 3v10M3 8h10"/></svg><span class="label">Add</span></button>
+      </div>
+    </div>
+  </header>
+  <div id="banner" class="banner-area"></div>
+  <main class="layout">
+    <nav id="sidebar" class="sidebar" aria-label="Your items"><div class="ghost-box ghost-list" data-ghost role="status" aria-label="Loading your items"><span class="ghost-bar tall w-80"></span><span class="ghost-gap"></span><span class="ghost-bar small w-40"></span><span class="ghost-bar w-80"></span><span class="ghost-bar w-70"></span><span class="ghost-bar w-90"></span><span class="ghost-bar w-60"></span><span class="ghost-gap"></span><span class="ghost-bar small w-30"></span><span class="ghost-bar w-70"></span><span class="ghost-bar w-80"></span><span class="ghost-gap"></span><span class="ghost-bar small w-40"></span><span class="ghost-bar w-60"></span><span class="ghost-bar w-90"></span><span class="ghost-bar w-70"></span></div></nav>
+    <div class="primary">
+      <section id="overview" aria-label="Open items by who has the next move"></section>
+      <section id="blocked" aria-label="Blocked tool calls and sessions at a dialog"></section>
+      <section id="next" aria-label="Next up"><div class="ghost-box ghost-card" data-ghost role="status" aria-label="Loading your next step"><span class="ghost-column"><span class="ghost-bar small ghost-context"></span><span class="ghost-bar ghost-title w-90"></span><span class="ghost-bar ghost-title w-50"></span><span class="ghost-bar ghost-why w-90"></span><span class="ghost-bar w-60"></span><span class="ghost-history"><span class="ghost-bar small w-30"></span><span class="ghost-bar w-80"></span><span class="ghost-bar w-60"></span></span><span class="ghost-bar w-90"></span><span class="ghost-bar w-80"></span><span class="ghost-bar w-90"></span><span class="ghost-bar w-40"></span></span><span class="ghost-reply"></span><p class="note ghost-note"></p></div></section>
+      <section id="session-view" aria-label="Session"></section>
+      <section id="settings-view" aria-label="Priorities and inbox"></section>
+      <section id="queue" aria-label="Queue"></section>
+      <section id="work" aria-label="Work and sessions" tabindex="-1"></section>
+    </div>
+    <aside class="side">
+      <section id="pinned" class="panel" aria-label="Pinned"></section>
+      <section id="goals" class="panel" aria-label="Priorities"></section>
+    </aside>
+    <div class="side board" aria-label="Patterns, your time and permissions">
+      <section id="patterns" class="panel" aria-label="Patterns"></section>
+      <section id="time" class="panel" aria-label="Your time"></section>
+      <section id="permissions" class="panel" aria-label="Permissions"></section>
+    </div>
+  </main>
+  <div id="pick-bar" class="pick-bar" hidden></div>
+  <div id="pick-box" class="pick-box" hidden></div>
+  <div id="add-box" class="add-box" role="dialog" aria-modal="true" aria-label="Add to your work" hidden></div>
+  <div id="lightbox" class="lightbox" role="dialog" aria-label="Image, full size" hidden></div>
+  <dialog id="time-dialog" class="time-dialog" aria-labelledby="time-dialog-title"></dialog>
+  <dialog id="zone-dialog" class="time-dialog zone-dialog" aria-labelledby="zone-dialog-title"></dialog>
+  <div id="idle-veil" class="idle-veil" popover="manual" aria-hidden="true"></div>
+  <dialog id="idle" class="time-dialog idle-dialog" aria-labelledby="idle-title"></dialog>
+  <div id="toast" class="toast" role="status" hidden></div>
+</body>
+</html>

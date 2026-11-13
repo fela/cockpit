@@ -1,0 +1,266 @@
+/* The Usage page (usage.html, usage.js). It loads after style.css and uses its tokens and shared parts:
+   the header, banners, section headings (.section-head), the segmented control (.seg) and .link-button. */
+
+:root {
+  /* The four kinds of token, in the working blue: uncached input full, cache writes and reads paler
+     the cheaper they are, output deepened toward the text colour. Mixed in OKLab, which keeps the blue's hue
+     (OKLCH turned it toward the grey's hue 0, pink and plum), from the theme's own colours,
+     so both themes get their own shades. */
+  --kind-fresh: var(--working);
+  --kind-cache-write: color-mix(in oklab, var(--working) 62%, var(--surface));
+  --kind-cache-read: color-mix(in oklab, var(--working) 30%, var(--surface));
+  --kind-output: color-mix(in oklab, var(--working) 55%, var(--text));
+  /* Codex's use (SESSION-10), in the deployment teal deepened a little toward the text, apart from Claude's blue
+     and the steps' accent. */
+  --codex: color-mix(in oklab, var(--staging) 82%, var(--text));
+}
+
+
+.spend-layout {
+  max-width: 1320px;
+  margin: 0 auto;
+  padding: 16px var(--page-gutter) 40px;
+}
+.spend-layout .section-head { margin-bottom: 8px; }
+
+.spend-head { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 24px; margin-bottom: 4px; }
+.spend-head h1 { margin: 0; font: 700 30px/1.2 var(--sans); letter-spacing: -.022em; }
+/* The period and the measure: two switches at the head's right end. */
+.spend-controls { display: flex; flex-wrap: wrap; gap: 8px; margin-left: auto; }
+.spend-controls button[aria-pressed="true"] { background: var(--surface); color: var(--text); box-shadow: var(--shadow-card); }
+.spend-lede { margin: 14px 0 8px; max-width: 72ch; color: var(--text-2); font-size: var(--fs-meta); }
+
+/* The weekly meters and the period's tiles as readouts: a large figure with its label. The :root rules
+   below make them cards of the page. */
+.meters { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 8px; }
+.meters + .meters { margin-top: 8px; }
+:is(.meter, .spend-readout) {
+  display: flex; flex-direction: column; gap: 3px; padding: 8px 12px;
+  background: var(--shield-well); box-shadow: var(--shield-well-in); cursor: help;
+}
+/* A tile with a breakdown is a button: a press opens its figures under its line. */
+button.spend-readout { border: 0; margin: 0; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.spend-readout > .breakdown { display: block; margin-bottom: 0; }
+.spend-figure { font: 400 32px/1 var(--sans); font-synthesis: none; font-variant-numeric: tabular-nums; color: var(--shield-lit); }
+:is(.spend-label, .meter-line) { font-size: var(--fs-meta); line-height: 16px; color: var(--lamp-grey); }
+.meter-name { display: flex; align-items: baseline; gap: 8px; min-width: 0; font-size: var(--fs-meta); line-height: 16px; color: var(--shield-text); }
+.meter-who { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.meter-plan { flex-shrink: 0; color: var(--lamp-grey); }
+/* A meter's bar, as the header's: filled to the share used in the pace's colour, a tick where the clock is. */
+.meter.under { --pace: var(--lamp-green); }
+.meter.near { --pace: var(--lamp-orange); }
+.meter.over { --pace: var(--lamp-red); }
+.meter-bar { position: relative; height: 4px; margin: 2px 0; background: repeating-linear-gradient(to right, oklch(0.27 0.02 258) 0 3px, transparent 3px 4px); }
+.meter-used { position: absolute; inset: 0 auto 0 0; background: repeating-linear-gradient(to right, var(--pace, var(--shield-label)) 0 3px, transparent 3px 4px); }
+.meter-tick { position: absolute; top: -3px; width: 1px; height: 10px; margin-left: -1px; background: var(--shield-text); }
+.meter.unknown .spend-figure { color: var(--lamp-grey); }
+
+/* The period's core numbers (SESSION-16): three tiles, then the cost by kind of token as one bar with its legend. */
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 8px; }
+.tile-line { color: var(--text-3); font-size: var(--fs-meta); line-height: 16px; }
+.spend-note { max-width: 72ch; margin: 10px 0 0; color: var(--text-2); font-size: var(--fs-meta); }
+.kinds { margin-top: 12px; }
+.kinds .kind-bar { height: 6px; gap: 2px; border-radius: 0; }
+.kinds .kind-bar > span:first-child { border-radius: var(--radius-xs) 0 0 var(--radius-xs); }
+.kinds .kind-bar > span:last-child { border-radius: 0 var(--radius-xs) var(--radius-xs) 0; }
+.kinds-legend { display: flex; flex-wrap: wrap; gap: 4px 20px; margin: 6px 0 0; padding: 0; list-style: none; font-size: var(--fs-meta); line-height: 16px; }
+.kinds-legend li { display: flex; align-items: center; gap: 6px; cursor: help; }
+.kinds-name { color: var(--text-2); }
+.kinds-figure { color: var(--text); font-variant-numeric: tabular-nums; }
+.kinds-legend .kind-key { margin: 0; border-radius: 2px; }
+.card-title { margin: 0 0 6px; color: var(--text-2); font: 600 var(--fs-meta)/16px var(--sans); }
+
+/* Cards of ranked bars (SESSION-16): where the use went, and the work with the costliest cache misses. */
+.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 8px; }
+.spend-card { display: flex; flex-direction: column; min-width: 0; padding: 8px 12px; background: var(--surface); box-shadow: var(--shadow-card); border-radius: var(--radius); }
+.card-more { align-self: flex-start; margin-top: 6px; font-size: var(--fs-meta); }
+.spend-rank { display: grid; gap: 5px; margin: 0; padding: 0; list-style: none; }
+.rank-row {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: baseline; gap: 2px 12px; width: 100%;
+  margin: 0; padding: 0; border: 0; background: none; color: inherit; font: inherit; text-align: left; cursor: pointer;
+}
+.rank-row:hover .rank-name, .rank-row[aria-expanded="true"] .rank-name { text-decoration: underline; text-decoration-color: var(--line-strong); text-underline-offset: 3px; }
+/* A row's, a day's or a turn's figures, opened by a press on it. */
+.breakdown {
+  margin: 4px 0 6px; padding: 6px 10px; border-left: 2px solid var(--line-strong); color: var(--text-2);
+  font-size: var(--fs-meta); line-height: 18px; white-space: pre-line; overflow-wrap: anywhere;
+}
+.breakdown-row > td { padding-top: 0; text-align: left; white-space: normal; }
+.breakdown-row > td > .breakdown { max-width: 80ch; margin-top: 0; }
+.row-open {
+  display: block; width: 100%; min-width: 0; margin: 0; padding: 0; border: 0; background: none; color: inherit;
+  font: inherit; text-align: left; cursor: pointer;
+}
+.row-open:hover > .row-name, .row-open[aria-expanded="true"] > .row-name { text-decoration: underline; text-decoration-color: var(--line-strong); text-underline-offset: 3px; }
+.rank-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); font-size: var(--fs-meta); line-height: 16px; }
+.rank-figure { color: var(--text); font-size: var(--fs-meta); line-height: 16px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.rank-bar { grid-column: 1 / -1; height: 3px; background: var(--line); border-radius: 2px; }
+.rank-fill { display: block; height: 100%; min-width: 2px; background: var(--working); border-radius: 2px; }
+.spend-card.codex .rank-fill { background: var(--codex); }
+.rank-meta { grid-column: 1 / -1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-3); font-size: 11px; line-height: 14px; }
+.spend-define { max-width: 80ch; margin: 0 0 8px; color: var(--text-2); font-size: var(--fs-meta); }
+
+/* The full tables, behind one disclosure. */
+.spend-more { margin-top: 20px; border-top: 1px solid var(--line); }
+.spend-more > summary {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; padding: 8px 0; cursor: pointer;
+  color: var(--text); font: 600 var(--fs-meta)/20px var(--sans); list-style: none;
+}
+.spend-more > summary::-webkit-details-marker { display: none; }
+.spend-more > summary::before { content: "▸"; color: var(--text-3); transition: transform .15s; }
+.spend-more[open] > summary::before { transform: rotate(90deg); }
+.spend-more > section { margin-top: 20px; }
+.spend-more > section:first-of-type { margin-top: 8px; }
+/* Opened by a card's "All in the table" button: open at once, so the page can scroll to the table. */
+details.spend-more.at-once::details-content { transition: none; }
+@media (prefers-reduced-motion: reduce) { .spend-more > summary::before { transition: none; } }
+
+.spend-layout > section { margin-top: 22px; }
+.spend-layout > #spend-limits, .spend-layout > #spend-totals { margin-top: 8px; }
+.spend-layout > section > .section-head + .cards { margin-top: 0; }
+.spend-layout .section-head .hint { flex: 1 1 24ch; }
+
+/* A cost split by kind of token, as one bar. */
+.kind-bar { display: flex; height: 8px; overflow: hidden; border-radius: var(--radius-xs); }
+.kind-bar > span { flex-shrink: 0; }
+.kind-fresh { background: var(--kind-fresh); }
+.kind-cache_write { background: var(--kind-cache-write); }
+.kind-cache_read { background: var(--kind-cache-read); }
+.kind-output { background: var(--kind-output); }
+.kind-key { display: inline-block; width: 8px; height: 8px; margin-right: 8px; vertical-align: 0; }
+
+.spend-table { border-collapse: collapse; font-size: var(--fs-meta); font-variant-numeric: tabular-nums; }
+.spend-table :is(th, td) { padding: 3px 8px; text-align: right; white-space: nowrap; }
+.spend-table :is(th, td):first-child { padding-left: 0; text-align: left; }
+.spend-table :is(th, td):last-child { padding-right: 0; }
+.spend-table thead th { vertical-align: bottom; color: var(--text-3); font-weight: 400; border-bottom: 1px solid var(--line-strong); }
+.spend-table tbody th { font-weight: 400; color: var(--text-2); }
+.spend-table tbody tr + tr > * { border-top: 1px solid var(--line); }
+.spend-table td.sorted { color: var(--text); font-weight: 600; }
+/* The measure's cell (SESSION-11): a bar split by token kind, which the table's largest row fills, then the figure.
+   The other numbers are tinted in the working blue by how close they come to their column's largest. */
+.spend-table .measure { display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
+.measure .kind-bar { width: 120px; flex-shrink: 0; background: color-mix(in oklch, var(--line) 60%, transparent); }
+.measure-figure { min-width: 6ch; }
+.spend-table td.heat { background: color-mix(in oklch, var(--working) calc(var(--heat, 0) * 18%), transparent); }
+.kinds-table { min-width: min(100%, 420px); }
+.kinds-table tbody th { cursor: help; }
+
+/* The graph per day (SESSION-14): two column charts over one row of days, Claude use in the working blue and
+   steps done in the accent. Each has its own scale on the left; hairlines mark its top, half and baseline.
+   A day's column lights across both charts under the pointer. */
+.daily { display: grid; gap: 10px; }
+.daily-title { margin-bottom: 4px; color: var(--text-2); font-size: var(--fs-meta); }
+.daily-plot { display: grid; grid-template-columns: 48px minmax(0, 1fr); }
+.daily-axis { position: relative; color: var(--text-3); font-size: 11px; line-height: 12px; font-variant-numeric: tabular-nums; }
+.daily-axis > span { position: absolute; right: 8px; transform: translateY(-50%); white-space: nowrap; }
+.daily-axis > span:nth-child(1) { top: 0; }
+.daily-axis > span:nth-child(2) { top: 50%; }
+.daily-axis > span:nth-child(3) { top: 100%; }
+.daily-days {
+  display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); height: 96px;
+  border-top: 1px solid var(--line); border-bottom: 1px solid var(--line-strong);
+  background: linear-gradient(var(--line), var(--line)) center / 100% 1px no-repeat;
+}
+:is(.codex, .steps) .daily-days { height: 56px; }
+.use { --daily-fill: var(--working); }
+.daily-chart.codex { --daily-fill: var(--codex); }
+.steps { --daily-fill: var(--accent); }
+.daily-day {
+  display: flex; align-items: flex-end; justify-content: center; min-width: 0; margin: 0; padding: 0; border: 0;
+  background: none; cursor: pointer;
+}
+.daily-day:is(.lit, [aria-pressed="true"]) { background: color-mix(in oklch, var(--text) 7%, transparent); }
+/* At most 24 px wide, with at least 2 px of air between neighbours; rounded at the top only. */
+.daily-bar { width: min(24px, calc(100% - 2px)); background: var(--daily-fill); border-radius: var(--radius-xs) var(--radius-xs) 0 0; }
+.daily-day.today .daily-bar { background: color-mix(in oklab, var(--daily-fill) 45%, var(--surface)); }
+/* Each Monday's date, at the start of its column; near the right end, at the end of it. */
+.daily-dates { position: relative; height: 16px; margin: -14px 0 0 48px; color: var(--text-3); font-size: 11px; line-height: 16px; }
+.daily-dates > span { position: absolute; left: calc(var(--at) / var(--days) * 100%); padding-left: 4px; border-left: 1px solid var(--line-strong); white-space: nowrap; }
+.daily-dates > span.end { left: auto; right: calc((var(--days) - var(--at) - 1) / var(--days) * 100%); padding: 0 4px 0 0; border: 0; border-right: 1px solid var(--line-strong); }
+
+/* The wide tables scroll sideways on their own on a narrow screen, so the page itself never does. */
+.table-scroll { overflow-x: auto; margin-bottom: 8px; }
+.table-scroll .spend-table { width: 100%; }
+.sort-key {
+  padding: 0; border: 0; background: none; color: inherit; font: inherit; text-align: inherit; cursor: pointer;
+}
+.sort-key:hover { color: var(--text); }
+th[aria-sort] > .sort-key { color: var(--text); font-weight: 600; }
+.spend-table .name-col { max-width: 360px; white-space: normal; }
+.row-name { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
+.row-name.none { color: var(--text-3); font-style: italic; }
+.row-meta { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-3); font-size: 11px; }
+/* The most expensive turns name what started each and the skills it loaded in words, which may wrap. */
+.top-table .text-col { min-width: 12ch; max-width: 24ch; text-align: left; white-space: normal; }
+.top-table .text-col.none { color: var(--text-3); font-style: italic; }
+
+/* How the figures are counted, folded under them. */
+.spend-method-fold { margin-top: 0; }
+.spend-method { margin: 4px 0 8px; max-width: 72ch; color: var(--text-2); font-size: var(--fs-meta); }
+
+.codex-kinds { margin-bottom: 8px; }
+
+/* The readouts are cards of the page, the figures in Inter, the bars plain lines as in the header. Under
+:root, so they win over the base rules above. */
+:root :is(.meter, .spend-readout) { background: var(--surface); box-shadow: var(--shadow-card); border-radius: var(--radius); }
+:root .spend-figure { font: 600 30px/1 var(--sans); letter-spacing: -.02em; }
+:root .meter-name { color: var(--text-2); }
+:root .meter.near { --pace-fill: var(--lamp-orange-fill); }
+:root .meter-bar { height: 3px; background: var(--line-strong); }
+:root .meter-used { background: var(--pace-fill, var(--pace, var(--text-3))); }
+:root .meter-tick { top: -2px; height: 7px; background: var(--text); }
+
+/* Section headings: an emblem per section (icons.js). */
+#spend-where .section-head h2::before { --glyph: var(--mark-chart); }
+#spend-misses .section-head h2::before { --glyph: var(--mark-hourglass); }
+#spend-models .section-head h2::before { --glyph: var(--mark-layers); }
+#spend-daily .section-head h2::before { --glyph: var(--mark-flag); }
+#spend-sessions .section-head h2::before { width: 8px; margin-right: 1px; --glyph: var(--mark-bot); }
+#spend-skills .section-head h2::before { --glyph: var(--mark-key); }
+#spend-origins .section-head h2::before { --glyph: var(--mark-mail); }
+#spend-session-kinds .section-head h2::before { --glyph: var(--mark-people); }
+#spend-top .section-head h2::before { --glyph: var(--mark-radar); }
+#spend-limits .section-head h2::before { --glyph: var(--mark-clock); }
+/* Which account new sessions start on, and the user's choice of one for a while. */
+.prefer { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; margin-top: 8px; font-size: var(--fs-meta); line-height: 16px; }
+.prefer-status { flex-basis: 100%; color: var(--shield-text); }
+.prefer-account { display: inline-flex; align-items: center; gap: 8px; }
+.prefer-label { color: var(--lamp-grey); }
+/* The length chosen: filled in the text colour, as in the header's usage card, with a cross that undoes it. */
+.prefer .seg button.prefer-chosen { display: inline-flex; align-items: center; gap: 6px; padding-right: 8px; background: var(--text); color: var(--surface); font-weight: 600; }
+.prefer-undo { font-size: 14px; line-height: 1; opacity: .7; }
+.prefer-chosen:hover .prefer-undo { opacity: 1; }
+/* How much of the chosen length has passed: a thin bar inside the button's bottom edge that fills from the left. */
+.prefer .seg button.prefer-chosen { position: relative; }
+.prefer-passed { position: absolute; inset: auto 6px 3px 6px; height: 2px; overflow: hidden; border-radius: 1px; background: color-mix(in oklab, var(--surface) 28%, transparent); }
+.prefer-passed::before { content: ""; display: block; width: var(--passed); height: 100%; background: var(--surface); }
+#spend-codex .section-head h2::before { --glyph: var(--mark-bot); }
+
+@media (max-width: 900px) {
+  .spend-layout { padding-top: 16px; }
+  .spend-figure, :root .spend-figure { font-size: 20px; }
+}
+
+@media (max-width: 640px) {
+  .spend-layout { padding: 14px 16px 32px; }
+  .spend-head h1 { font-size: 22px; }
+  .spend-controls { margin-left: 0; }
+  /* Two meters to a row, so Claude's accounts and Codex fit on one screen. */
+  .meters { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .tiles, .cards { grid-template-columns: minmax(0, 1fr); }
+  :is(.meter, .spend-readout, .spend-card) { padding: 7px 10px; }
+  .spend-table .name-col { max-width: 200px; }
+  .measure .kind-bar { width: 64px; }
+  .daily-plot { grid-template-columns: 40px minmax(0, 1fr); }
+  .daily-dates { margin-left: 40px; }
+  .daily-days { height: 72px; }
+  :is(.codex, .steps) .daily-days { height: 44px; }
+  .sort-key { min-height: 32px; }
+}
+
+/* While another period loads, the figures shown fade back; the period and measure buttons stay as they are (UI-48),
+   and so do a part's sections (class usage-part), which no period changes. */
+.spend-layout > :not(.spend-head, .usage-part) { transition: opacity 160ms ease-out; }
+.spend-layout.switching > :not(.spend-head, .usage-part) { opacity: .45; transition-delay: 120ms; }
+@media (prefers-reduced-motion: reduce) { .spend-layout > :not(.spend-head, .usage-part) { transition: none; } }

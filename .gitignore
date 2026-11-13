@@ -1,0 +1,10 @@
+.venv
+__pycache__/
+*.pyc
+.claude/worktrees/
+/data/
+.pytest_cache/
+node_modules/
+/demo/dist/
+# wrangler writes its cache here on every demo publish, and the cache holds the Cloudflare account ID.
+/demo/.wrangler/

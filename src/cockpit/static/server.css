@@ -1,0 +1,77 @@
+/* The Server page (server.html, server.js). It loads after style.css and usage.css and uses their parts: the
+   heading row, the range control (.seg), the readouts (.spend-readout) and the tables (.spend-table). */
+
+:root {
+  /* One fixed colour per family of parts, in the families' order (resources.FAMILIES), so a family keeps its colour
+     on every chart and range. Seven colours a reader can tell apart, with colour-blind sight too, against this
+     page's surfaces in both themes. */
+  --fam-1: #2a78d6;
+  --fam-2: #eb6834;
+  --fam-3: #1baf7a;
+  --fam-4: #eda100;
+  --fam-5: #e87ba4;
+  --fam-6: #008300;
+  --fam-7: #6250d6;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --fam-1: #3987e5;
+    --fam-2: #d95926;
+    --fam-3: #199e70;
+    --fam-4: #c98500;
+    --fam-5: #d55181;
+    --fam-6: #008300;
+    --fam-7: #9085e9;
+  }
+}
+
+.server-layout .spend-lede { margin-top: 8px; }
+.server-layout > section:empty { display: none; }
+.server-read { color: var(--text-3); font-size: var(--fs-meta); }
+
+/* A chart: the legend above, the drawing, then its table behind a toggle. */
+.chart { position: relative; }
+.chart svg { display: block; width: 100%; height: auto; overflow: visible; touch-action: pan-y; }
+.chart .grid { stroke: var(--line); stroke-width: 1; }
+.chart .axis-label { fill: var(--text-3); font-size: 11px; font-variant-numeric: tabular-nums; }
+.chart .band { stroke: var(--surface); stroke-width: 2; stroke-linejoin: round; }
+.chart .total-line { fill: none; stroke: var(--text); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+.chart .limit-line { stroke: var(--text-3); stroke-width: 1; stroke-dasharray: 4 4; }
+.chart .cross { stroke: var(--text-2); stroke-width: 1; }
+.chart .bar { stroke: var(--surface); stroke-width: 2; }
+.chart .hit { fill: transparent; }
+.fam-1 { fill: var(--fam-1); background: var(--fam-1); }
+.fam-2 { fill: var(--fam-2); background: var(--fam-2); }
+.fam-3 { fill: var(--fam-3); background: var(--fam-3); }
+.fam-4 { fill: var(--fam-4); background: var(--fam-4); }
+.fam-5 { fill: var(--fam-5); background: var(--fam-5); }
+.fam-6 { fill: var(--fam-6); background: var(--fam-6); }
+.fam-7 { fill: var(--fam-7); background: var(--fam-7); }
+
+.legend { display: flex; flex-wrap: wrap; gap: 4px 16px; margin: 0 0 6px; padding: 0; list-style: none; font-size: var(--fs-meta); line-height: 16px; color: var(--text-2); }
+.legend li { display: flex; align-items: center; gap: 6px; }
+.legend .swatch { display: inline-block; width: 10px; height: 10px; border-radius: 2px; }
+.legend .swatch.line { height: 2px; border-radius: 1px; background: var(--text); }
+.legend .swatch.dashed { height: 0; border-top: 1px dashed var(--text-3); background: none; }
+.swatch { display: inline-block; width: 8px; height: 8px; margin-right: 6px; border-radius: 2px; vertical-align: 0; }
+
+.chart-tip {
+  position: absolute; z-index: 5; min-width: 180px; padding: 6px 10px; pointer-events: none;
+  background: var(--surface); color: var(--text); box-shadow: var(--shadow-card); border-radius: var(--radius);
+  font-size: var(--fs-meta); line-height: 18px; font-variant-numeric: tabular-nums;
+}
+.chart-tip[hidden] { display: none; }
+.chart-tip .tip-when { color: var(--text-3); }
+.chart-tip .tip-row { display: flex; align-items: center; gap: 6px; }
+.chart-tip .tip-row > :nth-child(2) { flex: 1; color: var(--text-2); }
+.chart-tip .tip-total { margin-top: 2px; padding-top: 2px; border-top: 1px solid var(--line); }
+
+.chart-table { margin-top: 6px; }
+.chart-table > summary { cursor: pointer; color: var(--text-3); font-size: var(--fs-meta); }
+
+/* On a phone the tables scroll sideways; these widths keep a task's name and its parts from folding into tall
+   narrow strips. */
+.server-layout .spend-table .name-col { min-width: 150px; }
+.server-layout .spend-table td.parts-col { min-width: 260px; max-width: 420px; white-space: normal; text-align: left; color: var(--text-2); }
+.server-layout .spend-table .name-col a { color: var(--text); }
+.server-layout .spend-table .quiet { color: var(--text-3); }

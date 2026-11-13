@@ -1,0 +1,172 @@
+/* The Pages tab (pages.html, pages.js): every shared page in a list; a chosen page takes the list's place
+   and the whole width, as reading is what the tab is for. It loads after style.css and uses its tokens and
+   shared parts: the header, banners, notes, fields and buttons. */
+
+.pages-layout {
+  max-width: 760px;
+  margin: 0 auto;
+  padding: 16px var(--page-gutter) 0;
+}
+.pages-preview { display: none; }
+.pages-reading .pages-layout { max-width: none; padding-top: 10px; }
+.pages-reading .pages-index { display: none; }
+
+.pages-head { margin-bottom: 8px; }
+.pages-head h1 { margin: 0 0 4px; font: 700 30px/1.2 var(--sans); letter-spacing: -.022em; }
+.pages-head .note { margin: 0 0 12px; }
+.pages-public-filter { margin-left: 8px; }
+.pages-head .field { height: 32px; }
+
+/* The days, newest first; each day's pages in the order they last changed. */
+.pages-day h2 { margin: 16px 0 4px; font: 650 13px/20px var(--sans); color: var(--sepia); }
+.pages-day ul { margin: 0; padding: 0; list-style: none; }
+
+.pages-row {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: start;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  text-decoration: none;
+}
+.pages-row:hover { background: var(--hover); }
+.pages-row[aria-current="true"] { background: var(--selected); }
+.pages-row:focus-visible { outline: 2px solid var(--field-focus); outline-offset: -2px; }
+.pages-row > .icon { margin-top: 2px; color: var(--text-3); }
+.pages-row-text { display: grid; gap: 2px; min-width: 0; }
+.pages-row-title { font-weight: 600; overflow-wrap: anywhere; }
+.pages-row-item { display: flex; align-items: baseline; gap: 6px; min-width: 0; font-size: var(--fs-meta); color: var(--text-2); }
+.pages-row-item { align-items: center; }
+.pages-row-item > span:not(.chip, .pages-closed, .pages-public) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pages-row-time { font-size: var(--fs-meta); color: var(--text-3); font-variant-numeric: tabular-nums; }
+/* A phone's row carries the sharing buttons, since it opens the page itself and never shows the page's heading. */
+.pages-row-share { display: none; }
+.pages-closed, .pages-public { flex-shrink: 0; padding: 0 5px; border-radius: var(--radius-xs); background: var(--chip); color: var(--text-3); }
+
+.pages-empty { margin: 16px 0; color: var(--text-2); }
+
+/* The chosen page fills the screen below the header, under one line that says what it is. */
+.pages-reading .pages-preview {
+  height: calc(100vh - var(--header-h) - 18px);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.pages-preview-head { display: flex; align-items: center; gap: 12px; }
+.pages-back .icon { transform: scaleX(-1); }
+/* The title takes the head's width between the keys and wraps to two lines at most; the line about the page
+   stands under it. */
+.pages-preview-words { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.pages-preview-head h2 { margin: 0; font: 650 15px/1.3 var(--sans); letter-spacing: -.008em; overflow-wrap: anywhere; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }
+.pages-preview-head .note { margin: 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pages-preview-buttons { display: flex; gap: 6px; flex-shrink: 0; }
+.pages-frame { flex: 1; width: 100%; border: 0; border-radius: var(--radius); background: var(--surface); box-shadow: 0 0 0 1px var(--line); }
+
+/* The page alone; while the user comments, a sidebar beside it (the step's ask over the comment column,
+   page-comments.css) and the reply box under both. */
+.pages-reader { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; }
+.pages-reader.commenting { grid-template-columns: minmax(0, 1fr) 280px; }
+.pages-reader .pages-frame { height: 100%; }
+.pages-side { min-height: 0; display: flex; flex-direction: column; gap: 10px; }
+.pages-side .pc-column { flex: 1; }
+.pages-side .pages-step { padding: 0 2px; }
+.pages-reply { display: grid; gap: 8px; }
+.pages-reply:empty { display: none; }
+.pages-reply textarea { width: 100%; resize: vertical; min-height: 44px; }
+.pages-pending { margin: 0; color: var(--text); }
+.pages-pending.quiet { color: var(--text-2); }
+.pages-reply-buttons { display: flex; justify-content: flex-end; gap: 8px; }
+.pages-reply-sent { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 12px; border-radius: var(--radius); background: var(--accent-bg); box-shadow: inset 0 0 0 1px var(--accent-line); }
+.pages-reply-sent p { margin: 0; }
+
+/* Opened from a step (`?step=M`): the list out of reach; the step's ask heads the sidebar while commenting. */
+.pages-step-mode .pages-index { display: none; }
+.pages-step-mode .pages-preview { display: flex; }
+.pages-step-item { display: flex; align-items: center; gap: 6px; margin: 0; font-size: var(--fs-meta); color: var(--text-2); }
+.pages-step-item a { min-width: 0; overflow-wrap: anywhere; color: inherit; }
+.pages-preview-words .note > .chip.cockpit { margin-right: 6px; vertical-align: middle; }
+.pages-step-ask { margin: 0; font: 650 15px/1.35 var(--sans); letter-spacing: -.01em; overflow-wrap: anywhere; }
+.pages-step .note { margin: 4px 0 0; }
+
+@media (max-width: 1180px) {
+  .pages-reader.commenting { grid-template-columns: minmax(0, 1fr) 240px; }
+}
+
+@media (max-width: 900px) {
+  .pages-layout { padding: 20px 16px 48px; }
+  /* A page shows on a phone too (from a step, or a link to it): the page most of the screen high, the comments
+     and the reply box under it, all in the page's own scroll. */
+  .pages-reading .pages-layout { padding: 8px 12px 32px; }
+  .pages-reading .pages-preview { height: auto; }
+  .pages-reader.commenting { grid-template-columns: minmax(0, 1fr); }
+  .pages-reader .pages-frame { height: 80vh; }
+  .pc-column { overflow: visible; }
+  .pages-preview-head { flex-wrap: wrap; }
+  .pages-preview-buttons { flex-wrap: wrap; flex-shrink: 1; }
+  .pages-preview-words { flex-basis: 100%; order: 3; gap: 0; }
+  .pages-preview-head .note { white-space: normal; }
+  .pages-head h1 { font-size: 24px; }
+  .pages-row { min-height: 44px; padding: 8px 6px; }
+  .pages-day li { display: flex; align-items: center; gap: 4px; }
+  .pages-day li > .pages-row { flex: 1; min-width: 0; }
+  .pages-row-share { display: flex; flex-shrink: 0; gap: 4px; }
+  .pages-row-share .button.small.icon-only { width: 40px; height: 40px; }
+}
+
+/* Inside the layer over Cockpit's page (SPEC NEXT-47): the page alone, edge to edge, and its buttons floating in the
+   top right corner, left of the layer's X. While commenting, the column beside the page starts below them. */
+.pages-overlay-mode .top, .pages-overlay-mode .pages-index { display: none; }
+.pages-overlay-mode .pages-layout { max-width: none; padding: 0; }
+.pages-overlay-mode.pages-reading .pages-preview { height: 100dvh; gap: 0; }
+.pages-overlay-mode .pages-reader { gap: 0; }
+.pages-overlay-mode .pages-frame { border-radius: 0; box-shadow: none; }
+.pages-overlay-mode .pages-side { padding: 52px 12px 12px; border-left: 1px solid var(--line); background: var(--surface); }
+.pages-overlay-mode .pages-reply:not(:empty) { padding: 10px 12px; border-top: 1px solid var(--line); background: var(--surface); }
+/* The head spans to the left edge so a long note wraps under the buttons instead of pushing them under the X;
+   only its buttons and note take clicks, so the page under the rest of it stays usable. */
+.pages-overlay-head { position: fixed; z-index: 10; top: 10px; right: 52px; left: 12px; pointer-events: none; }
+.pages-overlay-head .pages-preview-buttons { flex-wrap: wrap; justify-content: flex-end; flex-shrink: 1; width: 100%; }
+.pages-overlay-head .pages-preview-buttons > * { pointer-events: auto; }
+.pages-overlay-head .pages-choice-note { order: -1; }
+@media (max-width: 900px) { .pages-overlay-head .pages-choice-note { order: 1; } }
+.pages-overlay-head .button { background: var(--surface-pop); box-shadow: 0 2px 10px #0002; }
+.pages-overlay-head .button.on { background: var(--selected); }
+/* A choice just saved on the page (SPEC NEXT-48): a few quiet words beside the buttons, gone after a moment. */
+.pages-choice-note { align-self: center; padding: 3px 8px; border-radius: 999px; font-size: var(--fs-meta); color: var(--text-2); background: var(--surface-pop); }
+.pages-choice-note.failed { color: var(--fail); }
+@media (max-width: 900px) {
+  .pages-overlay-mode.pages-reading .pages-preview { height: auto; }
+  .pages-overlay-mode .pages-reader .pages-frame { height: 100dvh; }
+  .pages-overlay-mode .pages-side { padding-top: 12px; border-left: 0; border-top: 1px solid var(--line); }
+}
+
+/* Beside its step: the step's card lists the comments and takes new ones in its reply box, so the page
+   keeps its whole width. An error loading the comments shows in a box over the page's bottom right corner. */
+.pages-beside-mode .pages-reader { position: relative; }
+.pages-beside-mode .pc-column { position: absolute; z-index: 10; right: 16px; bottom: 16px; width: min(380px, calc(100% - 32px)); max-height: 60%; box-shadow: var(--shadow-pop), inset 0 0 0 1px var(--margin-line); }
+.pages-beside-mode .pc-column[hidden] { display: none; }
+
+/* The Share menu on a page's heading (SPEC API-8): who can open the page, then the people it is shared with, then its
+   link. It is a step's ⋯ menu in look and keys; the people sit in a panel of their own between the groups. */
+.share-menu > summary { gap: 6px; }
+.share-menu > .menu-list { min-width: 300px; }
+.share-people { display: flex; flex-direction: column; gap: 2px; margin-top: 4px; padding: 6px 12px 2px; box-shadow: inset 0 1px 0 var(--line); }
+.share-person { display: flex; align-items: center; gap: 8px; min-height: 30px; color: var(--text); }
+.share-person > .icon { flex: none; color: var(--text-3); }
+.share-email { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.menu-list .share-remove { flex: none; display: grid; place-items: center; width: 26px; height: 26px; padding: 0; color: var(--text-3); }
+.menu-list .share-remove:hover, .menu-list .share-remove:focus-visible { background: var(--hover); color: var(--text); }
+.share-add { display: flex; gap: 6px; margin-top: 4px; }
+.share-add > .field { flex: 1; min-width: 0; height: 30px; padding: 4px 10px; font-size: var(--fs-meta); }
+.menu-list .share-add > .button { flex: none; height: 30px; padding: 0 12px; justify-content: center; align-items: center; box-shadow: inset 0 0 0 1px var(--line); }
+.share-people > .menu-note { margin: 0; padding: 6px 0 4px; color: var(--text-3); font-size: var(--fs-meta); line-height: 18px; }
+@media (max-width: 640px) {
+  .share-menu > .menu-list { min-width: 0; }
+  .share-people { padding: 8px 16px 4px; }
+  .share-person { min-height: 40px; }
+  .menu-list .share-remove { width: 40px; height: 40px; }
+  /* 16 px, so a phone's browser doesn't zoom into the box. */
+  .share-add > .field, .menu-list .share-add > .button { height: 40px; font-size: 16px; }
+}

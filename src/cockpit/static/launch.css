@@ -1,0 +1,89 @@
+/* The installed app's launch (SPEC UI-80, launch.js). The phone's own launch screen is the marker on graphite; this
+   picks up from it with the same graphite and marker, then plays the sweep:
+   - an amber line draws out from the marker's wings across the screen;
+   - while the page waits, a glint of light runs along the line, over and over, so the wait visibly moves;
+   - once the page has drawn, the screen splits along the line: the top half slides up, the bottom half down.
+   Every animation moves only transform and opacity, so the phone's compositor runs it off the page's main thread
+   and it keeps moving while the page draws. The colours are the brand's own (look.css), the same in light and dark,
+   as the phone's launch screen is. With reduced motion nothing moves and the launch fades. */
+
+.launch { display: none; }
+
+:root.launching .launch {
+  --launch-ground: #141210;
+  --launch-amber: #f5ad45;
+  display: block;
+  position: fixed;
+  inset: 0;
+  z-index: 2147483000;
+  overflow: hidden;
+  contain: strict;
+}
+:root.launch-out .launch { pointer-events: none; }
+
+.launch-half {
+  position: absolute;
+  left: 0;
+  right: 0;
+  /* Each reaches past the middle, so no seam shows the page before the split. */
+  height: calc(50% + 2px);
+  background: var(--launch-ground);
+  transition: transform 280ms cubic-bezier(.65, 0, .25, 1);
+}
+.launch-top { top: 0; }
+.launch-bottom { bottom: 0; }
+:root.launch-out .launch-top { transform: translateY(-100%); }
+:root.launch-out .launch-bottom { transform: translateY(100%); }
+
+/* The line runs through the marker's wings, brightest at the middle. */
+.launch-line {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: calc(50% + 1px);
+  height: 2px;
+  margin-top: -1px;
+  background: linear-gradient(90deg, transparent 6%, color-mix(in oklab, var(--launch-amber) 50%, transparent) 30%, var(--launch-amber) 46%, var(--launch-amber) 54%, color-mix(in oklab, var(--launch-amber) 50%, transparent) 70%, transparent 94%);
+  animation: launch-draw 360ms cubic-bezier(.2, 0, 0, 1) both;
+}
+@keyframes launch-draw { from { transform: scaleX(.02); } }
+
+/* The glint starts once the line has drawn and runs from the left edge to past the right one. */
+.launch-glint {
+  position: absolute;
+  left: 0;
+  top: calc(50% + 1px);
+  width: 30%;
+  height: 4px;
+  margin-top: -2px;
+  border-radius: 2px;
+  background: linear-gradient(90deg, transparent, #ffd89a 40%, #fff4e0 50%, #ffd89a 60%, transparent);
+  box-shadow: 0 0 12px rgb(255 190 92 / .6);
+  opacity: 0;
+  animation: launch-glide 1.2s cubic-bezier(.45, 0, .55, 1) 360ms infinite;
+}
+@keyframes launch-glide {
+  from { transform: translateX(-100%); opacity: 1; }
+  to { transform: translateX(333%); opacity: 1; }
+}
+
+.launch-mark {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 148px;
+  height: 148px;
+  margin: -74px 0 0 -74px;
+}
+
+/* As the halves part, the line, the glint and the marker fade, so nothing is left floating over the page. */
+.launch-line, .launch-glint, .launch-mark { transition: opacity 120ms linear; }
+:root.launch-out .launch-line, :root.launch-out .launch-mark { opacity: 0; }
+:root.launch-out .launch-glint { opacity: 0; animation: none; }
+
+@media (prefers-reduced-motion: reduce) {
+  :root.launching .launch, :root.launching .launch * { animation: none !important; }
+  :root.launch-out .launch { opacity: 0; transition: opacity 150ms ease-out; }
+  :root.launch-out .launch * { transform: none !important; opacity: 1 !important; }
+  .launch-glint { display: none; }
+}

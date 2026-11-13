@@ -1,0 +1,481 @@
+/* The page's skin (UI-29): warm paper, white cards in hairline frames, rounded corners, Source Serif
+   headings and Inter everywhere else. The marks are icons.js's line drawings, one per meaning (UI-25),
+   Graphite marker as the brand.
+
+   Only skin lives here. This file loads last and every rule sits under :root, so it wins over
+   style.css's base rules of the same weight. Structure (layout, sizes, what shows when, the no-move
+   rules of UI-16) stays in style.css and marks.css; the tokens, light and dark, are on :root in
+   style.css. Two parts:
+   1. The page, the tooltip (motion.css) among it: overrides for base rules that draw what a token
+      cannot undo: grounds behind headings, ledges, capitals and wide tracking, hard-coded lines.
+   2. The same for the Spec page (spec.css). */
+
+
+/* 1. The page */
+
+/* Serif headings name permission cards, steps and items in lists. */
+:root :is(.ask:not(.short-line), .task-heading, .section-head h2, .group > summary, :is(#patterns, #time, #permissions) > details.more > summary, body.plain h1, .blocked-head .what.words, .row-title) {
+  font-family: var(--serif);
+  letter-spacing: -.005em;
+  text-transform: none;
+}
+:root ::placeholder { color: var(--placeholder); }
+:root :focus-visible { outline-offset: 2px; border-radius: var(--radius-xs); }
+:root :is(.top-inner, .lights) { --focus: var(--accent); }
+:root :is(:is(.top-inner, .rail-top) .menu-list, .light-list) { --focus: var(--accent); }
+
+/* The header: the page's ground, a hairline under it once the page scrolls. */
+:root .top { transition: box-shadow 120ms ease-out; }
+:root .top.scrolled { box-shadow: 0 1px 0 var(--line); }
+:root .top-inner { border-image: none; color: var(--text); letter-spacing: inherit; }
+:root .brand { color: var(--text); }
+/* The brand (UI-28): Graphite marker, in both themes, the logo's colours at all times. The marker fills
+   the tile; its amber runs over the marker's own height. */
+:root .brand-mark { border-radius: 25%; background: var(--brand-tile); box-shadow: inset 0 0 0 1px oklch(1 0 0 / .07), 0 1px 2px oklch(0 0 0 / .18); }
+:root .brand-mark::after { width: 100%; height: 100%; background: linear-gradient(#ffbe5c 30%, #ef9f2f 65%); }
+:root .page-tabs { padding: 0; border-radius: 0; background: none; box-shadow: none; }
+:root .page-tabs a {
+  height: 28px;
+  border-radius: var(--radius-sm);
+  color: var(--text-3);
+  font: 500 var(--fs-body)/20px var(--sans);
+  letter-spacing: inherit;
+  text-transform: none;
+}
+:root .page-tabs a[aria-current="page"] { background: var(--selected); color: var(--text); box-shadow: none; }
+
+/* The counts: the number in ink beside its mark. */
+:root .counts { gap: 4px; }
+/* The counts take the free room, so their fade falls inside it: the timer's soft block has no opaque
+   ground, and a count cut under it would show through. */
+@media (min-width: 1001px) {
+  :root .counts { flex: 1 1 auto; margin-right: 0; padding-right: 0; }
+}
+:root .count,
+:root .count:last-child { gap: 4px; border-radius: var(--radius-sm); background: none; box-shadow: none; }
+:root .count b { font: 600 var(--fs-body)/20px var(--sans); }
+:root .live-dot { width: 8px; height: 8px; border-radius: 50%; box-shadow: inset 0 0 0 1.5px var(--text-4); }
+:root .live-dot.ok { background: transparent; box-shadow: none; }
+:root .live-dot.fail { background: var(--fail); box-shadow: 0 0 0 3px var(--fail-bg); }
+:root .unsent { padding: 2px 8px; border-radius: var(--radius-sm); background: var(--working-bg); color: var(--working); font: 600 12px/16px var(--sans); }
+:root .button.accent { box-shadow: none; }
+/* UI-13: a newer Cockpit's Reload is its arrow alone on a plain, opaque gold key, in the header, the sidebar's foot
+   and the phone bar; its words stay for screen readers. The gold reads the same on the light and the dark page. */
+:root {
+  --reload-gold: oklch(0.8 0.13 80);
+  --reload-gold-deep: oklch(0.7 0.15 68);
+  --reload-mark: oklch(0.3 0.07 60);
+}
+:root :is(#reload, .phone-reload) {
+  justify-content: center;
+  background: var(--reload-gold);
+  box-shadow: none;
+  color: var(--reload-mark);
+}
+:root #reload { width: 32px; padding: 0; }
+:root :is(#reload, .phone-reload) > .label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+:root :is(#reload, .phone-reload) .icon { color: var(--reload-mark); }
+@media (hover: hover) and (pointer: fine) { :root :is(#reload, .phone-reload):hover { filter: brightness(1.06); } }
+/* While the key shows, its gold slowly deepens and comes back every 2.4 s, so a new version is noticed. With
+   reduced motion it stays still. */
+@media (prefers-reduced-motion: no-preference) {
+  :root :is(#reload, .phone-reload):not([hidden]) { animation: reload-breathe 2.4s ease-in-out infinite; }
+}
+@keyframes reload-breathe {
+  0%, 100% { background-color: var(--reload-gold); }
+  50% { background-color: var(--reload-gold-deep); }
+}
+
+/* The usage meters stand 4 px apart, with no hairline between them. */
+:root #usage { gap: 4px; }
+
+/* The step timer's dot is round. */
+:root .timer-dot { border-radius: 50%; }
+/* Taking back time (TRACK-4): a raised panel of the page; the readout's well is a soft amber pill. */
+:root .time-panel { --focus: var(--accent); border-radius: var(--radius-lg); background: var(--surface-pop); box-shadow: var(--shadow-pop); }
+:root .time-well { border-radius: var(--radius-sm); background: var(--accent-bg); box-shadow: none; }
+:root .time-panel .time-field { font-family: var(--sans); font-weight: 600; letter-spacing: -.01em; }
+:root .time-panel .button:not(.primary, .ghost) { background: var(--surface); color: var(--text); box-shadow: var(--shadow-button); }
+
+/* Header keys: plain white buttons. The key tray (UI-31) is one of them, split by hairlines into
+   Feedback, Update and the full sweep's chevron; Feedback mode fills it amber when on. Update is square
+   like Feedback, its lamp a round dot at the arrow's shoulder, grey while dark. Add keeps its words in Inter. */
+:root .checked.checking::before { border-radius: 50%; }
+:root :is(.top-inner, .rail-foot) .button:not(.primary, .accent) { background: var(--surface); color: var(--text); box-shadow: var(--shadow-button); }
+:root :is(.top-inner, .rail-foot) .button.ghost:not(.on) { background: transparent; box-shadow: none; color: var(--text-2); }
+:root :is(.top-inner, .rail-foot) details[open] > summary.button:not(.primary, .accent) { background: var(--hover); color: var(--text); box-shadow: var(--shadow-button); }
+:root .key-tray { gap: 0; padding: 0; border-radius: var(--radius-sm); background: var(--surface); box-shadow: var(--shadow-button); }
+:root .key-tray > :not(:first-child) { border-left: 1px solid var(--line); }
+:root :is(.top-inner, .rail-foot) .key-tray :is(.button, summary.button) { height: 28px; border-radius: 0; background: transparent; box-shadow: none; color: var(--text-2); }
+:root :is(.top-inner, .rail-foot) .key-tray > :first-child:is(.button) { border-radius: var(--radius-sm) 0 0 var(--radius-sm); }
+:root :is(.top-inner, .rail-foot) .key-tray > :last-child :is(summary.button), :root :is(.top-inner, .rail-foot) .key-tray > .button:last-child { border-top-right-radius: var(--radius-sm); border-bottom-right-radius: var(--radius-sm); }
+:root :is(.top-inner, .rail-foot) .key-tray .button.icon-only { width: 28px; }
+:root :is(.top-inner, .rail-foot) .key-tray .button.update { width: 28px; }
+:root :is(.top-inner, .rail-foot) .key-tray .sweep-summary { width: 24px; }
+:root :is(.top-inner, .rail-foot) .key-tray .button.on { background: var(--accent-bg); color: var(--accent-text); }
+:root :is(.top-inner, .rail-foot) .key-tray details[open] > summary.button { background: var(--hover); box-shadow: none; color: var(--text); }
+:root :is(.top-inner, .rail-foot) .key-tray .sweep-summary.fail { color: var(--fail); box-shadow: inset 0 0 0 1px var(--fail-line); }
+:root .button.update .update-sub { top: calc(50% - 10px); width: 6px; height: 6px; border-radius: 50%; }
+:root #add { width: 32px; }
+:root .button.update .update-sub:not(.fresh, .busy) { background: var(--line-strong); }
+
+/* Keys: the main one amber with white words, the rest white buttons; no ledges, nothing sinks. */
+:root .button.primary {
+  background: var(--accent);
+  color: var(--on-accent);
+  box-shadow: inset 0 1px 0 oklch(1 0 0 / .16), 0 0 0 1px color-mix(in oklab, var(--accent) 80%, black), 0 1px 2px oklch(0.45 0.13 50 / .25);
+}
+:root .button.on { box-shadow: none; }
+/* A closing answer keeps its solid plum (motion.css, CONTROL-17). */
+:root :is(.answers > .button:not(.closes), .next-card > .actions .step-keys > .button:not(.primary, .accent, .on, .task-done)) {
+  background: var(--surface);
+  box-shadow: var(--shadow-button);
+}
+:root .answers .button { border-radius: var(--radius); }
+:root .button:active:not(:disabled) { transform: none; }
+:root .side { box-shadow: none; }
+
+/* The stage counts: a white strip, hairlines between the stages; the plates' lamps are round. */
+:root .lights { border-radius: var(--radius); background: var(--surface); box-shadow: var(--shadow-card); color: var(--text-3); }
+:root .light-group { border-radius: var(--radius-sm); }
+:root .light-group + .light-group { box-shadow: none; }
+/* A straight hairline: a box shadow would follow the group's rounded hover corners. */
+:root .light-group + .light-group::before { content: ""; position: absolute; top: 4px; bottom: 4px; left: -1px; width: 1px; background: var(--line); }
+:root :is(.lamp, .light-item > .lamp) { border-radius: 50%; }
+:root .lamp.size-2 { border-radius: 3px; }
+:root .lights-sum { letter-spacing: 0; text-transform: none; }
+/* The stage names read as words in the meta size, like the sum; the counts in ink. */
+:root .stage-mark { font: 400 var(--fs-meta)/16px var(--sans); letter-spacing: 0; text-transform: none; }
+:root .stage-count { color: var(--text); }
+:root .light-group.moved > .stage-count { color: var(--accent); }
+:root .light-count { color: var(--text); }
+:root .light-head { background: var(--surface-pop); box-shadow: inset 0 -1px 0 0 var(--line); }
+
+/* Section headings in the serif: the main column's at 20 px in ink, the side's at 17 px in sepia;
+   Blocked and waiting's in clay. */
+:root .section-head { align-items: baseline; }
+:root .section-head h2 {
+  height: auto;
+  padding: 0;
+  background: none;
+  box-shadow: none;
+  color: var(--text);
+  font-size: var(--fs-h-main);
+  font-weight: 600;
+  line-height: 1.25;
+}
+:root .side .section-head h2 { font-size: var(--fs-h-side); color: var(--sepia); }
+:root .section-head h2::before { align-self: center; }
+:root .side .section-head::after { content: none; }
+:root .side .section-head > .head-action { margin-left: auto; }
+:root .banner.fail:not(.action) { display: block; padding: 8px 12px; border-radius: var(--radius); }
+:root .banner.fail:not(.action)::before { content: none; }
+
+/* Blocked and waiting: its cards and lines each on their own, under the heading. */
+:root #blocked > .blocked-list { gap: 4px; background: none; box-shadow: none; }
+:root #blocked > .blocked-list::after {
+  position: static;
+  order: -1;
+  height: auto;
+  margin-bottom: 8px;
+  padding: 0;
+  background: none;
+  box-shadow: none;
+  color: var(--clay);
+  font: 600 var(--fs-h-main)/1.25 var(--serif);
+  letter-spacing: -.005em;
+  text-transform: none;
+}
+:root #blocked > .blocked-list > * { border-radius: var(--radius); }
+:root #blocked > .blocked-list > .blocked-card { box-shadow: 0 0 0 1px var(--fail-line), 0 1px 2px -1px oklch(0 0 0 / .06); }
+:root #blocked > .blocked-list > .blocked-card.asked { box-shadow: 0 0 0 1px var(--accent-line), 0 1px 2px -1px oklch(0 0 0 / .06); }
+:root #blocked > .blocked-list > .blocked-line { box-shadow: var(--shadow-flat); }
+:root #blocked > .blocked-list > .waiting-card { box-shadow: var(--shadow-card); }
+:root #blocked > .blocked-list > .more-row { justify-self: start; padding: 4px 12px; box-shadow: none; }
+:root #blocked > .blocked-list > :is(.card + .blocked-line, .blocked-line + .card, .card + .card) { margin-top: 4px; }
+:root #blocked > .blocked-list > .blocked-card:first-child { padding-top: 12px; }
+:root #blocked > .blocked-list > .waiting-card:first-child { padding-top: 8px; }
+:root #blocked > .blocked-list > .blocked-line:first-child { padding-top: 0; }
+:root .blocked-card { box-shadow: 0 0 0 1px var(--fail-line), 0 1px 2px -1px oklch(0 0 0 / .06); }
+:root .blocked-card.asked { box-shadow: 0 0 0 1px var(--accent-line), 0 1px 2px -1px oklch(0 0 0 / .06); }
+:root .kind .badge { font-weight: 600; }
+
+/* Next up: a white card with a soft lift; the item's line small above the ask, the ask as its serif title. */
+:root .next-card { padding-top: 26px; box-shadow: var(--shadow-next); }
+:root :is(.ask:not(.short-line), .task-heading) { font-weight: 600; line-height: 34px; letter-spacing: -.012em; }
+/* The short line under the task's name reads as text, in Inter, not as a second heading (NEXT-49). */
+:root .ask.short-line { font-family: var(--sans); font-weight: 500; line-height: 23px; letter-spacing: normal; }
+:root .ask a { text-decoration-thickness: 1.5px; }
+:root .step-full :is(.ask:not(.short-line), .task-heading) { line-height: 26px; }
+:root .next-card > .composer { background: var(--bg); box-shadow: inset 0 0 0 1px var(--line); }
+
+/* Nothing waits for the user: a plain flat card. */
+:root .empty-card { padding: 16px 20px; border-radius: var(--radius); box-shadow: var(--shadow-flat); }
+:root .empty-check { border-radius: 50%; background: var(--chip); }
+
+/* The queue and All work: white lists with rounded corners; group headings in the serif. */
+:root :is(#queue > .list, :is(#queue, #work) .group > .list) { border-radius: var(--radius); box-shadow: var(--shadow-card); }
+:root :is(#queue, #work) .group > .closed-list { border-radius: var(--radius); box-shadow: var(--shadow-flat); }
+:root #work .group > .list { box-shadow: var(--shadow-flat); }
+:root #queue > .list { padding-top: 0; }
+:root :is(#queue, #work) .list > .row:first-child > .row-head { border-top-left-radius: var(--radius); border-top-right-radius: var(--radius); }
+:root :is(#queue, #work) .list > .row:last-child:not(.open) > .row-head { border-bottom-left-radius: var(--radius); border-bottom-right-radius: var(--radius); }
+:root .group > summary,
+:root :is(#queue, #work) .group > summary {
+  height: auto;
+  margin-left: -6px;
+  padding: 4px 10px 4px 6px;
+  border-radius: var(--radius-sm);
+  background: none;
+  box-shadow: none;
+  color: var(--text);
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 1.3;
+}
+:root .group.you > summary,
+:root :is(#queue, #work) .group.you > summary { color: var(--accent-text); }
+:root .group > summary .group-count { font: 500 var(--fs-meta)/1 var(--sans); letter-spacing: 0; }
+:root #queue > .list + .group { margin-top: 16px; }
+:root :is(#queue, #work) .group[open] + .group { margin-top: 10px; }
+:root :is(#queue, #work) .group[open] > :is(.list, .closed-list) { margin-top: 4px; padding-top: 0; }
+
+/* Stages: the stage's mark in its own colour, the name in Inter. */
+:root .stage { font-size: var(--fs-meta); font-weight: 500; }
+:root .stage-planning { --dot: var(--planning); }
+:root .stage-building { --dot: var(--building); }
+:root .stage-review { --dot: var(--review); }
+:root .stage-dev { --dot: var(--dev); }
+:root .stage-staging { --dot: var(--staging); }
+:root .stage-prod { --dot: var(--prod); }
+:root .stage-done { --dot: var(--done); }
+:root .stage-review.yours { --dot: var(--accent); }
+/* A row's stage chip fits its words, at least 84 px, centred. It sits at the
+   right of a 132 px slot, so the stages end on one edge and the step counts before them stay in a column;
+   a long review name still ends in an ellipsis. */
+@media (min-width: 641px) {
+  :root .row-side .stage-slot { display: flex; flex: none; justify-content: flex-end; width: 132px; }
+  :root .row-side .chip.stage { width: auto; min-width: 84px; max-width: 100%; text-align: center; }
+}
+
+/* Round state dots, a session's among them (UI-25). */
+:root .dot { width: 8px; height: 8px; border-radius: 50%; }
+:root .dot.idle { background: transparent; box-shadow: inset 0 0 0 1.5px var(--working); }
+:root .dot:is(.stopped, .unknown) { background: transparent; box-shadow: inset 0 0 0 1.5px var(--text-4); }
+:root :is(.state-dot, .new-dot) { border-radius: 50%; }
+:root .state-dot.dismissed { box-shadow: inset 0 0 0 1.5px var(--text-4); }
+
+/* Rounded blocks, fields and menus; no foot bars. The feedback field takes the Add field's corners (style.css). */
+:root :is(.prose pre, .label-part-block, .step-run-last .step-run-text, .menu-list, .composer, .field, .panel textarea, .item-controls input, .blocked-card .call, .seg, .sentence-option, .blocked-card .request-error, .blocked-card .request-note) { border-radius: var(--radius-sm); }
+:root .day-bar { border-radius: 2px; }
+/* A focused box keeps its one hairline frame, turned soft amber (UI-32): no dark line, no halo. A box picked in
+   feedback mode keeps the pick's outline. */
+:root .composer:has(textarea:focus-visible),
+:root .add-inner:has(textarea:focus-visible) { box-shadow: inset 0 0 0 1px var(--field-focus); }
+:root :is(.composer, .add-inner):has(textarea:focus-visible):not(.pick-hover, .pick-chosen) { outline: 0; }
+:root :is(.field, .panel textarea, .pick-box textarea, .item-controls input):focus-visible { outline: 0; box-shadow: inset 0 0 0 1px var(--field-focus); }
+/* A box's text is not a field of its own: the ring goes round the box only (UI-32). */
+:root :is(.composer, .add-inner) textarea:focus-visible { box-shadow: none; }
+:root .toast { box-shadow: var(--shadow-pop); }
+:root .toast button { box-shadow: none; }
+:root .lightbox { background: oklch(0.16 0.008 75 / .86); }
+:root .lightbox :is(.lightbox-close, .lightbox-close .icon, .lightbox-step, .lightbox-step .icon) { color: oklch(0.96 0.004 85); }
+/* The whole page, when picked, has a line inside its edge; other parts have their mark (style.css). */
+:root body.pick-chosen { outline: 3px solid var(--accent); outline-offset: -3px; }
+
+/* The side's panels open from serif headings in sepia. */
+:root :is(#patterns, #time, #permissions) > details.more > summary {
+  height: auto;
+  min-height: 24px;
+  padding: 0;
+  background: none;
+  box-shadow: none;
+  color: var(--sepia);
+  font-size: var(--fs-h-side);
+  font-weight: 600;
+  line-height: 1.3;
+}
+:root :is(#patterns, #time, #permissions) > details.more > summary::before { color: var(--sepia); }
+:root .side .field,
+:root .side .composer { box-shadow: inset 0 0 0 1px var(--margin-line), 0 1px 1px oklch(0.35 0.03 60 / .04); }
+/* A box holding words not sent  is an amber box: the user's light amber fill, a
+   frame and the amber bar at its left, wherever it is and while typing too. Its words keep the text colour.
+   While typing, the frame is the full amber, so focus still shows. */
+:root .composer.drafted { background: var(--draft-bg); box-shadow: inset 3px 0 0 0 var(--accent), inset 0 0 0 1px var(--draft-line); }
+:root .composer.drafted:focus-within { box-shadow: inset 3px 0 0 0 var(--accent), inset 0 0 0 1px var(--accent); }
+/* A step holding words not sent carries a small amber triangle in the top right corner of its whole card or row,
+   so a partial answer shows while its reply box is scrolled away or folded. It sits over the
+   card's own marks and takes no clicks. */
+:root :is(.next-card, .step-row) > .draft-corner {
+  position: absolute; z-index: 5; top: 0; right: 0; width: 16px; height: 16px; pointer-events: none;
+  border-top-right-radius: inherit; background: var(--accent); clip-path: polygon(0 0, 100% 0, 100% 100%);
+}
+:root .step-row:has(> .draft-corner:not([hidden])) { position: relative; }
+
+/* The tooltip: a rounded dark label. */
+:root .tip { border-radius: var(--radius-sm); box-shadow: var(--shadow-pop); }
+:root .tip kbd { font: 500 11px/1 var(--sans); }
+:root .tip-time { letter-spacing: 0; }
+
+/* Phone */
+@media (max-width: 640px) {
+  /* Next up's marks (Updated and the timer) have the card's first row to themselves, at its right, never
+     wrapping, so the row is 24 px whatever they show, and the ask stays put on play, pause, hold and when
+     Updated comes or goes (UI-16). Below 360 px Updated is its pencil alone, as on a row. Every mark stands
+     in the row's 24 px, and its tap area rises from the row's foot into the card's empty top padding; 14 px
+     under the row keep the item's line's tap areas (the priority, the chips) apart. */
+  :root .next-card { padding-top: 20px; }
+  :root .next-card > .step-context > .context-marks {
+    position: static; order: -1; flex: 0 0 100%; flex-wrap: nowrap; justify-content: flex-end; gap: 6px;
+    height: 24px; margin: 0 0 10px; padding: 0; background: none; box-shadow: none;
+  }
+  :root .next-card > .step-context > .context-marks > .updated-mark { height: 24px; }
+  :root .next-card > .step-context > .context-marks > .updated-mark::after {
+    top: auto; bottom: 0; height: 44px; transform: translateX(-50%);
+  }
+  /* The ⋯ menu (VIEW-29) answers a tap 44 px across too, and stands 20 px from the mark before it, so the two
+     areas meet without overlapping (each reaches 10 px past its 24 px key). */
+  :root .next-card > .step-context > .context-marks > .step-menu { margin-left: 14px; }
+  :root .next-card > .step-context > .context-marks > .step-menu > summary { position: relative; }
+  :root .next-card > .step-context > .context-marks > .step-menu > summary::after {
+    content: ""; position: absolute; left: 50%; top: auto; bottom: 0; width: 44px; height: 44px; transform: translateX(-50%);
+  }
+  :root .next-card > .step-context > .context-marks .reorder { color: var(--text-3); }
+  :root .next-card > .step-context > .context-marks { --focus: var(--accent); }
+  :root :is(.ask:not(.short-line), .task-heading) { line-height: 30px; }
+  :root :is(#queue, #work) .group > summary,
+  :root :is(#patterns, #time, #permissions) > details.more > summary { height: auto; min-height: 40px; margin-block: 0; border-block: 0; box-shadow: none; }
+  /* Every part of the first line is 32 px tall: the brand key, the tabs, the key tray and Add. Update leads
+     the tray, since Feedback moves into the brand menu. */
+  :root .page-tabs a { height: 32px; }
+  :root :is(.top-inner, .rail-foot) .key-tray :is(.button, summary.button) { height: 32px; }
+  :root :is(.top-inner, .rail-foot) .key-tray .button.update { width: 32px; border-left: 0; border-radius: var(--radius-sm) 0 0 var(--radius-sm); }
+  :root :is(.top-inner, .rail-foot) .key-tray .sweep-summary { width: 28px; }
+  /* On the second line the timer and the usage stand 8 px apart. */
+  :root .top-inner { column-gap: 8px; }
+  :root .brand-menu { margin-right: 0; }
+  /* The brand key is the menu's key on a phone: three amber lines on the graphite tile (UI-33). */
+  :root .brand-mark::after { --glyph: var(--mark-menu); width: 20px; height: 20px; }
+  /* Cards run edge to edge, with hairlines above and below instead of a frame and a margin, so the
+     text gets the screen's width (UI-33). Text inside starts 16 px in, as the page's own does. */
+  :root :is(#overview, .next-card, #queue > .list, :is(#queue, #work) .group > :is(.list, .closed-list)) {
+    margin-inline: -16px;
+    border-radius: 0;
+    box-shadow: inset 0 1px 0 0 var(--line), inset 0 -1px 0 0 var(--line);
+  }
+  :root .next-card { padding-inline: 16px; }
+  :root #overview > .lights { padding-inline: 12px; }
+  :root .row-head { padding-left: 16px; }
+  :root .list > .row > .row-head { border-radius: 0; }
+  /* Priorities and Feedback stand on the page, not on a card of their own. A priority's place number
+     and the add box's plus stand in a gutter under the heading's mark. */
+  :root .side { padding: 0; border-radius: 0; background: none; }
+}
+
+/* Hover */
+@media (hover: hover) and (pointer: fine) {
+  :root .ask a:hover { color: var(--accent-hover); text-decoration-thickness: 2.5px; }
+    :root :is(.top-inner, .rail-foot) .button:not(.primary, .accent, .ghost):hover:not(:disabled) { background: var(--hover); color: var(--text); }
+  :root :is(.top-inner, .rail-foot) .button.ghost:not(.on):hover:not(:disabled),
+  :root :is(.top-inner, .rail-foot) .key-tray :is(.button:not(.on), summary.button):hover:not(:disabled) { background: var(--hover); color: var(--text); }
+  :root .light-group:hover { background: var(--hover); }
+  :root :is(#queue, #work) .group > summary:hover { background: var(--hover); }
+  :root :is(#patterns, #time, #permissions) > details.more > summary:hover { background: none; color: var(--text); }
+}
+
+/* 2. The Spec page */
+
+:root .spec-toc .open-count { font: 500 var(--fs-meta)/18px var(--sans); }
+:root .spec-doc :is(h1, h2, h3) { font-family: var(--serif); font-weight: 600; letter-spacing: -.005em; text-transform: none; }
+:root .spec-doc h1 { font-size: 34px; line-height: 1.2; letter-spacing: -.012em; }
+:root .spec-doc h2 { font-size: 22px; line-height: 1.3; }
+:root .spec-doc h3 { font-size: 17px; line-height: 1.35; color: var(--sepia); }
+:root .filters { gap: 4px; padding: 0; background: none; box-shadow: none; }
+:root :is(.count.filter, .count.filter:last-child) { height: 28px; padding: 0 8px; color: var(--text-3); font: 400 var(--fs-body)/20px var(--sans); letter-spacing: 0; text-transform: none; }
+:root .count.filter b { color: var(--text-2); font-weight: 500; }
+:root .count.filter.on { background: var(--selected); color: var(--text); box-shadow: inset 0 0 0 1px var(--line-strong); }
+:root .count.filter.on b { color: var(--text); font-weight: 600; }
+:root .status-mark { border-radius: 50%; }
+:root .count.filter .status-mark { width: 7px; height: 7px; }
+:root :is(.status-mark, .count .status-mark).status-shipped { box-shadow: inset 0 0 0 1.5px var(--ok); }
+:root :is(.status-mark, .count .status-mark).status-not-done { box-shadow: inset 0 0 0 1.5px var(--text-3); }
+:root .req-id { font: 500 var(--fs-meta)/21px var(--mono); padding-top: 0; }
+@media (max-width: 900px) {
+  :root .spec-toc { padding: 8px 0; background: var(--bg); box-shadow: 0 1px 0 var(--line); }
+  :root .toc-links { gap: 6px; }
+  :root :is(.spec-toc a, .spec-toc a.sub) {
+    height: 32px;
+    padding: 0 12px;
+    border-radius: var(--radius-sm);
+    color: var(--text-2);
+    font: inherit;
+    letter-spacing: inherit;
+    text-transform: none;
+    box-shadow: inset 0 0 0 1px var(--line);
+  }
+  :root .spec-toc a[aria-current] { background: var(--selected); color: var(--text); box-shadow: inset 0 0 0 1px var(--line-strong); }
+  :root .spec-toc a[aria-disabled] { color: var(--text-4); }
+  :root .spec-toc .open-count { color: var(--text-2); }
+  :root .spec-toc a[aria-current] .open-count { color: var(--text); }
+}
+@media (max-width: 900px) and (hover: hover) and (pointer: fine) {
+  :root .spec-toc a:not([aria-current]):hover { background: var(--hover); color: var(--text); }
+}
+@media (hover: hover) and (pointer: fine) {
+  :root .count.filter:not(.on):hover { background: var(--hover); color: var(--text-2); }
+}
+/* History (VIEW-10, VIEW-13): the time bar and its swatches take the look's small rounding. */
+:root .time-part:first-child { border-radius: var(--radius-xs) 0 0 var(--radius-xs); }
+:root .time-part:last-child { border-radius: 0 var(--radius-xs) var(--radius-xs) 0; }
+:root .time-part:only-child { border-radius: var(--radius-xs); }
+:root .time-totals { border-radius: var(--radius-sm); }
+:root .time-swatch { border-radius: 2px; }
+
+@media (max-width: 359px) {
+  :root body:has(#reload:not([hidden])) .top-inner { padding: 0 12px; column-gap: 4px; }
+  /* Next up's Updated is its pencil alone (see the phone block). */
+  :root .next-card > .step-context > .context-marks > .updated-mark > .label { display: none; }
+  /* The pencil's tap area reaches 16 px past it and the ⋯ key's 10 px past its own: ⋯ stands 26 px off the
+     pencil, so the two areas meet without overlapping. */
+  :root .next-card > .step-context > .context-marks > .updated-mark + .step-menu { margin-left: 20px; }
+}
+
+/* Resorted: the queue's order changed while the user had this step open. Orange up-and-down
+   arrows, on a queue row and on Next up's top edge. On Next up the key comes before the card in #next, on a
+   zero-height sticky line: it rides 16 px below the header while any of the card shows, above the card's own
+   controls. */
+:root .row .reorder.resorted, :root .resorted-pin > .reorder.resorted { color: var(--accent-text); }
+:root .row .reorder.resorted > .icon, :root .resorted-pin > .reorder.resorted > .icon { color: currentColor; }
+:root .row .reorder.resorted:hover { color: var(--accent-hover); }
+:root #next > .resorted-pin {
+  position: sticky;
+  top: calc(var(--top-h, var(--header-h)) + 16px);
+  z-index: 6;
+  display: flex;
+  justify-content: flex-end;
+  height: 0;
+  padding-right: 12px;
+}
+:root .resorted-pin > .reorder.resorted {
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  justify-content: center;
+  transform: translateY(-50%);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  box-shadow: var(--shadow-flat), inset 0 0 0 1px var(--accent-line);
+}
+:root .resorted-pin > .reorder.resorted:hover { background: var(--accent-bg); color: var(--accent-hover); }
+:root .resorted-pin > .reorder.resorted > .icon { width: 16px; height: 16px; }
+/* On a phone the card's marks sit at its top right, so the key stands clear of the info mark's tap area. */
+@media (max-width: 640px) {
+  :root #next > .resorted-pin { padding-right: 56px; }
+  :root .resorted-pin > .reorder.resorted { width: 24px; height: 24px; }
+}
+
+/* A helper page shown in Cockpit's center layer (center-frame.js) leaves the menu, the search, the feedback key and
+   the update key to the main page around it, and keeps its header only for its own tools. */
+.center-frame .top .brand-menu, .center-frame .top .command-trigger,
+.center-frame .top .key-tray, .center-frame .top #reload { display: none; }
+.center-frame .top:not(:has(.page-tools:not([hidden]))) { display: none; }

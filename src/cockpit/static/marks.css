@@ -1,0 +1,363 @@
+/* Marks (UI-25, UI-34): the line drawings that lead a section, a group, a stage or a row. icons.js
+   draws each as a mask on :root (--mark-NAME); a mark here sets --glyph on its own element and paints it
+   in a theme colour. A page without icons.js (sign-in, errors) leaves --glyph clear, so no mark shows
+   there. Every mark is decoration: screen readers skip it, and its meaning stays in the words or the
+   tooltip beside it. Sizes: 12 px beside 11 to 13 px text, 16 px before a heading or a group's name.
+   Nothing here moves on its own (UI-16, UI-23). The list of concepts and their marks is in icons.js. */
+
+/* Every mark: a box the mark fills, painted through the mask. */
+.section-head h2::before,
+:is(#patterns, #time, #permissions) > details.more > summary::after,
+#work .group > summary::after,
+#queue .group > summary::after,
+.prio::before,
+.row:is(.high, .urgent) > .row-head::before,
+a:is(.src-github, .src-linear)::before {
+  -webkit-mask: var(--glyph) 0 0 / 100% 100% no-repeat;
+  mask: var(--glyph) 0 0 / 100% 100% no-repeat;
+}
+
+/* Section headings: each section's emblem before its name, in the heading's colour. */
+.section-head h2 { display: inline-flex; align-items: center; gap: 8px; }
+.section-head h2::before { content: ""; flex-shrink: 0; width: 16px; height: 16px; background: currentColor; }
+#pinned .section-head h2::before { --glyph: var(--mark-pin); }
+#work .section-head h2::before { --glyph: var(--mark-doc); }
+/* Patterns, Your time and Permissions open from their heading: the chevron, the emblem, the name. */
+/* The chevron comes first wherever a summary also carries a mark (flex order: chevron, mark, name). */
+:is(#patterns, #time, #permissions) > details.more > summary::before,
+#work .group > summary::before,
+#queue .group > summary::before { order: -2; }
+:is(#patterns, #time, #permissions) > details.more > summary::after { content: ""; order: -1; flex-shrink: 0; width: 16px; height: 16px; background: currentColor; }
+#patterns > details.more > summary::after { --glyph: var(--mark-chart); }
+#time > details.more > summary::after { --glyph: var(--mark-hourglass); }
+#permissions > details.more > summary::after { --glyph: var(--mark-key); }
+
+/* Every group's mark, after the chevron: on All work, Matters most's radar and who has the next move; under
+   the queue, ready next's stack, snoozed's clock and closed's check. The names start on one edge. */
+#work .group > summary::after,
+#queue .group > summary::after { content: ""; order: -1; flex-shrink: 0; width: 16px; height: 16px; background: var(--who, currentColor); }
+#queue .group.ready-next > summary::after { --glyph: var(--mark-layers); }
+#queue .group.snoozed > summary::after { --glyph: var(--mark-clock); }
+#work .group.in-progress > summary::after { --glyph: var(--mark-radar); }
+#work .group.agents > summary::after { --glyph: var(--mark-bot); }
+#work .group.bots > summary::after { --glyph: var(--mark-bug); }
+#work .group.people > summary::after { --glyph: var(--mark-people); }
+#work .group.merge > summary::after { --glyph: var(--mark-merge); }
+#work .group.nobody > summary::after { --glyph: var(--mark-nobody); --who: var(--shield-label); }
+#work .group.done > summary::after { --glyph: var(--mark-flag); }
+/* Search's filter (VIEW-21) also groups the work waiting for the user, and the work closed earlier. */
+#work .group.you > summary::after { --glyph: var(--mark-person); }
+#work .group.closed-found > summary::after { --glyph: var(--mark-archive); }
+/* The other groupings (by state, stage, priority, repo, account) carry no mark: the name follows the chevron. */
+#work .group.view > summary::after { content: none; }
+
+/* Stage marks: a ring that fills as the work moves on, from planning's dashed ring to prod's full one;
+   done is the ring with a check. */
+.stage-planning::before { --glyph: var(--mark-stage-planning); }
+.stage-building::before { --glyph: var(--mark-stage-building); }
+.stage-review::before { --glyph: var(--mark-stage-review); }
+.stage-dev::before { --glyph: var(--mark-stage-dev); }
+.stage-staging::before { --glyph: var(--mark-stage-staging); }
+.stage-prod::before { --glyph: var(--mark-stage-prod); }
+.stage-done::before { --glyph: var(--mark-stage-done); }
+
+/* The priority tag: three bars that light from the left, one for low, two for normal, three for high;
+   the unlit ones stay faint. Urgent is a filled square with an exclamation mark. */
+.prio > .icon { display: none; }
+.prio::before {
+  content: "";
+  flex-shrink: 0;
+  width: 12px;
+  height: 12px;
+  background: linear-gradient(to right, currentColor 0 var(--lit), color-mix(in oklab, currentColor 28%, transparent) var(--lit));
+  --glyph: var(--mark-prio-bars);
+}
+.prio-low::before { --lit: 31%; }
+.prio-normal::before { --lit: 62%; }
+.prio-high::before { --lit: 100%; }
+.prio-urgent::before { --lit: 100%; --glyph: var(--mark-prio-urgent); }
+/* Item rows that are high or urgent carry the same mark, full, in their slot. */
+.row:is(.high, .urgent) > .row-head::before { width: 12px; height: 12px; background: currentColor; --glyph: var(--mark-prio-bars); }
+.row.urgent > .row-head::before { --glyph: var(--mark-prio-urgent); }
+
+/* Sessions: each session is the bot in the session grey, then a round dot in its state's colour, wherever one is
+   named (UI-25): filled
+   while it works (blue), waits on the user (amber), has finished (green) or failed (red); a blue ring
+   while its turn ended and a timer can wake it; a grey ring once stopped. The dot's rules are .dot's in
+   look.css. */
+/* Where the line already leads with the session's dot, its name goes without a second one. */
+.session-entry .session-mark { display: none; }
+.session-mark { display: inline-flex; align-items: center; gap: 3px; margin-right: 6px; vertical-align: -1px; }
+.session-mark > .icon, .session-entry > .icon.session-bot { width: 12px; height: 12px; }
+.session-entry > .icon.session-bot { margin-right: -5px; }
+
+/* Blocked and waiting: its heading is the list's ::after, so it shows only while something waits. */
+#blocked > .blocked-list {
+  position: relative;
+  gap: 0;
+  background: var(--surface);
+  box-shadow: var(--shadow-next), inset 0 1px 0 0 var(--display-hi);
+}
+#blocked > .blocked-list::after {
+  content: "Blocked and waiting";
+  position: absolute;
+  z-index: 5;
+  top: -15px;
+  left: 25px;
+  height: 20px;
+  padding: 2px 11px;
+  background: var(--shield-well);
+  box-shadow: var(--shield-well-in);
+  color: var(--lamp-red);
+  font: var(--readout);
+  font-variant-numeric: tabular-nums;
+  font-synthesis: none;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  white-space: nowrap;
+  pointer-events: none;
+}
+#blocked > .blocked-list > * { margin: 0; border-radius: 0; box-shadow: none; }
+#blocked > .blocked-list > * + * { box-shadow: inset 0 1px 0 0 var(--line); }
+#blocked > .blocked-list > :first-child { padding-top: 28px; }
+#blocked > .blocked-list > .more-row { justify-self: stretch; padding: 8px 12px; text-align: left; }
+
+/* A step that left: its words fade. */
+.next-card.left > .step-context { opacity: 1; }
+.next-card.left > .step-context > :not(.context-marks, .context-tags), .next-card.left > .step-context > :is(.context-marks, .context-tags) > * { opacity: .55; }
+/* Keys and chips sized by their words round their width up to a whole pixel. At no weight, so a key
+   with a set width (an icon-only key) keeps it. */
+:where(:is(.actions, .step-keys, .answers) > .button, :is(.actions, .step-keys) > details > summary.button, .context-marks > .reorder, .chips > .chip, .context-tags > .chip, .row-line2 .chip, .row-side .chip) {
+  width: calc-size(fit-content, round(up, size, 1px));
+}
+:is(.actions, .step-keys) > .button:not(.icon-only), .context-marks > .reorder { justify-content: flex-start; }
+
+/* Board: each row's session dots keep a slot of three at the stage's right, so the stages end on one
+   edge down the list. A phone puts the dots beside the age, over the stage, which ends on the row's edge. */
+@media (min-width: 641px) {
+  #work .row-side .dots { flex: none; width: 26px; justify-content: flex-end; }
+  #work .row-side .dots:empty { display: inline-flex; }
+}
+@media (max-width: 640px) {
+  #work .row-side .dots { order: -3; }
+  #work .row-side .row-age { flex-basis: auto; }
+  #work .row-side { row-gap: 0; }
+  #work .row-side::before { content: ""; order: -1; flex-basis: 100%; height: 4px; }
+}
+
+
+@media (max-width: 640px) {
+  #blocked > .blocked-list::after { left: 7px; }
+  /* A blocked call's title takes the first line from the card's text edge, like a queue row's, and wraps
+     to two lines; the kind mark leads the line under it, with who asked and how long ago. */
+  :is(#blocked, #next) .blocked-card > .blocked-head { flex-wrap: wrap; row-gap: 4px; }
+  :is(#blocked, #next) .blocked-card > .blocked-head > .what {
+    order: -1; flex: 1 1 100%;
+    display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2;
+    white-space: normal; line-height: 20px;
+  }
+  :is(#blocked, #next) .blocked-card > .blocked-head > .kind { margin: 0; }
+  :is(#blocked, #next) .blocked-card > .blocked-head > .who { max-width: none; }
+  :is(#blocked, #next) .blocked-card > :is(.why, .explain, .explain-note, .cause) { margin-left: 0; }
+}
+
+/* The sweeper's reasons stay quiet, under the ask and on a queue row alike: a pale ground, no line round
+   them (UI-11). New, high, failed and live keep their look. */
+.next-card .chips > .chip:not(.new, .high, .fail, .live),
+.row-line2 > .chip.reason { background: var(--surface-2); box-shadow: none; color: var(--text-3); }
+
+/* Keys go down 1 px when pressed. */
+.button:active:not(:disabled) { transform: translateY(1px); }
+.button.ghost:active:not(:disabled) { background: var(--selected); }
+
+/* Information that matters only on a closer look waits for the pointer: a row's rank, the time the user
+   spent on an item whose timer is not running, and a closed row's
+   Reopen key (which stays in the tab order and shows when it has the focus). Their place is kept, so
+   nothing shifts when they show; on touch screens they always show. */
+@media (hover: hover) and (pointer: fine) {
+  .row-head > .rank, .row-head .time-chip:not(.running), .row-side .dot:is(.stopped, .unknown), .closed-list > li > .reopen { opacity: 0; transition: opacity 120ms ease-out; }
+  .closed-list > li:is(:hover, :focus-within) > .reopen,
+  .row-head:is(:hover, :focus-within) > .rank,
+  .row-head:is(:hover, :focus-within) .time-chip,
+  .row-head:is(:hover, :focus-within) .row-side .dot,
+  .row.open > .row-head > .rank,
+  .row.open > .row-head .time-chip,
+  .row.open > .row-head .row-side .dot { opacity: 1; }
+  /* A row's priority tag is its bars alone until the pointer or focus comes onto the row. */
+  .row-head > .prio:not(.prio-urgent) { background: transparent; box-shadow: none; }
+  .row-head:is(:hover, :focus-within) > .prio:not(.prio-urgent) { background: var(--surface); box-shadow: inset 0 0 0 1px var(--line-strong); }
+  /* Next up's reasons: on a plate under the item's line while the pointer is on that line. */
+  .next-card > .chips {
+    position: absolute;
+    z-index: 5;
+    top: 52px;
+    left: 28px;
+    max-width: calc(100% - 56px);
+    margin: 0;
+    padding: 6px;
+    border-radius: var(--radius);
+    background: var(--surface-pop);
+    box-shadow: var(--shadow-pop);
+    opacity: 0;
+    pointer-events: none;
+  }
+  .next-card > .step-context:hover ~ .chips, .next-card > .chips:hover { opacity: 1; pointer-events: auto; }
+  .next-card.left > .chips { opacity: 0; }
+  .next-card.left > .step-context:hover ~ .chips, .next-card.left > .chips:hover { opacity: .55; }
+  /* The step's ⋯ menu also stands on that line; while the pointer is on it or it is open, the plate
+     stays away, so it does not cover the title under the menu. */
+  .next-card > .step-context:has(.step-menu:is(:hover, [open])) ~ .chips { opacity: 0; pointer-events: none; }
+}
+
+/* Side headings: a hairline from the heading to the panel's right edge (look.css removes it); a key in
+   the head follows it. */
+.side .section-head::after { content: ""; order: 1; flex: 1 1 24px; height: 1px; background: var(--margin-line); }
+.side .section-head > .head-action { order: 2; margin-left: 0; }
+
+/* Hover cards (UI-27): the one tooltip is a small dark card. A tooltip of one line stays a label; one of
+   several has a header, the main message, and short muted detail lines under it; an exact time ends it
+   as a readout. */
+.tip { padding: 6px 10px 7px; box-shadow: var(--shadow-pop), inset 0 0 0 1px color-mix(in oklab, var(--toast-text) 10%, transparent); }
+.tip-head { font-weight: 600; }
+.tip-line { display: block; margin-top: 2px; color: color-mix(in oklab, var(--toast-text) 72%, var(--toast-bg)); }
+.tip-head + .tip-line { margin-top: 3px; }
+.tip-time { font: var(--readout); font-variant-numeric: tabular-nums; font-synthesis: none; letter-spacing: .5px; }
+.tip-text + .tip-time, .tip-line + .tip-time { margin-top: 4px; }
+
+/* Lists: the queue, each group's list and the log's list are cards (look.css rounds them). A group's
+   heading stands above its list, alone while the group is closed; look.css sets it in the serif. */
+#queue > .list,
+:is(#queue, #work) .group > :is(.list, .closed-list) {
+  position: relative;
+  border-radius: 0;
+  box-shadow: var(--shadow-card);
+}
+#work .group > .list { box-shadow: var(--shadow-flat); }
+:is(#queue, #work) .list > .row > .row-head { border-radius: 0; }
+#queue > .list { padding-top: 10px; }
+:is(#queue, #work) .group > summary {
+  height: 20px;
+  padding: 2px 11px;
+  border-radius: 0;
+  background: var(--shield-well);
+  box-shadow: var(--shield-well-in);
+  color: var(--lamp-grey);
+  font: var(--readout);
+  font-variant-numeric: tabular-nums;
+  font-synthesis: none;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+}
+:is(#queue, #work) .group > summary { position: relative; z-index: 1; margin-left: 25px; padding-left: 9px; }
+:is(#queue, #work) .group.you > summary { color: var(--lamp-amber); }
+#work .group.agents > summary { color: var(--lamp-blue); }
+:is(#queue, #work) .group:is(.merge, .done) > summary { color: var(--lamp-green); }
+:is(#queue, #work) .group > summary::before,
+:is(#queue, #work) .group > summary .group-count { color: var(--shield-label); }
+/* Room between a list and the next group's heading. */
+#queue > .list + .group,
+:is(#queue, #work) .group[open] + .group { margin-top: 20px; }
+:is(#queue, #work) .group[open] > :is(.list, .closed-list) { margin-top: -10px; padding-top: 10px; }
+@media (hover: hover) and (pointer: fine) {
+  :is(#queue, #work) .group > summary:hover,
+  :is(#patterns, #time, #permissions) > details.more > summary:hover { background: var(--shield-well-hover); }
+  :is(#patterns, #time, #permissions) > details.more > summary:hover { color: var(--shield-text); }
+}
+/* On a phone a heading that opens a group or a side panel takes a tap 40 px tall. */
+@media (max-width: 640px) {
+  :is(#queue, #work) .group > summary,
+  :is(#patterns, #time, #permissions) > details.more > summary {
+    height: 40px;
+    margin-block: -10px;
+    border-block: 10px solid transparent;
+    background-clip: padding-box;
+    box-shadow: inset 0 1px 0 0 var(--shield-well-top), inset 0 0 0 1px var(--shield-well-rim);
+  }
+  :is(#patterns, #time, #permissions) > details.more[open] > summary { margin-bottom: -2px; }
+}
+
+/* A key's icon: 14 px beside its words, 16 px when it is the key's only content (style.css). */
+.button .icon,
+.sweep-summary .icon { width: 14px; height: 14px; }
+/* Beside another icon the chevron's empty margins close up. */
+.button .icon + .icon-chevron { margin: 0 -2px 0 -4px; }
+/* Next up's Reorder key stands among its line's marks (pause, clock, info), so on a desktop its mark is
+   12 px, like theirs. */
+@media (min-width: 641px) {
+  .context-marks > .reorder > .icon { width: 12px; height: 12px; padding: 0; }
+}
+
+/* The header's sizes: keys 28 px tall on a desktop, 32 px on a phone, each line's parts centred on one
+   line. The counts take their own width and the timer stands after the free room. */
+.top-inner .button, .top-inner summary.button { height: 28px; }
+.top-inner .button.icon-only { width: 28px; }
+.top-inner .sweep-summary { height: 28px; }
+/* The key tray's keys: Update is square like Feedback, its lamp in the corner; the chevron's key is
+   narrow. */
+.top-inner .key-tray :is(.button, summary.button) { height: 24px; }
+.top-inner .key-tray .button.icon-only { width: 24px; }
+.top-inner .key-tray .button.update { width: 24px; }
+.top-inner .key-tray .sweep-summary { width: 20px; }
+/* Add is a square amber key with its plus at 16 px, the header's right bookend to the brand key on the left
+   (UI-32); its words are in the tooltip. */
+#add { justify-content: center; width: 28px; padding: 0; }
+#add .icon { width: 16px; height: 16px; }
+.brand-mark { width: 28px; height: 28px; }
+.counts { flex: 0 1 auto; }
+/* The counts' fade (for when they do not fit) falls on room after the last count. */
+@media (min-width: 1001px) {
+  .counts { margin-right: -24px; padding-right: 24px; }
+}
+
+@media (min-width: 1001px) and (max-width: 1279px) {
+}
+@media (max-width: 1000px) {
+  .brand-menu { padding-top: calc((var(--header-h) - 36px) / 2); }
+}
+@media (max-width: 640px) {
+  /* The first line's parts are 32 px tall, as the second line's are, so the brand key and Add stand no
+     taller than the tabs between them (UI-33). Each key's tap area reaches the line's full height. */
+  .brand { padding: 0; margin-left: 0; }
+  .brand-mark { width: 32px; height: 32px; }
+  .brand-menu { padding-top: calc((var(--header-h) - 32px) / 2); }
+  .top-inner .button, .top-inner summary.button, .top-inner .sweep-summary { height: 32px; }
+  .top-inner .button.icon-only, #add { justify-content: center; width: 32px; padding: 0; }
+  .page-tabs a { height: 32px; }
+  .top-inner .key-tray :is(.button, summary.button) { height: 32px; min-width: 0; }
+  .top-inner .key-tray .button.update { width: 28px; }
+  .top-inner .key-tray .sweep-summary { width: 24px; }
+  /* The second line is as wide as the first, from the brand key's left edge to Add's right edge: the counts
+     and the usage; on Spec, its filters first. */
+  .top-inner { column-gap: 0; }
+  .brand-menu { margin-right: 8px; }
+  .top-inner > :is(.counts, #usage) { margin: 0 0 8px; padding: 0; }
+  .count { height: 32px; }
+  .usage { height: 32px; }
+}
+
+/* Readouts keep normal tracking in dark mode too: dark mode's extra tracking is for running text. */
+:where(.row-age, .rank, .stage, .time-chip, .timer-clock, .light-count, .light-age, .section-head .group-count,
+  .feedback-count, .late-mark, .kind .badge) {
+  letter-spacing: normal;
+}
+
+/* A link in a step's text to a GitHub PR or a Linear ticket leads with that source's logo, as the links
+   under a step do; the server marks the link with its source (render.py). */
+a:is(.src-github, .src-linear)::before {
+  content: ""; display: inline-block; width: 0.9em; height: 0.9em; margin-right: 0.25em; vertical-align: -0.1em;
+  background: currentColor;
+}
+a.src-github::before { --glyph: var(--mark-github); }
+/* A link to a pull request leads with its state's drawing in its state's colour instead (NEXT-66), as under a step. */
+a.src-github.pull::before { --glyph: var(--mark-pr); background: var(--pr-draft); }
+a.src-github.pr-open::before { --glyph: var(--mark-pr-open); background: var(--pr-open); }
+a.src-github.pr-draft::before { --glyph: var(--mark-pr-draft); }
+a.src-github.pr-merged::before { --glyph: var(--mark-pr-merged); background: var(--pr-merged); }
+a.src-github.pr-closed::before { --glyph: var(--mark-pr-closed); background: var(--pr-closed); }
+a.src-linear::before { --glyph: var(--mark-linear); }
+
+/* A mention of another item in text (SPEC UI-74): a link that leads with its project's mark at the mark's own size,
+   the Cockpit key on Cockpit's work, and names the item on hover. The mark and the words stay on one line. */
+a.item-ref { white-space: nowrap; }
+a.item-ref > .ref-mark { display: inline-grid; place-items: center; width: 14px; height: 14px; margin-right: 3px; vertical-align: -2px; }
+a.item-ref > img.ref-mark { display: inline-block; }

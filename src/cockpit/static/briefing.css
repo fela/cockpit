@@ -1,0 +1,61 @@
+/* The Briefing page (briefing.html, briefing.js). It loads after style.css and uses its tokens and
+   shared parts: the header, banners, notes and .prose for the briefing's Markdown. */
+
+.briefing-layout {
+  max-width: 1080px;
+  margin: 0 auto;
+  padding: 24px var(--page-gutter) 48px;
+  display: grid;
+  grid-template-columns: minmax(0, 720px) 180px;
+  gap: 48px;
+  align-items: start;
+}
+
+.briefing-head { margin-bottom: 20px; }
+.briefing-doc h1 { margin: 0 0 4px; font: 700 30px/1.2 var(--sans); letter-spacing: -.022em; }
+/* The briefing reads like Next up's text: 15 px on a 1.65 line. */
+.briefing-body { font-size: var(--fs-read); line-height: 25px; }
+.briefing-body h2 { margin: 28px 0 6px; font: 650 19px/1.3 var(--sans); letter-spacing: -.012em; }
+.briefing-body h3 { margin: 20px 0 4px; font: 650 var(--fs-read)/25px var(--sans); }
+.briefing-body p, .briefing-body ul, .briefing-body ol { margin-bottom: 12px; }
+.briefing-body li { margin: 4px 0; }
+.briefing-body a { text-decoration-color: var(--text-4); }
+
+.briefing-status { display: flex; align-items: flex-start; gap: 8px; margin: 0 0 20px; color: var(--text-2); }
+.briefing-status .icon { flex-shrink: 0; margin-top: 4px; }
+.briefing-status.fail { color: var(--fail); }
+
+/* Earlier days: a column beside the briefing; under it on narrow screens. */
+.briefing-days { grid-column: 2; grid-row: 1 / span 2; position: sticky; top: calc(var(--header-h) + 24px); }
+.briefing-days h2 { margin: 0 0 8px; font: 400 11px/16px var(--sans); font-synthesis: none; letter-spacing: 1px; text-transform: uppercase; color: var(--sepia); }
+.briefing-days ul { margin: 0; padding: 0; list-style: none; }
+.briefing-days a { display: flex; align-items: center; gap: 6px; padding: 3px 0; color: var(--text-2); font-size: var(--fs-meta); text-decoration: none; }
+.briefing-days a:hover { color: var(--text); }
+.briefing-days a[aria-current="page"] { color: var(--text); font-weight: 600; }
+.briefing-days a.unread::after { content: ""; width: 6px; height: 6px; background: var(--lamp-amber); }
+
+/* The team the briefing follows, under the briefing. */
+.briefing-team { grid-column: 1; padding-top: 24px; border-top: 1px solid var(--line); }
+.briefing-team h2 { margin: 0 0 4px; font: 650 17px/1.3 var(--sans); }
+.briefing-team .note { margin: 0 0 12px; }
+.briefing-team-actions { display: flex; align-items: center; gap: 12px; margin-top: 8px; }
+.briefing-team-actions .note { margin: 0; }
+
+/* In the layer over Cockpit's main page (briefing.js, page-overlay.js): the briefing alone, under the layer's X
+   in the top right corner, without the page's header and tabs. */
+.briefing-overlay-mode .top { display: none; }
+.briefing-overlay-mode .briefing-layout { padding-top: 56px; }
+.briefing-overlay-mode .briefing-days { top: 56px; }
+
+@media (max-width: 900px) {
+  .briefing-layout { grid-template-columns: minmax(0, 1fr); gap: 32px; padding-top: 24px; }
+  .briefing-days { grid-column: 1; grid-row: auto; position: static; }
+  .briefing-days ul { display: flex; flex-wrap: wrap; gap: 4px 16px; }
+}
+
+@media (max-width: 640px) {
+  .briefing-layout { padding: 20px 16px 48px; }
+  .briefing-overlay-mode .briefing-layout { padding-top: 56px; }
+  .briefing-doc h1 { font-size: 24px; }
+  .briefing-days a { min-height: 32px; }
+}

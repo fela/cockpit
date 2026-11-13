@@ -1,0 +1,3 @@
+# Refuse dependency versions published in the last three days.
+[install]
+minimumReleaseAge = 259200

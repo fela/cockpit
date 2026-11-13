@@ -1,0 +1,166 @@
+/* A shared page opened over Cockpit's page (SPEC NEXT-47, page-overlay.js): the whole window, the page edge to edge
+   in it, and the X in the top right corner over it. The Pages view inside draws the page's own buttons beside the X
+   (pages.css, .pages-overlay-mode). It slides in from the right, or from the bottom on a phone (page-overlay.js). */
+:root { --beside-w: clamp(400px, 34vw, 560px); }
+.page-overlay {
+  width: 100vw;
+  height: 100dvh;
+  max-width: none;
+  max-height: none;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: var(--bg);
+  color: var(--text);
+  overflow: hidden;
+}
+.page-overlay::backdrop { background: #05080c66; }
+.page-overlay-frame { display: block; width: 100%; height: 100%; border: 0; background: var(--bg); }
+/* Another page from the step's card loads hidden over the shown one, which it replaces once drawn (page-overlay.js). */
+.page-overlay-frame.page-overlay-next { position: absolute; inset: 0; visibility: hidden; pointer-events: none; }
+.page-overlay-close {
+  position: absolute;
+  top: 10px;
+  right: 12px;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  justify-content: center;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  background: var(--surface-pop);
+  box-shadow: 0 2px 10px #0002;
+}
+.page-overlay-close:hover { background: var(--hover); }
+.page-overlay-close:focus-visible { outline: 2px solid var(--field-focus); outline-offset: 2px; }
+html.page-overlay-open { overflow: hidden; }
+
+/* Beside the step: the page takes the window's right part, edge to edge and not modal, with a shadow on
+   its left edge so it reads as lying over Cockpit's page; the step's card is the column at its left. */
+.page-overlay.page-overlay-beside {
+  position: fixed;
+  z-index: 24;
+  inset: 0 0 0 var(--beside-w);
+  width: auto;
+  height: 100dvh;
+  border-left: 1px solid var(--line-strong);
+  box-shadow: -12px 0 32px #0000002e;
+}
+/* Cockpit's page shows only the step's card and what holds it (page-overlay.js marks them), in a column of its own
+   that scrolls by itself; the card's reply box stays at the column's bottom as on the page (sidebar.css). */
+html.page-beside #header, html.page-beside #banner { display: none; }
+html.page-beside main.layout {
+  position: fixed;
+  inset: 0 auto 0 0;
+  width: var(--beside-w);
+  max-width: none;
+  min-height: 0;
+  margin: 0;
+  padding: 0;
+  display: block;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  background: var(--bg);
+}
+html.page-beside main.layout > :not(.beside-path),
+html.page-beside .beside-path > :not(.beside-path, .beside-card) { display: none !important; }
+html.page-beside main.layout > .beside-path { width: auto; max-width: none; margin: 0; padding: 12px 16px; }
+html.page-beside .beside-card { max-width: none; margin-left: 0; margin-right: 0; }
+body[data-layout="sidebar"] .beside-card.next-card { padding: 16px 8px 12px; }
+/* A page loading ahead of a click (page-overlay.js): laid out at the size it shows at, so it measures the window it
+   will show in, but closed, unseen and out of the way until a click shows it. */
+.page-overlay.page-overlay-preload {
+  display: block;
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  visibility: hidden;
+  pointer-events: none;
+}
+.page-overlay.page-overlay-beside.page-overlay-preload { inset: 0 0 0 var(--beside-w); }
+
+/* While the page loads, the layer already has its place and shows a sheet in the page's place: the page's name, a
+   line on what happens, and the outline of a page drawing itself. The frame under it is laid out but unseen. */
+.page-overlay-loading-page .page-overlay-frame:not(.page-overlay-next) { visibility: hidden; }
+.page-overlay-loading {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  padding: clamp(56px, 10vh, 112px) 24px 24px;
+  background: var(--bg);
+  color: var(--text);
+}
+.page-overlay-sheet { max-width: 640px; margin: 0 auto; }
+.page-overlay-name {
+  margin: 0;
+  font: 600 clamp(22px, 2.4vw, 28px)/1.25 var(--serif);
+  text-wrap: balance;
+  overflow-wrap: anywhere;
+}
+.page-overlay-note { margin: 8px 0 0; font: 400 14px/1.5 var(--sans); color: var(--text-3); }
+.page-overlay-note a { color: var(--accent-text); }
+.page-overlay-sketch { display: grid; gap: 12px; margin-top: 36px; }
+/* The lines and the chart's bars share one sweep of light, which crosses the whole sketch at once. */
+.sketch-line, .sketch-chart i {
+  background: linear-gradient(100deg, var(--chip) 30%, var(--surface-2) 50%, var(--chip) 70%) 0 0 / 300% 100% fixed;
+  animation: page-overlay-sweep 1.6s linear infinite;
+}
+.sketch-line { display: block; height: 11px; border-radius: 6px; }
+.sketch-line.sketch-wide { height: 18px; width: 72%; margin-bottom: 6px; }
+.sketch-line.sketch-short { width: 58%; }
+.sketch-chart {
+  display: flex;
+  align-items: flex-end;
+  gap: 10px;
+  height: 132px;
+  margin: 14px 0;
+  padding: 0 4px 2px;
+  border-bottom: 1px solid var(--line-strong);
+}
+/* Each bar rises and settles in turn, as a chart drawing itself. */
+.sketch-chart i {
+  flex: 1;
+  height: 100%;
+  border-radius: 4px 4px 0 0;
+  transform-origin: bottom;
+  animation: page-overlay-sweep 1.6s linear infinite, page-overlay-rise 1.8s cubic-bezier(.4, 0, .2, 1) infinite;
+  animation-delay: 0s, calc(var(--n) * 110ms);
+}
+.sketch-chart i:nth-child(1) { --h: .42; }
+.sketch-chart i:nth-child(2) { --h: .68; }
+.sketch-chart i:nth-child(3) { --h: .55; }
+.sketch-chart i:nth-child(4) { --h: .88; }
+.sketch-chart i:nth-child(5) { --h: .62; }
+.sketch-chart i:nth-child(6) { --h: .76; }
+.sketch-chart i:nth-child(7) { --h: .48; }
+@keyframes page-overlay-sweep { from { background-position-x: 100%; } to { background-position-x: -50%; } }
+@keyframes page-overlay-rise {
+  0% { transform: scaleY(.08); }
+  45%, 70% { transform: scaleY(var(--h)); }
+  100% { transform: scaleY(.08); }
+}
+/* Cockpit could not load the page: the sketch stops and fades, and the note says what to do. */
+.page-overlay-loading.failed .page-overlay-sketch { opacity: .45; }
+.page-overlay-loading.failed .sketch-line, .page-overlay-loading.failed .sketch-chart i { animation: none; }
+.page-overlay-loading.failed .sketch-chart i { transform: scaleY(var(--h)); }
+.page-overlay-loading.failed .page-overlay-note { color: var(--text); }
+
+/* A thin line along the layer's top runs while a page loads in it, also one taking the shown page's place. */
+.page-overlay-bar { display: none; position: absolute; top: 0; left: 0; right: 0; height: 2px; overflow: hidden; pointer-events: none; }
+.page-overlay-loading-page .page-overlay-bar, .page-overlay-swapping .page-overlay-bar { display: block; }
+.page-overlay-bar::after {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 36%;
+  background: var(--accent);
+  animation: page-overlay-run 1.2s cubic-bezier(.4, 0, .2, 1) infinite;
+}
+.page-overlay-loading-page:has(.page-overlay-loading.failed) .page-overlay-bar { display: none; }
+@keyframes page-overlay-run { from { transform: translateX(-100%); } to { transform: translateX(280%); } }
+
+@media (prefers-reduced-motion: reduce) {
+  .sketch-line, .sketch-chart i, .page-overlay-bar::after { animation: none; }
+  .sketch-chart i { transform: scaleY(var(--h)); }
+  .page-overlay-bar::after { width: 100%; opacity: .6; }
+}

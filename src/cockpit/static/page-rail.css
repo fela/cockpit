@@ -1,0 +1,56 @@
+/* A helper page (Briefing, Pages, Usage, Spec, Skills) at 1280 px and wider holds its header as a rail at the left,
+   as the main page's is (sidebar.css): the logo and the keys on the first line, Search under them, then every page as
+   a plain list with the current one picked, and on Spec its filters and its More menu. The menu's <details> stays
+   closed: ::details-content shows its list, and the logo takes no clicks. Inside the main page's center layer and in
+   the overlays the header stays as style.css draws it. Loads after look.css. */
+@supports selector(::details-content) {
+@media (min-width: 1280px) {
+  /* The rail covers no part of the page's top, so sticky parts, the toast and spec.js's measure start at the top. */
+  :root:not(.center-frame) body:not(.pages-overlay-mode, .briefing-overlay-mode) { --header-h: 0px; padding-left: 280px; }
+
+  :root:not(.center-frame) body:not(.pages-overlay-mode, .briefing-overlay-mode) .top { position: fixed; top: 0; bottom: 0; left: 0; width: 280px; overflow-y: auto; overscroll-behavior: contain; background: var(--margin); box-shadow: none; }
+  /* Line one: the logo, free room, the feedback key, Reload when a newer Cockpit waits. Search spans line two; the
+     list, the filters and More each take a line of their own under it. */
+  :root:not(.center-frame) body:not(.pages-overlay-mode, .briefing-overlay-mode) .top-inner {
+    display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto; align-items: center; gap: 6px 0;
+    max-width: none; min-height: 0; margin: 0; padding: 10px 8px 10px; border-image: none;
+  }
+  :root:not(.center-frame) body:not(.pages-overlay-mode, .briefing-overlay-mode) .top-inner > :is(.brand-menu, .top-right) { display: contents; }
+  :root:not(.center-frame) body:not(.pages-overlay-mode, .briefing-overlay-mode) .brand-menu > summary.brand { grid-area: 1 / 1; margin: 0; pointer-events: none; visibility: hidden; }
+  /* The hidden summary takes no focus and no key, so the menu cannot be toggled; the mark inside it still shows. */
+  :root:not(.center-frame) body:not(.pages-overlay-mode, .briefing-overlay-mode) .brand-menu > summary.brand > .brand-mark { visibility: visible; }
+  /* The keys stand on the rail's ground as the main rail's Feedback key does, with no tray around them. */
+  :root:not(.center-frame) body:not(.pages-overlay-mode, .briefing-overlay-mode) .top-right > .key-tray { grid-area: 1 / 3; background: none; box-shadow: none; }
+  :root:not(.center-frame) body:not(.pages-overlay-mode, .briefing-overlay-mode) .top-right > .key-tray > :not(:first-child) { border-left: 0; }
+  :root:not(.center-frame) body:not(.pages-overlay-mode, .briefing-overlay-mode) .top-right > .key-tray :is(.button, summary.button) { border-radius: var(--radius-sm); }
+  :root:not(.center-frame) body:not(.pages-overlay-mode, .briefing-overlay-mode) .top-right > #reload { grid-area: 1 / 4; margin-left: 4px; }
+  :root:not(.center-frame) body:not(.pages-overlay-mode, .briefing-overlay-mode) .top-inner > .command-trigger.button {
+    grid-area: 2 / 1 / 3 / -1; width: 100%; height: 32px; margin: 0; padding: 0 6px 0 10px; justify-content: space-between;
+    color: var(--text-3); background: var(--surface); box-shadow: inset 0 0 0 1px var(--margin-line);
+  }
+  :root:not(.center-frame) body:not(.pages-overlay-mode, .briefing-overlay-mode) .top-inner > .command-trigger.button:hover { color: var(--text); }
+  :root:not(.center-frame) body:not(.pages-overlay-mode, .briefing-overlay-mode) details.brand-menu::details-content { grid-column: 1 / -1; content-visibility: visible; }
+  :root:not(.center-frame) body:not(.pages-overlay-mode, .briefing-overlay-mode) .top-inner > .counts { grid-column: 1 / -1; flex-wrap: wrap; gap: 4px; margin: 0; padding: 0; overflow: visible; -webkit-mask-image: none; mask-image: none; }
+  :root:not(.center-frame) body:not(.pages-overlay-mode, .briefing-overlay-mode) .top-right > #spec-more { grid-column: 1 / -1; justify-self: start; }
+  :root:not(.center-frame) body:not(.pages-overlay-mode, .briefing-overlay-mode) .top-right > #spec-more > .menu-list { left: 0; right: auto; }
+
+  /* The list: rows across the rail's whole width, as the main page's list of items is, on the rail's own ground. */
+  :root:not(.center-frame) body:not(.pages-overlay-mode, .briefing-overlay-mode) .brand-menu > .menu-list { position: static; display: flex; min-width: 0; margin: 0 -8px; padding: 0; border-radius: 0; background: none; box-shadow: none; }
+  :root:not(.center-frame) body:not(.pages-overlay-mode, .briefing-overlay-mode) .brand-menu > .menu-list > :is(a, button):not(.phone-only),
+  :root:not(.center-frame) body:not(.pages-overlay-mode, .briefing-overlay-mode) .brand-menu > .menu-list > form > button { display: flex; align-items: center; min-height: 32px; padding: 4px 16px 4px 18px; border-radius: 0; background: none; color: var(--text); }
+  /* The preference has no icon; its name starts where the other rows' names do. */
+  :root:not(.center-frame) body:not(.pages-overlay-mode, .briefing-overlay-mode) .brand-menu > .menu-list > button.vim-setting { padding-left: 42px; }
+  :root:not(.center-frame) body:not(.pages-overlay-mode, .briefing-overlay-mode) .brand-menu > .menu-list :is(a, button):hover { background: var(--hover); }
+  :root:not(.center-frame) body:not(.pages-overlay-mode, .briefing-overlay-mode) .brand-menu > .menu-list :is(a, button):focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
+  :root:not(.center-frame) body:not(.pages-overlay-mode, .briefing-overlay-mode) .brand-menu > .menu-list > a[aria-current="page"] { background: var(--picked-bg); color: var(--picked-text); }
+  :root:not(.center-frame) body:not(.pages-overlay-mode, .briefing-overlay-mode) .brand-menu > .menu-list > a[aria-current="page"] .icon { color: var(--picked-text-2); }
+  /* A hairline sets the pages apart from Emergency session, the preferences and Sign out. */
+  :root:not(.center-frame) body:not(.pages-overlay-mode, .briefing-overlay-mode) .brand-menu > .menu-list > a[href="/skills"] { margin-bottom: 4px; box-shadow: 0 1px 0 0 var(--margin-line); }
+}
+/* Beside the rail, Spec's text reaches the window's right edge until the window is 1500 px wide, so a block's
+   buttons stay the small bar over the line's end (spec.css) and a comment count waits for the pointer. */
+@media (hover: hover) and (min-width: 1280px) and (max-width: 1499px) {
+  :root:not(.center-frame) .block > .block-line > .block-actions { top: -5px; right: -4px; left: auto; padding: 2px; background: var(--surface-pop); box-shadow: var(--shadow-pop); }
+  :root:not(.center-frame) .block:not(:hover):not(:focus-within, .editing) > .block-line > .block-actions.shown { opacity: 0; pointer-events: none; }
+}
+}
