@@ -266,7 +266,7 @@ def main(argv: list[str]) -> int:
     if argv[0] == "setup":
         parser.add_argument("--local", action="store_true", required=True)
         parser.add_argument("--repo", type=Path, default=Path.cwd())
-        parser.add_argument("--provider", choices=("claude", "codex"), default="codex")
+        parser.add_argument("--provider", choices=config.PROVIDERS, default="codex")
         parser.add_argument("--name", default=getpass.getuser())
         parser.add_argument("--timezone", default="UTC")
     elif argv[0] == "service":

@@ -4411,8 +4411,15 @@ function itermLink(session, props, ...children) {
   return itermAnchor(session, props, ...children);
 }
 
+// What the page calls each agent a session can run on (config.PROVIDER_NAMES): Gemini and Grok run over ACP (SESSION-26).
+const PROVIDER_NAMES = { claude: "Claude", codex: "Codex", gemini: "Gemini", grok: "Grok" };
+function providerName(provider) {
+  return PROVIDER_NAMES[provider || "claude"] || provider;
+}
+
 function itermAnchor(session, props, ...children) {
-  if (session.provider === "codex" || session.removed_at) return null;
+  // Only a Claude session has a terminal to attach to.
+  if ((session.provider && session.provider !== "claude") || session.removed_at) return null;
   if (TOUCH.matches || !session.id) return null;
   const command = ui.state.attach.replaceAll("{session}", session.id);
   return h("a", {
@@ -5055,7 +5062,7 @@ function startOptions(key, saved) {
     const accounts = provider === "claude" ? state.session_accounts || [] : [];
     const account = accounts.find((each) => each.name === picks.account) || null;
     const agents = Object.keys(offered);
-    const agentName = (name) => (name === "codex" ? "Codex" : "Claude");
+    const agentName = providerName;
     const effortIcon = (name) => icon(`effort-${EFFORTS.indexOf(name) + 1}`);
     const set = (field, value) => {
       // The agent already picked keeps the other picks; focus goes back to the button either way.
@@ -5103,7 +5110,8 @@ function startOptions(key, saved) {
         agents.map((name) => [name, icon(name), agentName(name), isDefault(name === defaultAgent)])),
       pick("model", "Model", { icon: null, words: model.label, title: model.label }, model.name,
         choices.models.map((each, at) => [each.name, null, each.label, isDefault(at === 0)])),
-      pick("effort", "Effort", { icon: effortIcon(effort), words: effort, title: `${effort} effort` }, effort,
+      // An ACP agent picks no effort (SESSION-26).
+      choices.efforts.length > 0 && pick("effort", "Effort", { icon: effortIcon(effort), words: effort, title: `${effort} effort` }, effort,
         choices.efforts.map((each) => [each, effortIcon(each), each, isDefault(each === choices.effort)])),
       speeds.length > 1 && pick("speed", "Speed", { icon: null, words: speed.label, title: `${speed.label} · ${speed.hint}` }, speed.name,
         speeds.map((each) => [each.name, null, each.label, each.hint])),
@@ -10134,7 +10142,8 @@ function codexRequestCard(request) {
       for (const key of secretAnswers.keys()) if (key.startsWith(`codex:${request.id}:`)) secretAnswers.delete(key);
     });
   };
-  const title = request.method === "item/tool/requestUserInput" ? "Codex needs your answer" : "Codex requests permission";
+  const agent = providerName(request.provider || "codex");
+  const title = request.method === "item/tool/requestUserInput" ? `${agent} needs your answer` : `${agent} requests permission`;
   const error = ui.requestErrors.get(errorKey);
   const content = h("div", { class: "blocked-card", "data-codex": request.id },
     h("h3", { text: title }), h("p", { text: session?.name || p.threadId }),
@@ -10226,7 +10235,8 @@ function blockedWarnings(state) {
   const who = (session, id) => (session && session.name) || id.slice(0, 8);
   const codex = (state.codex_requests || []).map((request) => {
     const asks = request.method === "item/tool/requestUserInput";
-    const title = `${asks ? "Codex needs your answer" : "Codex requests permission"}: ${who(named.get(request.params.threadId), request.params.threadId)}`;
+    const agent = providerName(request.provider || "codex");
+    const title = `${asks ? `${agent} needs your answer` : `${agent} requests permission`}: ${who(named.get(request.params.threadId), request.params.threadId)}`;
     return {
       key: `codex:${request.id}`, tone: "fail", mark: asks ? "chat" : "shield", tip: title, short: title, title,
       more: null, fix: null, close: null, extra: null, row: { "data-codex": request.id },
@@ -12713,7 +12723,7 @@ function entryGroup(group, entry) {
     return repo ? { name: repo, rank: 0 } : { name: "No repo known", rank: 1 };
   }
   if (!first) return { name: "No session in the last day", rank: 2 };
-  if (first.provider === "codex") return { name: "Codex", rank: 0 };
+  if (first.provider && first.provider !== "claude") return { name: providerName(first.provider), rank: 0 };
   return first.account ? { name: `${capitalize(first.account)} account`, rank: 0 } : { name: "Account not known", rank: 1 };
 }
 
@@ -12757,7 +12767,7 @@ function sessionMarks(session) {
     session.standing && h("span", {
       class: "side-mark", role: "img", "aria-label": session.standing_name, title: session.standing_name,
     }, icon("shield")),
-    session.provider === "codex" && h("span", { class: "side-mark", text: "Codex" }),
+    session.provider && session.provider !== "claude" && h("span", { class: "side-mark", text: providerName(session.provider) }),
     session.is_sweep && h("span", { class: "side-mark", role: "img", "aria-label": "Sweep", title: "Sweeper" }, icon("radar")),
     session.move_waits && h("span", {
       class: "side-mark", role: "img", "aria-label": `Moves to ${session.move_waits}`,
@@ -12789,6 +12799,7 @@ function sessionOrigin(session, ended) {
   if (session.waits_on_dialog) return `${by}. It waits on you: answer it ${SIDEBAR ? "from its red row in Inbox" : "under Blocked and waiting"}.`;
   if (!session.alive) return `${by}. ${ended ? "Stopped, with its task finished" : "Stopped"}: nothing to close.`;
   if (session.provider === "codex") return `${by}. A Codex thread, still open.`;
+  if (session.provider && session.provider !== "claude") return `${by}. A ${providerName(session.provider)} session, still open.`;
   // Cockpit stops only a background session (one with a job file) once it is idle.
   const left = session.job_state ? "Still running; Cockpit stops it after an hour idle, or 15 minutes when memory is low."
     : "Still running in its terminal.";

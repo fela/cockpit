@@ -107,6 +107,9 @@
     // to five lit bars for low, medium, high, xhigh and max.
     claude: `<path d="M8 1.75v12.5M1.75 8h12.5M3.6 3.6l8.8 8.8M12.4 3.6l-8.8 8.8"/>`,
     codex: `${softRect(1.75, 2.75, 12.5, 10.5, 2.25)}<path d="M4.75 6.25L6.75 8l-2 1.75M8.75 10h2.5"/>`,
+    // The ACP agents (SESSION-26): a four-pointed star for Gemini, a slash through a ring for Grok.
+    gemini: `<path d="M8 1.75C8.6 5.4 10.6 7.4 14.25 8 10.6 8.6 8.6 10.6 8 14.25 7.4 10.6 5.4 8.6 1.75 8 5.4 7.4 7.4 5.4 8 1.75Z"/>`,
+    grok: `<circle cx="8" cy="8" r="5.5"/><path d="M3.5 12.5l9-9"/>`,
     "effort-1": effort(1),
     "effort-2": effort(2),
     "effort-3": effort(3),

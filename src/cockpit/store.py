@@ -2565,7 +2565,7 @@ def at_dialogs(sessions: list[Session]) -> list[Session]:
     own session stays off it."""
     return [
         session for session in sessions
-        if session.provider != "codex" and session.waits_on_dialog and session.name not in SWEEP_SESSION_NAMES
+        if session.provider == "claude" and session.waits_on_dialog and session.name not in SWEEP_SESSION_NAMES
     ]
 
 
@@ -5762,7 +5762,7 @@ def work_activity(related: list[Session]) -> tuple[str, str]:
     for session in related:
         words = f"{session.needs} {session.detail}".lower()
         if session.state in ("blocked", "stopped") and any(word in words for word in ("429", "rate limit", "rate_limit", "usage limit")):
-            return "Claude rate limit" if session.provider == "claude" else "Codex rate limit", "Provider rate limit"
+            return f"{config.PROVIDER_NAMES.get(session.provider, 'Agent')} rate limit", "Provider rate limit"
     if any(session.state == "failed" for session in related):
         return "Agent error", "Agent stopped with an error"
     return ("Agent idle", "") if related else ("Status unavailable", "")

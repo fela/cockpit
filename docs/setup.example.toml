@@ -9,9 +9,12 @@ name = "Sam"
 email = "sam@localhost"
 origin = "http://127.0.0.1:8790"
 auth_mode = "local"
-providers = ["codex"] # ["claude"] or ["claude", "codex"] also work
+providers = ["codex"] # any of "claude", "codex", "gemini" and "grok", such as ["claude", "codex"]
 default_provider = "codex"
 codex_command = "codex" # executable name or absolute path; uses existing login; models come from SESSION_OPTIONS
+# Optional: the Gemini CLI and Grok Build commands, driven over ACP; each uses its own login.
+# gemini_command = "gemini"
+# grok_command = "grok"
 
 # Optional Claude socket directory override. Empty uses the platform default.
 claude_sockets_dir = ""

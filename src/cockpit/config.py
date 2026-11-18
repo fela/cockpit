@@ -81,7 +81,24 @@ SESSION_OPTIONS: dict[str, dict[str, Any]] = {
             {"name": "ultrafast", "label": "Ultrafast", "hint": "8× included usage · Pro $500"},
         ],
     },
+    # The ACP agents (acp_agent.py, SPEC SESSION-26) pick no effort. Gemini's models are the CLI's own aliases, which it
+    # points at its current models, "auto" letting it choose per request; Grok's "default" is the CLI's own default.
+    "gemini": {
+        "models": [("auto", "Auto"), ("pro", "Pro"), ("flash", "Flash"), ("flash-lite", "Flash-Lite")],
+        "efforts": [],
+        "effort": None,
+    },
+    "grok": {
+        "models": [("default", "Default")],
+        "efforts": [],
+        "effort": None,
+    },
 }
+# Every provider a session can run on, and what the page and messages call each. Claude and Codex have integrations
+# of their own; the others are driven over the Agent Client Protocol (ACP_PROVIDERS, acp_agent.py).
+PROVIDERS = ("claude", "codex", "gemini", "grok")
+PROVIDER_NAMES = {"claude": "Claude", "codex": "Codex", "gemini": "Gemini", "grok": "Grok"}
+ACP_PROVIDERS = ("gemini", "grok")
 
 
 def session_speeds(provider: str, model: str) -> list[dict[str, str]]:
@@ -198,6 +215,9 @@ class Setup:
     providers: tuple[str, ...] = ("claude",)
     default_provider: str = "claude"
     codex_command: str = "codex"
+    # The Gemini CLI and Grok Build commands (SPEC SESSION-26): an executable name or absolute path, using its own login.
+    gemini_command: str = "gemini"
+    grok_command: str = "grok"
     claude_sockets_dir: str = ""
     # The branch of spec_repo that `cockpit deploy` installs and restarts the service on; "" turns deploy off.
     deploy_branch: str = ""
@@ -248,7 +268,8 @@ def read_setup(path: Path, tables: dict[str, TableReader]) -> Setup:
             "from this file, and paste the people into the question Cockpit asks on its first page"
         )
     optional = {
-        "auth_mode", "providers", "default_provider", "codex_command", "claude_sockets_dir", "deploy_branch",
+        "auth_mode", "providers", "default_provider", "codex_command", "gemini_command", "grok_command",
+        "claude_sockets_dir", "deploy_branch",
         "public_origin", "last_use", "retired_accounts", "offload",
     }
     missing = [key for key in keys if key not in values and key not in optional]
@@ -258,7 +279,7 @@ def read_setup(path: Path, tables: dict[str, TableReader]) -> Setup:
         raise SetupError(f"{path}: {'; '.join(problem for problem in problems if problem)} (docs/setup.example.toml lists every key)")
     part_tables = {name: read(path, values.pop(name, None)) for name, read in tables.items()}
     values = {"auth_mode": "google", "providers": ["claude"], "default_provider": "claude",
-              "codex_command": "codex", "claude_sockets_dir": "", "deploy_branch": "", "public_origin": "",
+              "codex_command": "codex", "gemini_command": "gemini", "grok_command": "grok", "claude_sockets_dir": "", "deploy_branch": "", "public_origin": "",
               "last_use": {}, "retired_accounts": [], "offload": None, **values}
     may_be_empty = {"claude_sockets_dir", "deploy_branch", "public_origin"}
     wrong = [key for key in keys if key not in {"providers", "last_use", "retired_accounts", "offload"}
@@ -287,9 +308,9 @@ def read_setup(path: Path, tables: dict[str, TableReader]) -> Setup:
     if "{session}" not in values["attach"]:
         raise SetupError(f"{path}: attach must contain {{session}}, where the session's id goes")
     providers = values["providers"]
-    if (not isinstance(providers, list) or not providers or any(p not in ("claude", "codex") for p in providers)
+    if (not isinstance(providers, list) or not providers or any(p not in PROVIDERS for p in providers)
             or len(set(providers)) != len(providers)):
-        raise SetupError(f"{path}: providers must be a non-empty list of claude and/or codex")
+        raise SetupError(f"{path}: providers must be a non-empty list of {', '.join(PROVIDERS)}, each once")
     if values["default_provider"] not in providers:
         raise SetupError(f"{path}: default_provider must be enabled in providers")
     last_use = values["last_use"]

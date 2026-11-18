@@ -40,6 +40,8 @@ from cockpit import accounts, config
 log = logging.getLogger(__name__)
 
 STATE_PATH = config.DATA_DIR / "emergency.json"
+# The agents the emergency session runs: its own small runners for Claude and Codex, apart from the rest of Cockpit.
+EMERGENCY_PROVIDERS = ("claude", "codex")
 OUTPUT_DIR = config.DATA_DIR / "emergency"
 # Each turn runs in a systemd scope of its own on Linux; elsewhere, and in tests, as a process group of its own.
 SCOPED = sys.platform == "linux"
@@ -434,7 +436,7 @@ def view() -> dict[str, Any]:
                 "efforts": config.SESSION_OPTIONS[provider]["efforts"],
                 "effort": config.SESSION_OPTIONS[provider]["effort"],
             }
-            for provider in config.setup().providers
+            for provider in config.setup().providers if provider in EMERGENCY_PROVIDERS
         },
         "turns": turns,
     }
@@ -502,8 +504,8 @@ def send(
     on `model` at `effort`, in the session's folder (`cwd` for a new session):
     a Claude turn on the account `account_name`, a Codex turn with none. `provider` is the session's agent, which
     only its first message picks."""
-    if provider not in config.setup().providers:
-        raise ValueError(f"{provider} is not enabled in Cockpit's setup")
+    if provider not in config.setup().providers or provider not in EMERGENCY_PROVIDERS:
+        raise ValueError(f"{provider} is not enabled in Cockpit's setup, or the emergency session cannot run it")
     offered = config.SESSION_OPTIONS[provider]
     if model not in [name for name, _ in offered["models"]]:
         raise ValueError(f"{provider} offers no model {model}")

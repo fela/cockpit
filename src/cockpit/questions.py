@@ -109,7 +109,7 @@ def asks(session: Session) -> bool:
     """The session stopped to ask the user something; a dialog in its terminal shows under Blocked and waiting."""
     return (
         session.state == "blocked" and not session.waits_on_dialog and session.name not in store.SWEEP_SESSION_NAMES
-        and asks_in(session.detail if session.provider == "codex" else last_message(session.session_id))
+        and asks_in(session.detail if session.provider != "claude" else last_message(session.session_id))
     )
 
 
@@ -118,7 +118,7 @@ def stopped_asking(session: Session) -> bool:
     question stays open, and the user's answer resumes it."""
     return (
         session.state == "stopped" and session.name not in store.SWEEP_SESSION_NAMES
-        and asks_in(session.detail if session.provider == "codex" else last_message(session.session_id))
+        and asks_in(session.detail if session.provider != "claude" else last_message(session.session_id))
     )
 
 
@@ -244,7 +244,7 @@ def _put(conn: sqlite3.Connection, session: Session) -> None:
             "session_id": session.session_id,
             "ask": _ask(conn, session),
             "why": _why(conn, session),
-            "body": _quoted(session.detail if session.provider == "codex" else last_message(session.session_id)),
+            "body": _quoted(session.detail if session.provider != "claude" else last_message(session.session_id)),
         }
         # The user handed the step of this question to an agent: it comes back with what that agent wrote.
         if conn.execute(
@@ -303,7 +303,7 @@ def _ask_in_place(conn: sqlite3.Connection, step: dict[str, Any], session: Sessi
         "session_id": session.session_id,
         "ask": _ask(conn, session),
         "why": _why(conn, session),
-        "body": _quoted(session.detail if session.provider == "codex" else last_message(session.session_id)),
+        "body": _quoted(session.detail if session.provider != "claude" else last_message(session.session_id)),
         "details": [],
         "draft": "",
         "reply_hint": "",

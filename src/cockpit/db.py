@@ -1613,6 +1613,64 @@ MIGRATIONS: list[str] = [
         checked_at TEXT NOT NULL
     );
     """,
+    # Sessions on the ACP agents, Gemini and Grok (SPEC SESSION-26, acp_agent.py): a message may ask for one, so
+    # messages is rebuilt with the wider provider check, the same columns in the same order. acp_sessions holds the
+    # sessions Cockpit started, acp_log each one's conversation as the session view shows it, one part per row:
+    # ACP has no call that lists a session's past items, so Cockpit keeps them as they stream.
+    """
+    CREATE TABLE messages_new (
+        id INTEGER PRIMARY KEY,
+        author TEXT NOT NULL,
+        item_id INTEGER REFERENCES items(id) ON DELETE SET NULL,
+        session_id TEXT,
+        new_cwd TEXT,
+        new_name TEXT,
+        text TEXT NOT NULL,
+        state TEXT NOT NULL CHECK (state IN ('queued', 'sending', 'sent', 'failed')),
+        via TEXT CHECK (via IN ('socket', 'resume', 'new')),
+        detail TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL,
+        sent_at TEXT,
+        step_id INTEGER REFERENCES steps(id) ON DELETE SET NULL,
+        dismissed_at TEXT,
+        dismissed_by TEXT,
+        dismiss_reason TEXT,
+        as_prompt INTEGER NOT NULL DEFAULT 0,
+        waits_since TEXT,
+        step_ask TEXT,
+        hands_off INTEGER NOT NULL DEFAULT 0,
+        take_back_until TEXT,
+        completes INTEGER NOT NULL DEFAULT 0,
+        provider TEXT CHECK (provider IN ('claude', 'codex', 'gemini', 'grok')),
+        from_session TEXT,
+        step_version INTEGER,
+        new_options TEXT,
+        fork_of TEXT,
+        page_answers TEXT,
+        capacity_since TEXT,
+        images TEXT NOT NULL DEFAULT '[]'
+    );
+    INSERT INTO messages_new SELECT * FROM messages;
+    DROP TABLE messages;
+    ALTER TABLE messages_new RENAME TO messages;
+    CREATE TABLE acp_sessions (
+        session_id TEXT PRIMARY KEY,
+        provider TEXT NOT NULL CHECK (provider IN ('gemini', 'grok')),
+        name TEXT NOT NULL,
+        cwd TEXT NOT NULL,
+        model TEXT NOT NULL,
+        state TEXT NOT NULL DEFAULT 'stopped',
+        detail TEXT NOT NULL DEFAULT '',
+        updated_at TEXT NOT NULL
+    );
+    CREATE TABLE acp_log (
+        id INTEGER PRIMARY KEY,
+        session_id TEXT NOT NULL REFERENCES acp_sessions(session_id) ON DELETE CASCADE,
+        call_id TEXT,
+        part TEXT NOT NULL
+    );
+    CREATE INDEX acp_log_session ON acp_log(session_id, id);
+    """,
 ]
 
 JSON_COLUMNS = frozenset(

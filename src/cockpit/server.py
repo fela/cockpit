@@ -17,6 +17,7 @@ from fastapi import FastAPI
 
 from cockpit import (
     accounts,
+    acp_agent,
     activity,
     auth,
     briefing,
@@ -718,7 +719,11 @@ def main() -> None:
         providers=setup.providers,
         default_provider=setup.default_provider,
     )
-    agent = codex_worker.WorkerClient(config.DB_PATH, setup.codex_command) if "codex" in setup.providers else None
+    codex_client = codex_worker.WorkerClient(config.DB_PATH, setup.codex_command) if "codex" in setup.providers else None
+    # The ACP agents (SPEC SESSION-26) and Codex behind one set of methods; None while only Claude is enabled.
+    acp = {provider: acp_agent.AcpAgent(config.DB_PATH, provider, getattr(setup, f"{provider}_command"))
+           for provider in config.ACP_PROVIDERS if provider in setup.providers}
+    agent = acp_agent.Agents(codex_client, acp) if codex_client is not None or acp else None
     claude_cache = sessions.SessionCache(
         config.ACCOUNTS, lambda: moves.moved(config.DB_PATH), lambda: removals.listed(config.DB_PATH)
     ) if "claude" in setup.providers else None

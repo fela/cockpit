@@ -601,7 +601,7 @@ class NewSessionStart(Body):
     nullable = frozenset({"session_id", "new_cwd", "provider", "model", "effort", "account", "speed"})
 
     new_cwd: str | None
-    provider: Literal["claude", "codex"] | None
+    provider: Literal["claude", "codex", "gemini", "grok"] | None
     model: OptionName | None
     effort: OptionName | None
     account: OptionName | None
@@ -634,7 +634,7 @@ class HandOff(Body):
     session_id: SessionId | None = None
     new_cwd: str | None = None
     # A new session's options (SPEC SESSION-22), each null for the default; store.start_options checks them.
-    provider: Literal["claude", "codex"] | None = None
+    provider: Literal["claude", "codex", "gemini", "grok"] | None = None
     model: OptionName | None = None
     effort: OptionName | None = None
     account: OptionName | None = None
@@ -868,7 +868,7 @@ class ItemAdd(Body):
     pinned: bool
     # What its session starts with (SPEC SESSION-22), each null or left out for the default; a page loaded before
     # these options sends none.
-    provider: Literal["claude", "codex"] | None = None
+    provider: Literal["claude", "codex", "gemini", "grok"] | None = None
     model: OptionName | None = None
     effort: OptionName | None = None
     account: OptionName | None = None
@@ -948,7 +948,7 @@ class Target(Body):
     session_id: SessionId | None = None
     new_cwd: str | None = None
     # A new session's options (SPEC SESSION-22), each null for the default; store.start_options checks them.
-    provider: Literal["claude", "codex"] | None = None
+    provider: Literal["claude", "codex", "gemini", "grok"] | None = None
     model: OptionName | None = None
     effort: OptionName | None = None
     account: OptionName | None = None
