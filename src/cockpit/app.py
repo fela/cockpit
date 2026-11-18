@@ -1143,6 +1143,8 @@ class BriefingIn(Body):
     day: str
     # Markdown; briefing.put names the limit when it is too long.
     body: str
+    # "weekly" for the weekly digest (SPEC VIEW-36).
+    kind: Literal["daily", "weekly"] = "daily"
 
 
 class ZoneIn(Body):
@@ -3273,7 +3275,7 @@ def create_app(
 
     @app.post("/api/briefings")
     def put_briefing(body: BriefingIn, request: Request, conn: Conn) -> dict[str, Any]:
-        return briefing.put(conn, request.state.actor, body.day, body.body)
+        return briefing.put(conn, request.state.actor, body.day, body.body, body.kind)
 
     # The user's time zone (SPEC CONTROL-32): each page reports its browser's zone and learns whether to ask about
     # switching; the user switches, keeps the zone, or picks one in the menu.

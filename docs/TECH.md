@@ -483,6 +483,11 @@ timezone determines the morning schedule. Collection depends on the selected
 agent's available connectors. The summary comes first; detail remains available
 on the briefing page.
 
+On Sunday from 08:00 a weekly digest (VIEW-36) follows the same path: its own
+task and session, handed that week's stored briefings rather than reading the
+sources again. Digests live in the `briefings` table with `kind = 'weekly'`, so
+the page, read step and comments work as they do for a briefing.
+
 ## 8. Tracking and usage
 
 Timers record active time on steps and allow corrections. Presence signals and
