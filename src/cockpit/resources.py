@@ -974,4 +974,5 @@ def session_titles(conn: sqlite3.Connection, session_ids: set[str]) -> dict[str,
 
 
 def memory_total_mb() -> float:
-    return _meminfo(Path("/proc/meminfo").read_bytes()).get("MemTotal", 0) / 1024
+    """The host's physical memory in MiB, on Linux and macOS."""
+    return os.sysconf("SC_PHYS_PAGES") * os.sysconf("SC_PAGE_SIZE") / 1024**2

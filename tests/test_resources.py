@@ -351,6 +351,12 @@ def test_old_rows_fold_into_daily_totals_and_every_day_stays_on_record(conn) -> 
     assert resources.fold(conn, NOW, UTCZ) == 0
 
 
+@pytest.mark.parametrize(("pages", "page_size"), [(8192, 4096), (2048, 16384)])
+def test_total_memory_uses_the_hosts_page_size(monkeypatch, pages: int, page_size: int) -> None:
+    monkeypatch.setattr(resources.os, "sysconf", {"SC_PHYS_PAGES": pages, "SC_PAGE_SIZE": page_size}.__getitem__)
+    assert resources.memory_total_mb() == 32
+
+
 def test_the_server_page_and_its_figures_load(world: World) -> None:
     page = world.client.get("/server")
     assert page.status_code == 200 and "server.js" in page.text
