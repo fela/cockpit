@@ -205,6 +205,30 @@ def test_a_session_an_agent_closed_after_its_stop_stays_closed(
     assert sync(world) == ([], None)
 
 
+def test_a_close_that_comes_after_the_scan_still_keeps_the_session_closed(
+    world: World, transcripts: Path, claude_accounts: tuple[config.Account, config.Account],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Before this fix, sync queued its message on what `lost` had read, so an agent's close in between was resumed."""
+    personal, _ = claude_accounts
+    sign_in(personal, NOW - timedelta(minutes=1))
+    world.cache.sessions = [make_session(SESSION_B, pid=None, state="stopped")]
+    transcript(transcripts, SESSION_B, login_expired(STOPPED))
+    scan = logins.lost
+
+    def scan_then_close(conn, sessions, now):
+        found = scan(conn, sessions, now)
+        conn.execute(
+            "INSERT INTO events (at, kind, actor, data) VALUES (?, 'session.closed', 'agent:sweep', ?)",
+            ((STOPPED + timedelta(minutes=30)).strftime("%Y-%m-%dT%H:%M:%SZ"), json.dumps({"session_id": SESSION_B})),
+        )
+        return found
+
+    monkeypatch.setattr(logins, "lost", scan_then_close)
+    assert sync(world) == ([], None)
+    assert messages(world) == []
+
+
 def test_the_sweeper_gets_a_full_sweep_in_place_of_the_wake_up_it_lost(
     world: World, transcripts: Path, claude_accounts: tuple[config.Account, config.Account],
 ) -> None:
@@ -253,6 +277,23 @@ def test_a_wrong_code_says_what_claude_said_and_the_next_try_starts_over(
     with pytest.raises(store.Invalid, match="no sign-in of the personal account waits for this code"):
         sign_ins.finish("personal", attempt, GOOD_CODE)
     assert not (personal.folder / ".credentials.json").exists()
+
+
+def test_a_second_code_while_the_first_finishes_leaves_the_terminal_to_the_first(
+    claude_accounts: tuple[config.Account, config.Account],
+) -> None:
+    """Before this fix, once the first code's process ended, a second code took the ended branch, kept the first's
+    `finishing` and went on to close the same terminal a second time."""
+    personal, _ = claude_accounts
+    sign_ins = logins.SignIn(False)
+    attempt = sign_ins.start("personal", login_command(personal, personal))["attempt"]
+    login = sign_ins._logins["personal"]
+    login.finishing = login.ended = True  # the first code's submission waits for its answer, and the process ended
+    with pytest.raises(store.Conflict, match="already has a code"):
+        sign_ins.finish("personal", attempt, GOOD_CODE)
+    os.fstat(login.terminal)  # still open, for the first submission to close
+    assert sign_ins._logins["personal"] is login
+    login.end()
 
 
 def test_a_code_goes_only_to_the_sign_in_whose_link_the_user_opened(

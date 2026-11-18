@@ -31,7 +31,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
-from cockpit import accounts, config, limits, store
+from cockpit import accounts, config, db, limits, store
 from cockpit.sessions import Session, login_stop
 
 log = logging.getLogger(__name__)
@@ -163,10 +163,12 @@ class SignIn:
             login = self._logins.get(name)
             if login is None or login.attempt != attempt:
                 raise store.Invalid(f"no sign-in of the {name} account waits for this code: press Sign in again")
+            # Finishing first: the code before this one may have ended the process already, and its submission
+            # still owns the terminal.
+            if login.finishing:
+                raise store.Conflict(f"this sign-in of the {name} account already has a code: wait for its answer")
             if login.ended:
                 del self._logins[name]
-            elif login.finishing:
-                raise store.Conflict(f"this sign-in of the {name} account already has a code: wait for its answer")
             else:
                 login.finishing = True
         if not login.finishing:
@@ -243,15 +245,16 @@ class SignIn:
 
 @dataclass(frozen=True)
 class Lost:
-    """A session whose turn a sign-out ended, now that its account was signed in again at `signed_in`."""
+    """A session whose turn a sign-out ended at `stopped`, now that its account was signed in again at `signed_in`."""
 
     session: Session
+    stopped: datetime
     signed_in: datetime
 
 
 def lost(conn: sqlite3.Connection, sessions: list[Session], now: datetime) -> list[Lost]:
     """Each session whose last turn ended on "Login expired" on an account signed in again since, that no message
-    reached after its stop. A session under way or archived is left alone."""
+    reached after its stop (`_unanswered`). A session under way or archived is left alone."""
     found = []
     for session in sessions:
         if session.state == "working":
@@ -263,26 +266,30 @@ def lost(conn: sqlite3.Connection, sessions: list[Session], now: datetime) -> li
         changed = accounts.sign_in_changed(account)
         if changed is None or changed <= stopped or accounts.signed_out(account, now):
             continue
-        stamp = stopped.strftime("%Y-%m-%dT%H:%M:%SZ")
-        # Cockpit's own message since the stop answers it, whether or not it went out (a failed one is not tried
-        # again every poll); anyone else's answers it once it went out after the stop, or while it waits to go.
-        if conn.execute(
-            "SELECT 1 FROM messages WHERE session_id = ? AND ((author = ? AND created_at > ?)"
-            " OR state IN ('queued', 'sending') OR (state = 'sent' AND sent_at > ?))",
-            (session.session_id, ACTOR, stamp, stamp),
-        ).fetchone():
-            continue
-        if conn.execute(
-            "SELECT 1 FROM session_archives WHERE session_id = ? AND cancelled_at IS NULL AND revived_at IS NULL"
-            " AND failure = ''",
-            (session.session_id,),
-        ).fetchone():
-            continue
-        # Closed by an agent, such as the sweep, after the stop: it ended on purpose, as after a usage limit.
-        if limits.ended_on_purpose(conn, session.session_id, stopped):
-            continue
-        found.append(Lost(session, changed))
+        if _unanswered(conn, session.session_id, stopped):
+            found.append(Lost(session, stopped, changed))
     return found
+
+
+def _unanswered(conn: sqlite3.Connection, session_id: str, stopped: datetime) -> bool:
+    """No message answered the session's stop, it is not archived, and no agent closed it since."""
+    stamp = stopped.strftime("%Y-%m-%dT%H:%M:%SZ")
+    # Cockpit's own message since the stop answers it, whether or not it went out (a failed one is not tried
+    # again every poll); anyone else's answers it once it went out after the stop, or while it waits to go.
+    if conn.execute(
+        "SELECT 1 FROM messages WHERE session_id = ? AND ((author = ? AND created_at > ?)"
+        " OR state IN ('queued', 'sending') OR (state = 'sent' AND sent_at > ?))",
+        (session_id, ACTOR, stamp, stamp),
+    ).fetchone():
+        return False
+    if conn.execute(
+        "SELECT 1 FROM session_archives WHERE session_id = ? AND cancelled_at IS NULL AND revived_at IS NULL"
+        " AND failure = ''",
+        (session_id,),
+    ).fetchone():
+        return False
+    # Closed by an agent, such as the sweep, after the stop: it ended on purpose, as after a usage limit.
+    return not limits.ended_on_purpose(conn, session_id, stopped)
 
 
 def sync(conn: sqlite3.Connection, sessions: list[Session], sweeper: str | None, now: datetime, checkouts_dir: Path) -> tuple[list[int], Lost | None]:
@@ -296,7 +303,14 @@ def sync(conn: sqlite3.Connection, sessions: list[Session], sweeper: str | None,
             swept = turn
             continue
         text = CONTINUE.format(account=turn.session.account, at=turn.signed_in.astimezone(now.tzinfo))
-        message_ids.append(store.create_message(conn, ACTOR, text, {"session_id": turn.session.session_id}, checkouts_dir)["id"])
+        # Judged again in the message's transaction: a message, an archive or an agent's close that came
+        # in after `lost` read the session answers its stop, as in limits.sync.
+        with db.transaction(conn):
+            if not _unanswered(conn, turn.session.session_id, turn.stopped):
+                log.info("session %s got an answer since it was found lost to a sign-out", turn.session.session_id)
+                continue
+            target = {"session_id": turn.session.session_id}
+            message_ids.append(store.create_message(conn, ACTOR, text, target, checkouts_dir)["id"])
         log.info(
             "the %s account was signed in again: session %s continues the turn it lost; queued message %s",
             turn.session.account, turn.session.session_id, message_ids[-1],
