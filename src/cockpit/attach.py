@@ -90,10 +90,10 @@ def _program(command: str) -> str:
 
 
 def attach_command(account: Account, session: str) -> str:
-    """What the window's shell runs to attach to `session` on `account`. The default account unsets
+    """What the window's shell runs to attach to `session` on `account`. Claude's default folder unsets
     CLAUDE_CONFIG_DIR, which the tmux shell may have from a command run there for the other account."""
     command = f"claude attach {shlex.quote(session)}"
-    if account.default:
+    if account.claude_default:
         return f"env -u CLAUDE_CONFIG_DIR {command}"
     return f"CLAUDE_CONFIG_DIR={shlex.quote(str(account.folder))} {command}"
 

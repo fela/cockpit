@@ -13,7 +13,7 @@ from typing import Any
 
 from fastapi.testclient import TestClient
 
-from cockpit import cli, store
+from cockpit import cli, config, store
 from tests.conftest import ORIGIN, SESSION_A, SESSION_B, World
 from tests.test_cli import route_cli_to
 
@@ -256,6 +256,7 @@ def test_cli_lists_examples_with_the_transcript_that_shows_how(
     transcript.parent.mkdir(parents=True)
     transcript.write_text("{}\n")
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(config, "CLAUDE_HOME", tmp_path / "home" / ".claude")
     route_cli_to(world, monkeypatch)
     assert cli.main(["writing", "list"]) == 0
     text = capsys.readouterr().out

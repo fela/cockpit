@@ -368,7 +368,8 @@ def test_deploy_on_linux_restarts_the_systemd_service_apart(tmp_path, monkeypatc
     finally:
         config.setup.cache_clear()
     assert "restarts in" in said and "Reload" in said
-    assert calls[-1] == ("restart", ["/bin/sh", "-c", local.SYSTEMD_RESTART_SCRIPT, "sh", str(local.RESTART_DELAY_SECONDS)])
+    assert calls[-1] == ("restart", ["/bin/sh", "-c", local.SYSTEMD_RESTART_SCRIPT, "sh", str(local.RESTART_DELAY_SECONDS),
+                                     "cockpit"])
     assert [call[0] for call in calls].count("restart") == 1
 
 

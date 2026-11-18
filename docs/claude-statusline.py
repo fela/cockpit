@@ -1,7 +1,8 @@
 """Save Claude Code's status-line rate limits for Cockpit on macOS and Linux.
 
-Run with the signed-in account's email as the only argument; JSON arrives on stdin.
+Run with the signed-in account's email as the argument; JSON arrives on stdin.
 The script reads only its own usage file, and accepts account identity explicitly.
+A named Cockpit instance reads ~/.claude-<name>/rate-limits.json: pass that path as --file.
 """
 
 from __future__ import annotations
@@ -51,9 +52,11 @@ def capture(payload: dict[str, Any], email: str, destination: Path, config_dir: 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("email", help="email of the Claude account this status line runs for")
-    args = parser.parse_args()
     folder = Path.home() / ".claude"
-    capture(json.load(sys.stdin), args.email, folder / "rate-limits.json", os.environ.get("CLAUDE_CONFIG_DIR", str(folder)))
+    parser.add_argument("--file", type=Path, default=folder / "rate-limits.json",
+                        help="the usage file Cockpit reads (default ~/.claude/rate-limits.json)")
+    args = parser.parse_args()
+    capture(json.load(sys.stdin), args.email, args.file.expanduser(), os.environ.get("CLAUDE_CONFIG_DIR", str(folder)))
 
 
 if __name__ == "__main__":

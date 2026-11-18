@@ -69,7 +69,7 @@ UUID = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
 CMD_SESSION = re.compile(r"--(?:session-id|resume)[ =](?:\S*/)?(" + UUID + ")")
 FD_SESSION = (
     re.compile(r"/tmp/claude-\d+/[^/]+/(" + UUID + ")/"),
-    re.compile(r"\.claude/projects/[^/]+/(" + UUID + r")\.jsonl"),
+    re.compile(r"\.claude(?:-[a-z0-9-]+)?/projects/[^/]+/(" + UUID + r")\.jsonl"),
 )
 ENV_SESSION = re.compile(rb"(?:^|\0)CLAUDE_CODE_SESSION_ID=(" + UUID.encode() + rb")")
 # Codex's own program, as the word of its command line that names it: its `codex` command or `codex.js` script, or a

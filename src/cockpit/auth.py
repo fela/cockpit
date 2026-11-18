@@ -23,6 +23,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
 
+from cockpit import config
+
 # A personal Google account's address ends in one of these; its ID token has no `hd` claim.
 PERSONAL_DOMAINS = frozenset({"gmail.com", "googlemail.com"})
 GOOGLE_AUTHORIZATION_ENDPOINT = "https://accounts.google.com/o/oauth2/v2/auth"
@@ -34,7 +36,9 @@ SIGN_IN_COOKIE = "__Host-cockpit_sign_in"
 SIGN_IN_MAX_AGE = 10 * 60
 SESSION_COOKIE = "__Host-cockpit_session"
 SESSION_MAX_AGE = 30 * 24 * 60 * 60
-LOCAL_SESSION_COOKIE = "cockpit_local_session"
+# Browsers send a cookie to every port of a host, so each instance (SPEC SCOPE-6) names its own, and signing in to one
+# leaves the other signed in.
+LOCAL_SESSION_COOKIE = f"cockpit_local_session{config.SUFFIX}"
 LOCAL_COOKIE_ATTRIBUTES = "Path=/; HttpOnly; SameSite=Strict"
 LOCAL_SIGN_IN_PATH = "/auth/local"
 # SameSite=Lax, not Strict: the browser reaches "/" through a redirect from

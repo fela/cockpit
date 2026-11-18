@@ -7,7 +7,8 @@ for local authentication and provider details.
 
 ## 1. Shape
 
-One Python 3.12+ process runs FastAPI and uvicorn on `127.0.0.1:8790`. A SQLite
+One Python 3.12+ process runs FastAPI and uvicorn on `127.0.0.1:8790` (the setup's
+`port` can change it). A SQLite
 file stores the board and delivery state. Browser assets ship with the package.
 The optional prompt editor is a checked-in bundle, so installation needs no
 frontend build.
@@ -31,7 +32,10 @@ explicitly selects local authentication.
 The configuration directory is private (0700). Authentication files use 0600:
 `token` for agents, `cookie-key` for browser session signatures, `local-login-token`
 for local browser sign-in, and `google-oauth-client.json` for Google mode.
-The database is `~/.local/share/cockpit/cockpit.db`.
+The database is `~/.local/share/cockpit/cockpit.db`. A named instance
+(`COCKPIT_INSTANCE`, SPEC SCOPE-6) uses `~/.config/cockpit-<name>` and
+`~/.local/share/cockpit-<name>` instead, with Claude and Codex folders of its own;
+[LOCAL.md](LOCAL.md#separate-instances) lists them.
 
 ### Modules (`src/cockpit/`)
 
@@ -53,7 +57,7 @@ The database is `~/.local/share/cockpit/cockpit.db`.
 
 ### Browser sign-in (`auth.py`)
 
-Local mode accepts only `http://127.0.0.1:8790` or `http://localhost:8790`.
+Local mode accepts only `http://127.0.0.1:<port>` or `http://localhost:<port>`.
 It validates the socket peer and exact Host. Browser writes also require the exact
 configured Origin. `cockpit login` exchanges a private local token for a one-use
 code, opens a URL fragment, and the page exchanges the code for a signed HttpOnly

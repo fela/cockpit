@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import signal
 import sys
 import threading
@@ -687,6 +688,8 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     started_at = db.now_iso()
     setup = config.setup()
+    # Before anything starts a process, so every session and run it starts belongs to this instance (SPEC SCOPE-6).
+    os.environ.update(config.instance_environment())
     config.private_data_dirs()
     settings = Settings(
         db_path=config.DB_PATH,
@@ -774,7 +777,7 @@ def main() -> None:
     record_start(app.state.version, started_at)
     logging.getLogger("uvicorn.access").addFilter(HidePublicLinks())
     server_config = uvicorn.Config(
-        app, host=config.LISTEN_HOST, port=config.LISTEN_PORT, proxy_headers=False, log_level="info",
+        app, host=config.LISTEN_HOST, port=setup.port, proxy_headers=False, log_level="info",
         # Sync dependencies open their connections before handlers get a worker thread. Bound the requests too,
         # so a burst gets retryable 503s while the server stays below its 1024-descriptor service limit.
         limit_concurrency=REQUEST_LIMIT,

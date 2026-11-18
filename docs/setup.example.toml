@@ -8,6 +8,9 @@ name = "Sam"
 # For Google mode, use the Google account allowed to sign in.
 email = "sam@localhost"
 origin = "http://127.0.0.1:8790"
+# Optional loopback port the server listens on; local mode's origin must use it. A second instance
+# (COCKPIT_INSTANCE, docs/LOCAL.md) needs a port of its own, such as 8791.
+# port = 8790
 auth_mode = "local"
 providers = ["codex"] # ["claude"] or ["claude", "codex"] also work
 default_provider = "codex"
@@ -27,7 +30,8 @@ skills_folder = "src/cockpit/skills"
 skills_branch = "main"
 
 # Optional branch that `cockpit deploy` installs before it restarts the service: the macOS
-# LaunchAgent, or on Linux the systemd user service in ~/.config/systemd/user/cockpit.service.
+# LaunchAgent, or on Linux the systemd user service in ~/.config/systemd/user/cockpit.service
+# (cockpit-<name>.service for a named instance).
 # Omit or leave empty to disable that command. This branch must match the checkout.
 # deploy_branch = "main"
 
