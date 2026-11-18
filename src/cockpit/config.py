@@ -190,7 +190,7 @@ class Setup:
     skills_branch: str
     # The command a terminal on the user's computer runs to open a session; {session} stands for its id.
     attach: str
-    # The user's timezone: the morning briefing is ready at BRIEFING_HOUR there.
+    # The user's timezone: the morning briefing is ready at its hour there (settings.py).
     timezone: ZoneInfo
     # The tables the install's parts read, by table name, each as its reader returned it.
     parts: dict[str, Any]

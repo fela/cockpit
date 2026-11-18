@@ -171,7 +171,7 @@ def launch_briefing_once(deliverer: delivery.Deliverer) -> None:
 
 
 def launch_digest_once(deliverer: delivery.Deliverer) -> None:
-    """Start a session on Sunday's weekly digest task when the digest is due (briefing.py, SPEC VIEW-36)."""
+    """Start a session on the weekly digest's task when the digest is due (briefing.py, SPEC VIEW-36)."""
     conn = db.connect(config.DB_PATH)
     try:
         message_id = briefing.launch_digest_once(conn, config.setup(), datetime.now(UTC))

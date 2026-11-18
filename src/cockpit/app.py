@@ -96,6 +96,7 @@ from cockpit import (
     zones,
 )
 from cockpit import parts as installed_parts
+from cockpit import settings as user_settings
 from cockpit.codex_agent import CodexError, ProviderSessions
 from cockpit.config import Account, user_name
 from cockpit.parts import Context, Factory, Part, Tags
@@ -1152,6 +1153,16 @@ class ZoneIn(Body):
     zone: str
 
 
+class SettingsIn(Body):
+    # The Settings page's schedule (SPEC CONTROL-33): hours 0 to 23 in the user's time zone, the digest's day 0
+    # (Monday) to 6 (Sunday) or null for no digest; user_settings.put_schedule checks them. A left-out field
+    # keeps its value.
+    nullable: ClassVar[frozenset[str]] = frozenset({"digest_day"})
+    briefing_hour: int | None = None
+    digest_day: int | None = None
+    digest_hour: int | None = None
+
+
 class TeamIn(Body):
     # The people the briefing follows, in the user's words; "" for no one.
     team: str
@@ -1827,6 +1838,10 @@ def create_app(
     @app.get("/writing")
     def spec_page() -> HTMLResponse:
         return framed_page("spec.html")
+
+    @app.get("/settings")
+    def settings_page() -> HTMLResponse:
+        return framed_page("settings.html")
 
     @app.get("/briefing")
     def briefing_page() -> HTMLResponse:
@@ -3294,6 +3309,19 @@ def create_app(
     @app.put("/api/timezone", dependencies=[Depends(user_only)])
     def put_zone(body: ZoneIn, conn: Conn) -> dict[str, Any]:
         return zones.put(conn, config.SETUP_PATH, body.zone, datetime.now(UTC))
+
+    # What the user sets on the Settings page (SPEC CONTROL-33): the schedule of the briefing and the weekly digest,
+    # with the time zone and team for the page to show.
+    @app.get("/api/settings", dependencies=[Depends(user_only)])
+    def get_settings(conn: Conn) -> dict[str, Any]:
+        return {
+            "schedule": user_settings.schedule(conn), "defaults": user_settings.DEFAULTS,
+            "zone": config.setup().timezone.key, "team": briefing.team(conn),
+        }
+
+    @app.put("/api/settings", dependencies=[Depends(user_only)])
+    def put_settings(body: SettingsIn, conn: Conn) -> dict[str, Any]:
+        return {"schedule": user_settings.put_schedule(conn, body.model_dump(exclude_unset=True))}
 
     # The people the briefing follows: the page asks the user, and an agent may set them on the user's word.
     @app.put("/api/team")

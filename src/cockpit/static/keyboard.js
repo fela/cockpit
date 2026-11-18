@@ -19,6 +19,7 @@
     ["server", "Server", "/server", "v", "processor cpu memory load machine host tasks resources", "box"],
     ["spec", "Spec", "/spec", "d", "documentation requirements", "doc"],
     ["skills", "Skills", "/skills", "k", "instructions", "bolt"],
+    ["settings", "Settings", "/settings", "t", "preferences options schedule briefing digest time zone vim", "tune"],
   ];
   const SHOW_KEY = "cockpit.showSection";
   // The Cockpit page with the list of items at its left (VIEW-26), and the page from before it that still holds the

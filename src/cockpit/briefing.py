@@ -4,7 +4,7 @@ The team is the people the user works with most closely, in the user's own words
 asks for them the first time the user opens Cockpit, and the Briefing page changes them. Empty text means
 the user named no one, and no briefing is asked for; null means the page has not asked yet.
 
-Once a day, from BRIEFING_HOUR in the user's timezone, while a team is set, Cockpit makes that day's briefing a task
+Once a day, from the briefing hour in the user's timezone (settings.py, BRIEFING_HOUR by default), while a team is set, Cockpit makes that day's briefing a task
 of its own, a high-priority item, and starts a new session on it to write what the team did since the last
 briefing's window. The session reads GitHub, Linear, Slack and Cockpit, writes the briefing in plain words and
 stores it with `cockpit briefing put`. The whole briefing then shows on the task's card, a step to read
@@ -14,10 +14,11 @@ the tab marks only the tab (`mark_read`). A launch whose message did not reach a
 RETRY_MINUTES later, on the same day, unless that day's briefing was stored: a message whose delivery is
 uncertain may have reached the session, whose turn has written the briefing by then.
 
-The weekly digest (SPEC VIEW-36) comes the same way on Sunday from DIGEST_HOUR, beside that day's morning briefing:
-a task of its own and a new session, asked to pick out what matters most from the week's morning briefings, which
-Cockpit hands it, so the user catches up and readies for the week ahead. It waits for that Sunday's briefing until
-DIGEST_WAIT_HOUR. Digests are stored with the briefings, of kind "weekly", and show on the Briefing page.
+The weekly digest (SPEC VIEW-36) comes the same way on the digest's day from its hour (settings.py; Sunday 08:00 by
+default), beside that day's morning briefing: a task of its own and a new session, asked to pick out what matters
+most from the week's morning briefings, which Cockpit hands it, so the user catches up and readies for the week
+ahead. It waits for that day's briefing for DIGEST_WAIT_HOURS. Digests are stored with the briefings, of kind
+"weekly", and show on the Briefing page.
 """
 
 from __future__ import annotations
@@ -29,10 +30,11 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
 
-from cockpit import db, error_stops, projects, render, store, sweeper
+from cockpit import db, error_stops, projects, render, settings, store, sweeper
 from cockpit.config import Setup
 
-BRIEFING_HOUR = 7
+# The briefing's hour by default; the user sets it on the Settings page (settings.py).
+BRIEFING_HOUR = settings.DEFAULTS["briefing_hour"]
 # The first briefing's window; each later one starts where the one before ended.
 BRIEFING_HOURS = 24
 RETRY_MINUTES = 60
@@ -53,13 +55,11 @@ READ_REASONS = ["daily briefing"]
 # A new briefing shows this project's logo from the start; a Cockpit without it leaves the briefing to the tidy session
 # (projects.py).
 PROJECT = "team"
-# The weekly digest (SPEC VIEW-36): on Sunday (datetime.weekday) from this hour, after that day's briefing, on the
-# morning briefings of the DIGEST_DAYS days to that Sunday. Without that Sunday's briefing, it waits until
-# DIGEST_WAIT_HOUR and then goes on the days it has.
-DIGEST_WEEKDAY = 6
-DIGEST_HOUR = 8
+# The weekly digest (SPEC VIEW-36), on the day and from the hour the Settings page sets (settings.py), after that
+# day's briefing, on the morning briefings of the DIGEST_DAYS days to that day. Without that day's briefing, it
+# waits DIGEST_WAIT_HOURS and then goes on the days it has.
 DIGEST_DAYS = 7
-DIGEST_WAIT_HOUR = 12
+DIGEST_WAIT_HOURS = 4
 
 
 @dataclass(frozen=True)
@@ -242,7 +242,7 @@ def launch_once(conn: sqlite3.Connection, setup: Setup, now: datetime) -> int | 
         if not _retried(conn, record, launched) or waited < timedelta(minutes=RETRY_MINUTES):
             return None
         since = datetime.fromisoformat(record["since"])
-    elif local.hour < BRIEFING_HOUR:
+    elif local.hour < settings.schedule(conn)["briefing_hour"]:
         return None
     elif record is not None:
         since = datetime.fromisoformat(record["until"] if _written(conn, DAILY, record["day"]) else record["since"])
@@ -253,7 +253,7 @@ def launch_once(conn: sqlite3.Connection, setup: Setup, now: datetime) -> int | 
 
 
 def digest_prompt(setup: Setup, day: str, week: list[dict[str, Any]]) -> str:
-    """What the digest session is asked to do for Sunday `day`, from that week's morning briefings `week`, oldest
+    """What the digest session is asked to do for `day`, from that week's morning briefings `week`, oldest
     first (SPEC VIEW-36). The briefings are agent text, so they go in defused (store.defused)."""
     name = setup.name
     day_words = datetime.fromisoformat(day).strftime("%A %-d %B")
@@ -263,7 +263,8 @@ def digest_prompt(setup: Setup, day: str, week: list[dict[str, Any]]) -> str:
         f"<briefing day=\"{datetime.fromisoformat(each['day']):%A %-d %B}\">\n{store.defused(each['body'])}\n</briefing>"
         for each in week
     )
-    return f"""Write {name}'s weekly digest for the week to {day_words}. {name} reads it on Sunday or Monday \
+    weekday = datetime.fromisoformat(day).strftime("%A")
+    return f"""Write {name}'s weekly digest for the week to {day_words}. {name} reads it on {weekday} \
 morning to catch up on the week at a high level and get ready for the week ahead. It draws on the week's morning \
 briefings, which covered {_local_words(since, setup)} to {_local_words(until, setup)}, {name}'s time \
 ({setup.timezone.key}):
@@ -303,10 +304,11 @@ your turn."""
 
 
 def launch_digest_once(conn: sqlite3.Connection, setup: Setup, now: datetime) -> int | None:
-    """Queue Sunday's weekly digest request when it is due (SPEC VIEW-36): from DIGEST_HOUR on Sunday, while a team
-    is set, once that day's morning briefing is stored or DIGEST_WAIT_HOUR has come, on the morning briefings of the
-    DIGEST_DAYS days to that Sunday; returns the message to deliver. A week without a briefing gets no digest. A
-    failed request is tried again as the briefing's is."""
+    """Queue the weekly digest request when it is due (SPEC VIEW-36): on the digest's day from its hour (settings.py),
+    while a team is set, once that day's morning briefing is stored or DIGEST_WAIT_HOURS have passed, on the morning
+    briefings of the DIGEST_DAYS days to that day; returns the message to deliver. A week without a briefing gets no
+    digest, and neither does a schedule without a digest day. A failed request is tried again as the briefing's
+    is."""
     if not team(conn):
         return None
     local = now.astimezone(setup.timezone)
@@ -317,12 +319,14 @@ def launch_digest_once(conn: sqlite3.Connection, setup: Setup, now: datetime) ->
         waited = now - datetime.fromisoformat(launched["created_at"])
         if not _retried(conn, record, launched, WEEKLY) or waited < timedelta(minutes=RETRY_MINUTES):
             return None
-    elif (
-        local.weekday() != DIGEST_WEEKDAY
-        or local.hour < DIGEST_HOUR
-        or (not _written(conn, DAILY, day) and local.hour < DIGEST_WAIT_HOUR)
-    ):
-        return None
+    else:
+        when = settings.schedule(conn)
+        if (
+            local.weekday() != when["digest_day"]
+            or local.hour < when["digest_hour"]
+            or (not _written(conn, DAILY, day) and local.hour < when["digest_hour"] + DIGEST_WAIT_HOURS)
+        ):
+            return None
     first = (local.date() - timedelta(days=DIGEST_DAYS - 1)).isoformat()
     week = db.rows(
         conn.execute(
@@ -353,7 +357,7 @@ def put(conn: sqlite3.Connection, actor: str, day: str, body: str, kind: str = "
     with db.transaction(conn):
         record = db.kv_get(conn, asked.launch_key)
         if record is None:
-            when = "each morning" if asked is DAILY else "each Sunday morning"
+            when = "each morning" if asked is DAILY else "once a week"
             raise store.Invalid(f"Cockpit has not asked for a {what} yet; it starts a {what} session {when}")
         if record["day"] != day:
             updated = conn.execute(
@@ -502,7 +506,7 @@ def listing(conn: sqlite3.Connection) -> dict[str, Any]:
     return {
         "briefings": [_with_read(each, read) for each in briefings], "read_id": read["daily"],
         "launch": launch_status(conn),
-        "digest": launch_status(conn, WEEKLY), "hour": BRIEFING_HOUR, "team": team(conn),
+        "digest": launch_status(conn, WEEKLY), "hour": settings.schedule(conn)["briefing_hour"], "team": team(conn),
     }
 
 
