@@ -697,10 +697,16 @@ def fold(conn: sqlite3.Connection, now: datetime, zone: ZoneInfo) -> int:
     return len(rows)
 
 
-def track_forever(db_path: Path, listing: Callable[[], list[Any]], zone: Callable[[], ZoneInfo]) -> None:
+def track_forever(
+    db_path: Path, listing: Callable[[], list[Any]], zone: Callable[[], ZoneInfo], proc: Path = Path("/proc"),
+) -> None:
     """Sample every SAMPLE_SECONDS, write every FLUSH_SECONDS, fold old rows every FOLD_SECONDS. `listing` gives
-    Cockpit's current session listing (Session objects) and `zone` the user's timezone, which the user can change."""
-    sampler = Sampler(Path("/proc"), os.getuid(), os.sysconf("SC_CLK_TCK"), os.sysconf("SC_PAGE_SIZE") // 1024)
+    Cockpit's current session listing (Session objects) and `zone` the user's timezone, which the user can change.
+    The samples come from `proc`, Linux's /proc: where it has no stat file, as on macOS, nothing is sampled."""
+    if not (proc / "stat").exists():
+        log.info("processor and memory use are not sampled: %s has no stat file (Linux only)", proc)
+        return
+    sampler = Sampler(proc, os.getuid(), os.sysconf("SC_CLK_TCK"), os.sysconf("SC_PAGE_SIZE") // 1024)
     next_write = time.monotonic() + FLUSH_SECONDS
     next_fold = time.monotonic()
     while True:

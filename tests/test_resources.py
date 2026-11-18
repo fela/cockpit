@@ -640,3 +640,15 @@ def test_recent_days_count_each_row_at_its_own_offset(conn) -> None:
 def test_parts_by_program(comm: str, cmd: str, part: str) -> None:
     assert resources.kind_of(comm, cmd) == part
     assert part in resources.PARTS
+
+
+def test_without_a_proc_stat_file_nothing_is_sampled(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    """On macOS there is no /proc: the sampler used to fail and log an error every few seconds."""
+    def listing() -> list[object]:
+        raise AssertionError("no session listing is read without /proc")
+
+    with caplog.at_level(logging.INFO, logger="cockpit.resources"):
+        resources.track_forever(tmp_path / "cockpit.db", listing, lambda: ZoneInfo("UTC"), proc=tmp_path / "proc")
+    assert "not sampled" in caplog.text
+    assert not [record for record in caplog.records if record.levelno >= logging.ERROR]
+
