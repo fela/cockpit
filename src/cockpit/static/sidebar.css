@@ -336,6 +336,7 @@ body[data-layout="sidebar"] .next-card > .history { padding-bottom: 0; border-bo
 .item-card > .item-actions::before { content: none; }
 .item-card > .item-actions .item-controls { flex: 1 1 auto; margin: 0; }
 .item-card > .item-actions > .close-item { margin-left: auto; }
+.item-card > .item-actions > .end-keys { margin-left: auto; }
 .item-card > .session-list { margin-top: 8px; }
 /* A handed step's card ends in what the agent is doing (sidebar.js, workingNote): a blue panel with a stripe at its
    left, as a step's next part would sit, under the step's own text. The light breathes while the agent works. */

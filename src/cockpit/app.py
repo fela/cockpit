@@ -665,6 +665,11 @@ class FollowUp(Body):
     text: Text
 
 
+class ItemReopen(Body):
+    # Why the session reopens the task; Busy shows it on hover as the task's `doing`.
+    why: Line
+
+
 class ItemFinish(Body):
     nullable = frozenset({"answer", "session_id"})
 
@@ -2748,6 +2753,20 @@ def create_app(
             conn, item_id, body.step_id, body.how, body.answer, body.note, body.images, body.reason, body.session_id,
             background,
         )
+
+    # Reopen on a finished task (SPEC CONTROL-33): back to Busy as a message would take it, with no words to write.
+    @app.post("/api/items/{item_id}/take-up", dependencies=[Depends(user_only)])
+    def take_up_item(item_id: int, background: BackgroundTasks, conn: Conn) -> dict[str, Any]:
+        sweeper.resume(conn, "reopened a task")
+        reopened = store.reopen_plainly(conn, item_id, settings.checkouts_dir)
+        if reopened["send"] is not None:
+            background.add_task(deliverer.send, reopened["send"]["id"])
+        return reopened
+
+    # A session reopens a completed task it must still post on, with no step for the user (SPEC CONTROL-33).
+    @app.post("/api/items/{item_id}/agent-reopen", dependencies=[Depends(session_only)])
+    def agent_reopen_item(item_id: int, body: ItemReopen, request: Request, conn: Conn) -> dict[str, Any]:
+        return store.reopen_by_agent(conn, item_id, request.state.actor, body.why)
 
     @app.post("/api/items/{item_id}/reopen", dependencies=[Depends(user_only)])
     def reopen_item(item_id: int, background: BackgroundTasks, conn: Conn) -> dict[str, Any]:

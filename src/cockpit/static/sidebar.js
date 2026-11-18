@@ -401,10 +401,10 @@ function itemCard(item, state) {
     historyBlock(item, state, null, false),
     linkList(`item:${item.id}`, itemLinks(item, null), ""),
     sessionList(linked, item, null, state),
-    h("div", { class: "actions item-actions" }, itemControls(item, state, `${item.id}`), h("button", {
+    h("div", { class: "actions item-actions" }, itemControls(item, state, `${item.id}`), closeKeys(item, h("button", {
       class: "button close-item", type: "button",
       onclick: (event) => closeItemRow(item, event.currentTarget),
-    }, icon("archive"), h("span", { class: "label", text: "Close" }))),
+    }, icon("archive"), h("span", { class: "label", text: "Close" })))),
     askBlock(item.id, null, state),
     composer(`msg:item:${item.id}`, {
       session: primary ? {

@@ -1689,6 +1689,32 @@ function closeItemRow(item, pressed) {
     `Closed: ${item.title}. Finished this week, at the end of the list, keeps it with Unarchive.`);
 }
 
+// Reopen on a finished task (SPEC CONTROL-33): the task goes back to Busy as the user's message would take it
+// (CONTROL-28), with no words to write, and Cockpit tells its session it may post there again. A task closed as not
+// needed has Unarchive in its row instead.
+// `close`: the item's Close key, which Reopen keeps beside it at the row's end.
+function closeKeys(item, close) {
+  if (item.stage !== "done" || item.archived) return close;
+  return h("span", { class: "end-keys" }, h("button", {
+    class: "button reopen-task", type: "button", title: "Back to Busy; its session can post here again",
+    onclick: () => takeUpTask(item),
+  }, icon("back"), h("span", { class: "label", text: "Reopen" })), close);
+}
+
+function takeUpTask(item) {
+  return run(`take-up:${item.id}`, async () => {
+    const task = reopening(item.id);
+    try {
+      await optimistic((state) => reopenedByMessage(state, item.id),
+        () => afterFinishes(() => api("POST", `/api/items/${item.id}/take-up`)));
+    } catch (error) {
+      takeBackReopened(task);
+      throw refused("Not reopened", error);
+    }
+    reopenConfirmed(task);
+  });
+}
+
 // Undo of Task done or Close item: the item and its steps show again at once; once the finish went
 // through, the server puts them back.
 function reopenItem(step, finishing, before) {
@@ -10891,10 +10917,10 @@ function itemRow(item, state, sessions, line) {
       historyBlock(item, state, null, null),
       linkList(key, itemLinks(item, null), ""),
       sessionList(linked, item, null, state),
-      h("div", { class: "item-controls-row" }, itemControls(item, state, `${item.id}`), h("button", {
+      h("div", { class: "item-controls-row" }, itemControls(item, state, `${item.id}`), closeKeys(item, h("button", {
         class: "button close-item", type: "button",
         onclick: (event) => closeItemRow(item, event.currentTarget),
-      }, icon("archive"), h("span", { class: "label", text: "Close" }))),
+      }, icon("archive"), h("span", { class: "label", text: "Close" })))),
       askBlock(item.id, null, state),
       composer(`msg:item:${item.id}`, {
         session: primary ? {
