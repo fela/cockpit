@@ -48,6 +48,9 @@
   const DISTINCT = 200;
   const TOO_MANY = `over ${DISTINCT} different errors on this page; the later ones are only in the browser console`;
   const LOADED_AT = new Date(performance.timeOrigin).toISOString();
+  // When the page last reloaded because a script did not load, and how soon another such failure leaves it as it is.
+  const SCRIPT_RELOAD_KEY = "cockpit.script-reload";
+  const SCRIPT_RELOAD_MS = 60e3;
   // Per error, by place and message (numbers aside, as the server counts them): its report, its sightings
   // since the last report, when that went, and the timer of the next.
   const seen = new Map();
@@ -118,15 +121,152 @@
   // `store` holds the box's text itself), or null. Each page holds a lock named after it for as long as it is
   // open (Web Locks end with their page, also when the browser kills it), so an entry whose page holds none any
   // more is left behind: the next page takes it over and sends it with the same id, which Cockpit does once.
-  const OUTBOX = "cockpit.outbox.";
+  const scope = document.documentElement?.dataset?.offlineUser || "";
+  const scopeUntil = Number(document.documentElement?.dataset?.offlineUntil || 0);
+  const helper = document.documentElement?.dataset?.offlineHelper === "1";
+  const scoped = /^[a-f0-9]{64}$/.test(scope) && Number.isFinite(scopeUntil) && scopeUntil > 0;
+  const scopeKey = scoped ? `${scope}.${scopeUntil}` : "unscoped";
+  const OUTBOX = `cockpit.outbox.${scopeKey}.`;
   const PUT_BACK = "cockpit.put-back";
-  const PAGE_LOCK = "cockpit-page:";
+  const PAGE_LOCK = `cockpit-page:${scopeKey}:`;
   const PAGE_ID = crypto.randomUUID();
   // An action left behind longer than this is not sent: what the user meant a day ago may no longer hold.
   const KEEP_MS = 24 * 3600e3;
   const RESCAN_MS = 60e3;
   // Without Web Locks a page cannot tell entries left behind from another tab's, so it keeps none.
-  const keeping = Boolean(navigator.locks);
+  const keeping = Boolean(navigator.locks) && scoped;
+  let revoked = false, checkSession = false, sessionCheck = null;
+  const activeActions = new Set();
+  const recoveryByResource = new Map();
+
+  function connectionError() {
+    return Object.assign(new Error("Connect to Cockpit to do this"), { offline: true, unreached: true });
+  }
+  function requireConnection() {
+    if (!navigator.onLine) throw connectionError();
+    if (revoked || (scoped && Date.now() >= scopeUntil * 1000)) {
+      if (!revoked) clearScope();
+      throw Object.assign(new Error("Connect to Cockpit and sign in again"), { status: 401 });
+    }
+  }
+  // These are ordinary task, document and preference edits. A new route starts as a one-attempt online action: grants,
+  // credentials, publishing, timer starts and the parts' actions acquire no retry or saved outbox by accident.
+  function queuedAction(path, method) {
+    if (typeof path !== "string" || !path.startsWith("/api/") || path.includes("?") || path.includes("#")) return false;
+    if (partAction(path, method)) return true;
+    if (method === "PUT") return /^\/api\/(?:goals|inbox-settings|team|timezone|spec|skills\/[^/]+|item-pages\/\d+\/choices)$/.test(path);
+    if (method === "PATCH") return /^\/api\/items\/\d+$/.test(path);
+    if (method === "DELETE") return /^\/api\/(?:steps\/\d+\/writing|page-comments\/\d+|writing\/\d+)$/.test(path);
+    if (method !== "POST") return false;
+    return /^\/api\/steps\/\d+\/(?:done|dismiss|snooze|unsnooze|reopen|return|hand-off|close-tasks|hold)$/.test(path)
+      || /^\/api\/items\/\d+\/(?:finish|reopen|ask|fork|add-more|time|time\/add)$/.test(path)
+      || /^\/api\/messages(?:\/\d+\/(?:hold|release|follow-up|retry))?$/.test(path)
+      || /^\/api\/item-pages\/\d+\/comments(?:\/(?:item|send))?$/.test(path)
+      || /^\/api\/(?:spec\/part|skills\/[^/]+\/part|timezone\/(?:report|keep)|briefings\/\d+\/read|accounts\/prefer)$/.test(path)
+      || /^\/api\/(?:items\/add|feedback|writing|warnings\/(?:snooze|message))$/.test(path);
+  }
+  // The parts' actions that wait in the outbox like Cockpit's own: a part's first script (Part.first_scripts) lists
+  // them in `cockpitPartActions` before this file runs, each a method, a RegExp for its path, and the resource its
+  // order keeps to, from the path's match.
+  const partActions = window.cockpitPartActions || [];
+  function partAction(path, method) {
+    for (const action of partActions) {
+      const match = method === action.method ? path.match(action.path) : null;
+      if (match) return { action, match };
+    }
+    return null;
+  }
+  function resourceOf(entry) {
+    if (typeof entry.resource === "string") return entry.resource;
+    const part = partAction(entry.path, entry.method);
+    if (part) return part.action.resource(part.match);
+    const document = entry.path.match(/^\/api\/item-pages\/(\d+)(?:\/|$)/);
+    if (document) return `item-pages:${document[1]}`;
+    const preference = entry.path.match(/^\/api\/(spec|skills\/[^/]+|timezone)(?:\/|$)/);
+    if (preference) return preference[1];
+    const entity = entry.path.match(/^\/api\/(items|steps|messages)\/(\d+)(?:\/|$)/);
+    if (entity && entity[1] === "steps") {
+      // The main page knows which item a step belongs to. Keep that id with the request so a recovered step
+      // answer and a later edit of its item retain their order after reload as well as within this page.
+      try {
+        const state = typeof ui !== "undefined" ? ui.state : null;
+        const step = ["queue", "ready_next", "snoozed", "with_agents"].flatMap((name) => state?.[name] || [])
+          .find((row) => row.id === Number(entity[2]));
+        if (step?.item_id) return `items:${step.item_id}`;
+      } catch { /* Other Cockpit pages have no board state. */ }
+    }
+    if (entity) return `${entity[1]}:${entity[2]}`;
+    if (entry.path === "/api/messages") {
+      try {
+        const to = JSON.parse(entry.body).target;
+        if (to?.item_id) return `items:${to.item_id}`;
+        if (to?.session_id) return `sessions:${to.session_id}`;
+      } catch { /* A malformed body is refused by the server. */ }
+    }
+    return entry.path;
+  }
+  function clearScope() {
+    revoked = true;
+    for (const attempt of activeActions) attempt.abort();
+    if (helper) concealHelper();
+    if (!scoped) return;
+    try {
+      const keys = Array.from({ length: localStorage.length }, (_, i) => localStorage.key(i));
+      for (const key of keys) if (key?.startsWith(OUTBOX)) localStorage.removeItem(key);
+    } catch (error) { logError("clearing this sign-in's queued actions", error); }
+    stored.clear();
+  }
+  function concealHelper() {
+    if (!document.body) {
+      document.addEventListener("DOMContentLoaded", concealHelper, { once: true });
+      return;
+    }
+    if (document.getElementById("offline-lock")) return;
+    document.body.classList.add("offline-locked");
+    for (const child of document.body.children) { child.hidden = true; child.inert = true; }
+    const lock = document.createElement("section");
+    lock.id = "offline-lock";
+    const title = document.createElement("h1"); title.textContent = "This sign-in ended";
+    const link = document.createElement("a"); link.href = "/"; link.target = "_top"; link.textContent = "Reopen Cockpit";
+    lock.append(title, link);
+    document.body.replaceChildren(lock);
+  }
+  addEventListener("cockpit:offline-cleared", (event) => {
+    if (event.detail && (event.detail.user !== scope || Number(event.detail.until) !== scopeUntil)) return;
+    clearScope();
+  });
+  addEventListener("offline", () => { checkSession = true; });
+  const scopeChannel = scoped && "BroadcastChannel" in window ? new BroadcastChannel("cockpit-offline") : null;
+  if (scopeChannel) scopeChannel.onmessage = ({ data }) => {
+    if (window.CockpitOffline || revoked) return;
+    const same = data?.user === scope && Number(data?.until) === scopeUntil;
+    if ((data?.kind === "switch" && !same) || (data?.kind === "forget" && same)) {
+      clearScope();
+      dispatchEvent(new CustomEvent("cockpit:offline-cleared", { detail: { user: scope, until: scopeUntil, scope: `${scope}-${scopeUntil}` } }));
+    }
+  };
+  async function verifySession() {
+    if (!scoped) return;
+    requireConnection();
+    if (!sessionCheck) sessionCheck = (async () => {
+      const attempt = tryOnce(TRY_MS);
+      activeActions.add(attempt);
+      try {
+        const response = await fetch("/api/offline/session", { credentials: "same-origin", cache: "no-store", signal: attempt.signal });
+        if (response.status === 401 || response.status === 403) { clearScope(); requireConnection(); }
+        if (!response.ok) throw new TypeError("Cockpit could not verify this sign-in yet");
+        const current = await answerJson(response);
+        if (current.user !== scope || current.until !== scopeUntil || current.until <= Date.now() / 1000) {
+          clearScope(); requireConnection();
+        }
+        checkSession = false;
+      } catch (error) {
+        if (!revoked && attempt.signal.aborted) throw new TypeError("Cockpit could not verify this sign-in yet", { cause: error });
+        throw error;
+      } finally { activeActions.delete(attempt); attempt.end(); }
+    })().finally(() => { sessionCheck = null; });
+    return sessionCheck;
+  }
   // Actions of this page kept in storage, which leaving the page does not drop.
   const stored = new Set();
   // Presses this page holds back until Cockpit answered the one before them (`holdLeave`): not sent yet, so
@@ -162,6 +302,10 @@
     if (action !== null) sending.add(action);
     try {
       for (;;) {
+        if (action !== null && (revoked || (scoped && Date.now() >= scopeUntil * 1000))) {
+          clearScope();
+          throw Object.assign(new Error("This sign-in ended; the action was not sent again"), { status: 401 });
+        }
         if (performance.now() > giveUpAt) {
           const seconds = Math.round(away / 1000);
           // `gaveUp` marks the give-up for `readWithin`.
@@ -174,11 +318,15 @@
         // the tries start over once it is back. An action has no last try.
         const last = () => action === null && tries >= RESTART_WAITS_MS.length && !document.hidden && navigator.onLine;
         const attempt = tryOnce(tryMs);
+        if (action !== null) activeActions.add(attempt);
         try {
+          if (action !== null && scoped && (helper || checkSession || tries > 0)) await verifySession();
+          if (action !== null && revoked) throw Object.assign(new Error("This sign-in ended"), { status: 401 });
           const body = typeof options.body === "function" ? options.body() : options.body;
           tried = true;
           heardAtTry = lastAnswer;
           const response = await fetch(path, { ...options, body, signal: attempt.signal });
+          if (action !== null && (response.status === 401 || response.status === 403)) clearScope();
           noteAnswered();
           if (!AWAY.includes(response.status)) {
             if (awaySince !== null) {
@@ -190,6 +338,7 @@
           if (!AWAY.includes(response.status) || last()) return await read(response);
           drainAnswer(response);
         } catch (failure) {
+          if (action !== null && revoked) throw Object.assign(new Error("This sign-in ended; the action was not sent again"), { status: 401 });
           if (!lostConnection(failure, attempt.signal)) throw failure;
           if (awaySince === null) awaySince = performance.now();
           if (last() && !attempt.backOnline()) {
@@ -198,12 +347,13 @@
               { unreached: heardAtTry === heardAtStart, cockpitAway: true });
           }
         } finally {
+          activeActions.delete(attempt);
           attempt.end();
         }
         // An action is sent from a hidden page too: the user pressed it and may have moved to another tab.
         if (!navigator.onLine || (action === null && document.hidden)) {
           const left = performance.now();
-          await pageBack(action === null);
+          await pageBack(action === null, action !== null);
           away += performance.now() - left;
           tries = 0;
           since = performance.now();
@@ -238,6 +388,7 @@
     addEventListener("online", drop);
     return {
       signal: controller.signal,
+      abort: () => controller.abort(),
       backOnline: () => online,
       end: () => {
         clearTimeout(timer);
@@ -253,15 +404,17 @@
   }
 
   // Resolves once the browser is online and, when `visible`, the page visible.
-  function pageBack(visible) {
+  function pageBack(visible, cancelOnSignOut) {
     return new Promise((resolve) => {
       const check = () => {
-        if ((visible && document.hidden) || !navigator.onLine) return;
+        if (!(cancelOnSignOut && revoked) && ((visible && document.hidden) || !navigator.onLine)) return;
         removeEventListener("online", check);
+        removeEventListener("cockpit:offline-cleared", check);
         document.removeEventListener("visibilitychange", check);
         resolve();
       };
       addEventListener("online", check);
+      if (cancelOnSignOut) addEventListener("cockpit:offline-cleared", check);
       document.addEventListener("visibilitychange", check);
     });
   }
@@ -366,10 +519,35 @@
   // `tryMs`: how long one try may take, longer for an upload. `words`: what the user wrote for it and the box
   // it came from ({store, key, text}, under OUTBOX), or null. Actions left behind by a closed page that this
   // page is sending go first, so an older press never lands after a newer one.
+  async function sendOnce(path, options, tryMs) {
+    requireConnection();
+    const tracking = crypto.randomUUID();
+    sending.add(tracking);
+    const attempt = tryOnce(tryMs);
+    activeActions.add(attempt);
+    try {
+      if (helper && scoped) await verifySession();
+      requireConnection();
+      const response = await fetch(path, { ...options, signal: attempt.signal });
+      noteAnswered();
+      if (response.status === 401 || response.status === 403) clearScope();
+      return await withJson(response);
+    } catch (error) {
+      if (lostConnection(error, attempt.signal)) error.unreached = true;
+      throw error;
+    } finally { sending.delete(tracking); activeActions.delete(attempt); attempt.end(); }
+  }
+
   function sendAction(path, options, tryMs, words) {
+    if (!queuedAction(path, options.method)) return sendOnce(path, options, tryMs);
+    if (revoked || (scoped && Date.now() >= scopeUntil * 1000)) {
+      if (!revoked) clearScope();
+      return Promise.reject(Object.assign(new Error("Connect to Cockpit and sign in again"), { status: 401 }));
+    }
     const action = crypto.randomUUID();
     const headers = { ...options.headers, "x-cockpit-action": action };
     const entry = { path, method: options.method, headers, body: options.body, tryMs, words };
+    entry.resource = resourceOf(entry);
     if (editName(entry)) {
       try {
         entry.unsavedEdit = localStorage.getItem(`cockpit.unsaved:${path}`);
@@ -391,9 +569,38 @@
         throw failure;
       }
     };
-    // On its way from the press on, also while it waits behind the ones left behind (an upload asks before leaving).
+    // A closed page's older edits of this same item go first. An unrelated backlog leaves this action free to go.
     sending.add(action);
-    return leftSent.then(() => throughRestart(path, { ...options, headers }, read, Infinity, action, tryMs));
+    return beforeRecovered(entry).then(() => throughRestart(path, { ...options, headers }, read, Infinity, action, tryMs))
+      .finally(() => { sending.delete(action); });
+  }
+
+  async function beforeRecovered(entry) {
+    const resource = resourceOf(entry);
+    let matches = false;
+    if (keeping) {
+      try {
+        for (let i = 0; i < localStorage.length; i++) {
+          const key = localStorage.key(i);
+          if (!key?.startsWith(OUTBOX)) continue;
+          const old = JSON.parse(localStorage.getItem(key));
+          if (old && old.page !== PAGE_ID && resourceOf(old) === resource) { matches = true; break; }
+        }
+      } catch (error) { logError("checking earlier edits of this item", error); }
+    }
+    while (matches) {
+      if (revoked || Date.now() >= scopeUntil * 1000) {
+        clearScope();
+        throw Object.assign(new Error("This sign-in ended"), { status: 401 });
+      }
+      if (!navigator.onLine) await pageBack(false, true);
+      await sendLeft();
+      const earlier = recoveryByResource.get(resource);
+      if (earlier) { await earlier; return; }
+      if (!recoveryFailure) return;
+      await pause(1000);
+    }
+    await recoveryByResource.get(resource);
   }
 
   // An upload's body (a Blob) does not fit in storage, and a request to a path the install keeps unrecorded carries
@@ -403,7 +610,7 @@
       || JSON.parse(document.body.dataset.unrecordedPrefixes || "[]")
         .some((prefix) => entry.path.startsWith(prefix))) return;
     try {
-      localStorage.setItem(OUTBOX + action, JSON.stringify({ ...entry, at: Date.now(), n: ++kept, page: PAGE_ID }));
+      localStorage.setItem(OUTBOX + action, JSON.stringify({ ...entry, user: scope, until: scopeUntil, at: Date.now(), n: ++kept, page: PAGE_ID }));
       stored.add(action);
     } catch {
       // Storage blocked or full: the action waits in this page only, and leaving it asks first.
@@ -421,32 +628,66 @@
 
   // Sends the actions that closed or reloaded pages left behind, oldest first, each once Cockpit answered the one
   // before, then tells the page to fetch the latest state ("cockpit:sent-left"). It runs as the page loads, when the
-  // browser comes back online, and every minute for pages closed meanwhile; one run at a time, which this page's
-  // own actions wait for (`leftSent`).
+  // browser comes back online, and every minute for pages closed meanwhile. Item queues run independently; a new
+  // edit waits only for older recovered edits of that same item.
   let sendingLeft = null;
-  let leftSent = Promise.resolve();
+  let recoveryFailure = null;
+  let recoveryReady = Promise.resolve();
   function sendLeft() {
-    if (!keeping || sendingLeft) return;
+    if (!keeping || revoked || !navigator.onLine || Date.now() >= scopeUntil * 1000) return Promise.resolve();
+    if (sendingLeft) return recoveryReady;
+    try {
+      if (!Array.from({ length: localStorage.length }, (_, i) => localStorage.key(i)).some((key) => key?.startsWith(OUTBOX))) {
+        return Promise.resolve();
+      }
+    } catch (error) { logError("checking this sign-in's queued actions", error); return Promise.resolve(); }
+    recoveryFailure = null;
+    let ready;
+    recoveryReady = new Promise((resolve) => { ready = resolve; });
     sendingLeft = (async () => {
       try {
-        const left = await navigator.locks.request("cockpit-outbox", takeLeft);
-        for (const [index, [action, entry]] of left.entries()) {
-          if (await sendOne(action, entry)) continue;
-          giveBack(left.slice(index));
-          break;
+        await verifySession();
+        const left = await navigator.locks.request(`cockpit-outbox:${scopeKey}`, takeLeft);
+        const groups = new Map();
+        for (const pair of left) {
+          const resource = resourceOf(pair[1]);
+          if (!groups.has(resource)) groups.set(resource, []);
+          groups.get(resource).push(pair);
         }
+        const jobs = [];
+        for (const [resource, entries] of groups) {
+          const job = (async () => {
+            for (const [index, [action, entry]] of entries.entries()) {
+              if (await sendOne(action, entry)) continue;
+              giveBack(entries.slice(index));
+              break;
+            }
+          })();
+          recoveryByResource.set(resource, job);
+          jobs.push(job.finally(() => { if (recoveryByResource.get(resource) === job) recoveryByResource.delete(resource); }));
+        }
+        ready();
+        await Promise.all(jobs);
         if (left.length) dispatchEvent(new CustomEvent("cockpit:sent-left"));
       } catch (failure) {
-        logError("sending actions left by a closed page", failure);
+        recoveryFailure = failure;
+        if (!(failure instanceof TypeError) && failure.name !== "AbortError" && navigator.onLine) {
+          logError("sending actions left by a closed page", failure);
+        }
       } finally {
+        ready();
         sendingLeft = null;
       }
     })();
-    leftSent = sendingLeft;
+    return recoveryReady;
   }
 
   // Entries this page took but cannot send now (signed out): any page may take them again, this one at its next look.
   function giveBack(entries) {
+    if (revoked || Date.now() >= scopeUntil * 1000) {
+      for (const [action] of entries) forget(action);
+      return;
+    }
     for (const [action, entry] of entries) {
       stored.delete(action);
       try {
@@ -458,17 +699,20 @@
   }
 
   // Under the outbox lock, so two pages never take the same entry: the entries whose page is gone become this page's.
-  // An entry kept after the look at the locks may belong to a page that opened since: it waits for the next look.
+  // An entry kept after the look began may belong to a page that opened since: it waits for the next look.
   async function takeLeft() {
     const lookedAt = Date.now();
-    const locks = await navigator.locks.query();
-    const open = new Set([...locks.held, ...locks.pending].map((lock) => lock.name));
     const left = [];
     try {
       const keys = Array.from({ length: localStorage.length }, (_, i) => localStorage.key(i)).filter((key) => key && key.startsWith(OUTBOX));
       for (const key of keys) {
-        const entry = JSON.parse(localStorage.getItem(key));
-        if (entry.page === PAGE_ID || open.has(PAGE_LOCK + entry.page) || entry.at >= lookedAt) continue;
+        const saved = localStorage.getItem(key);
+        if (saved === null) continue;
+        const entry = JSON.parse(saved);
+        if (entry.user !== scope || entry.until !== scopeUntil || entry.page === PAGE_ID || entry.at >= lookedAt) continue;
+        if (entry.page && !(await pageGone(entry.page))) continue;
+        // The owner may finish or update this action while the lock check waits.
+        if (localStorage.getItem(key) !== saved) continue;
         entry.page = PAGE_ID;
         localStorage.setItem(key, JSON.stringify(entry));
         left.push([key.slice(OUTBOX.length), entry]);
@@ -479,12 +723,23 @@
     return left.sort(([, a], [, b]) => a.at - b.at || a.n - b.n);
   }
 
+  // Whether the page `page` is closed: its lock is free. The page's own lock is asked for, with nothing listed:
+  // Chrome drops every page that holds a lock from its back-forward cache when another page lists the locks
+  // (WebLocksContention), so Back would load the page anew whenever a second Cockpit page is open.
+  function pageGone(page) {
+    return navigator.locks.request(PAGE_LOCK + page, { ifAvailable: true }, (lock) => lock !== null);
+  }
+
   // Sends one action left behind; resolves to whether the next may go. A 401 (signed out) keeps it for the page
   // after the sign-in. A taken answer puts back the words it gave back: those Cockpit stopped (`unsent`, Take
   // back) and words kept with a press that does not use them up (`words.back`), on whichever page sends it. The
   // page may show them itself: it gets "cockpit:left-answered" ({path, data, words, back}) and cancels it.
   async function sendOne(action, entry) {
     stored.add(action);
+    if (entry.user !== scope || entry.until !== scopeUntil || !queuedAction(entry.path, entry.method)) {
+      forget(action);
+      return true;
+    }
     if (Date.now() - entry.at > KEEP_MS) {
       forget(action);
       notSent(entry, "it waited over a day for a connection");
@@ -496,6 +751,7 @@
       answer = await throughRestart(entry.path, options, withJson, Infinity, action, entry.tryMs);
     } catch (failure) {
       forget(action);
+      if (revoked) return false;
       logError("sending an action left by a closed page", failure);
       notSent(entry, failure.message);
       return true;
@@ -595,11 +851,12 @@
   }
 
   // Where a message Take back stopped was going (the server's `unsent_to`), as its box's "To" choice and the picks
-  // a new session was to start with.
+  // for its next message.
   function unsentTarget(to) {
     return {
       choice: to.session_id ? `session:${to.session_id}` : `new:${to.new_cwd}`,
-      picks: to.new_cwd ? { provider: to.provider, model: null, effort: null, account: null, ...to.options } : null,
+      picks: to.new_cwd ? { provider: to.provider, model: null, effort: null, account: null, ...to.options }
+        : to.session_id && (to.options || to.provider) ? { session_id: to.session_id, provider: to.provider, ...to.options } : null,
     };
   }
 
@@ -647,7 +904,10 @@
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", () => sendLeft());
   else sendLeft();
   addEventListener("online", () => sendLeft());
-  setInterval(() => sendLeft(), RESCAN_MS);
+  setInterval(() => {
+    if (helper && scoped && Date.now() >= scopeUntil * 1000) clearScope();
+    sendLeft();
+  }, RESCAN_MS);
 
   // The body of Cockpit's answer as JSON. An error answer may carry none (Caddy's 502 has an empty body):
   // it reads as {}, and the caller reports the status.
@@ -759,6 +1019,27 @@
     logError(`uncaught in ${where}`, event.error || event.message);
   });
   addEventListener("unhandledrejection", (event) => logError("unhandled rejection", event.reason));
+  // A page script that does not load, such as one cut off by the network, fires no uncaught error: the page would
+  // only fail later, where other code calls into it, and stay on its loading placeholder. Its load error reaches the
+  // window only while capturing. The page reports the file and, when it is one of the page's own scripts written in
+  // its HTML, reloads once while the page is still loading: it has drawn nothing yet (UI-13). A script added later by
+  // code, such as the optional editor bundle, is async and only reported, since the page may be in use by then with
+  // unsent images held in memory. A second failure within a minute leaves the page as it is, so a file that is gone
+  // never reloads it in a loop. The report is sent with keepalive, so the reload does not cut it off.
+  addEventListener("error", (event) => {
+    if (event.target?.tagName !== "SCRIPT") return;
+    const file = event.target.src.replace(location.origin, "");
+    logError("page script did not load", new Error(`${file} did not load`));
+    if (event.target.async || document.readyState === "complete") return;
+    try {
+      const last = sessionStorage.getItem(SCRIPT_RELOAD_KEY);
+      if (last !== null && Date.now() - Number(last) < SCRIPT_RELOAD_MS) return;
+      sessionStorage.setItem(SCRIPT_RELOAD_KEY, String(Date.now()));
+    } catch {
+      return;
+    }
+    location.reload();
+  }, true);
 
   window.logError = logError;
   window.answerIsAway = (status) => AWAY.includes(status);
@@ -770,6 +1051,7 @@
   window.drainAnswer = drainAnswer;
   window.sendPressed = sendPressed;
   window.sendAction = sendAction;
+  window.requireConnection = requireConnection;
   window.holdLeave = holdLeave;
   window.tellPutBack = tellPutBack;
   window.unsentTarget = unsentTarget;

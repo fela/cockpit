@@ -3,6 +3,7 @@ from __future__ import annotations
 import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -210,3 +211,53 @@ def test_the_bar_is_corrected_only_once_enough_estimates_are_checked(conn: sqlit
     assert timesheet.progress_correction(conn) == check
     monkeypatch.setattr(timesheet, "CORRECTION_FROM", {"estimates": 2, "items": 2})
     assert timesheet.progress_correction(conn) is None
+
+
+def test_progress_check_reads_a_large_finished_history_in_a_few_queries(conn):
+    ids = list(range(10, 110))
+    conn.executemany(
+        "INSERT INTO items (id, key, title, stage, done_at, created_at, updated_at, updated_by)"
+        " VALUES (?, ?, 'Finished task', 'done', '2026-01-06T18:00:00Z', ?, ?, 'user')",
+        [(item_id, f"note:finished-{item_id}", AT, AT) for item_id in ids],
+    )
+    conn.executemany(
+        "INSERT INTO steps (id, item_id, need, ask, created_at, updated_at, updated_by)"
+        " VALUES (?, ?, 'review', 'Review', ?, ?, 'agent')", [(item_id, item_id, AT, AT) for item_id in ids],
+    )
+    conn.executemany(
+        "INSERT INTO time_spans (step_id, started_at, ended_at, ended_by)"
+        " VALUES (?, '2026-01-06T09:00:00Z', '2026-01-06T11:00:00Z', 'pause')", [(item_id,) for item_id in ids],
+    )
+    conn.executemany(
+        "INSERT INTO progress_marks (step_id, item_id, at, progress, of_user_time)"
+        " VALUES (?, ?, '2026-01-06T10:00:00Z', 50, 1)", [(item_id, item_id) for item_id in ids],
+    )
+    queries = []
+    conn.set_trace_callback(queries.append)
+    try:
+        assert timesheet.progress_check(conn, True) == {"items": 100, "estimates": 100, "median_gap": 0, "median_off": 0}
+    finally:
+        conn.set_trace_callback(None)
+    assert len(queries) <= 4
+
+
+def test_progress_check_keeps_the_captured_finish_when_an_item_changes(conn):
+    conn.execute("UPDATE items SET stage = 'done', done_at = '2026-01-06T11:00:00Z' WHERE id = 1")
+    _span(conn, 1, "2026-01-06T09:00:00Z", "2026-01-06T11:00:00Z")
+    conn.execute(
+        "INSERT INTO progress_marks (step_id, item_id, at, progress, of_user_time) VALUES"
+        " (1, 1, '2026-01-06T10:00:00Z', 50, 1), (1, 1, '2026-01-06T12:00:00Z', 0, 1)"
+    )
+
+    class ChangedFinish:
+        def execute(self, sql, parameters):
+            cursor = conn.execute(sql, parameters)
+            if "AS finished_at" in sql:
+                captured = cursor.fetchall()
+                conn.execute("UPDATE items SET done_at = '2026-01-06T13:00:00Z' WHERE id = 1")
+                return SimpleNamespace(fetchall=lambda: captured)
+            return cursor
+
+    assert timesheet.progress_check(ChangedFinish(), True) == {
+        "items": 1, "estimates": 1, "median_gap": 0, "median_off": 0,
+    }

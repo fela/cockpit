@@ -26,6 +26,7 @@
 }
 
 .server-layout .spend-lede { margin-top: 8px; }
+.server-layout .spend-label { white-space: normal; }
 .server-layout > section:empty { display: none; }
 .server-read { color: var(--text-3); font-size: var(--fs-meta); }
 

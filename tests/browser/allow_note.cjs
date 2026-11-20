@@ -1,8 +1,8 @@
 // Run with PLAYWRIGHT_MODULE=/path/to/node_modules/playwright node tests/browser/allow_note.cjs. Uses the keyboard
-// fixture's isolated database; never touches live work or real agents.  PERM-7: a blocked call's card takes a short
-// note, at desktop and phone width, and Add rule sends it with the retry as the user's own message; a card with no
-// note sends Cockpit's retry alone. The rule editor opens on Sentence, and Send as you is the card's first answer
-// (PERM-13).
+// fixture's isolated database; never touches live work or real agents.  PERM-7: a blocked call's card, opened from its
+// warning row in Your queue, takes a short note, at desktop and phone width, and Add rule sends it with the retry as
+// the user's own message; a card with no note sends Cockpit's retry alone. The rule editor opens on Sentence, and Send
+// as you is the card's first answer (PERM-13).
 "use strict";
 
 const assert = require("node:assert/strict");
@@ -81,14 +81,16 @@ function explained(id) {
     page.setDefaultTimeout(8000);
     const errors = [];
     page.on("pageerror", (error) => errors.push(error.message));
-    await page.goto(origin + "/classic");
-    // The top request shows as a card, the next ones as a line that opens it, the rest behind "+N more".
+    await page.goto(origin + "/");
+    // Each request is a warning row at the head of Your queue; its row opens its card. On a phone the row sits on the
+    // list screen, so the click goes to the row's button itself.
     const open = async (id) => {
-      const shown = page.locator(`#blocked [data-request="${id}"]`);
-      await page.locator("#blocked .blocked-card").first().waitFor();
-      if (!(await shown.count())) await page.locator("#blocked").getByText(/^\+\d+ more$/).click();
-      if (await shown.evaluate((el) => el.classList.contains("blocked-line"))) await shown.click();
-      return page.locator(`#blocked .blocked-card[data-request="${id}"]`);
+      const row = `#sidebar li.warn-row[data-request="${id}"] .side-row`;
+      await page.locator(row).waitFor({ state: "attached" });
+      await page.evaluate((selector) => document.querySelector(selector).click(), row);
+      const card = page.locator(`#next > .blocked-card[data-request="${id}"]`);
+      await card.waitFor();
+      return card;
     };
     // Adds a sentence for the card's call and tells the session to retry.
     const addRule = async (shown, sentence) => {

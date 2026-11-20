@@ -130,14 +130,14 @@ async function main() {
     await choose(page, "#work", "msg:new-session:provider", "codex");
     const codex = await box.locator(".start-button").evaluateAll((buttons) => buttons.map((button) => button.dataset.key.split(":").pop()));
     check("picking Codex resets the model and effort and drops the account",
-      (await line(page, "#work")) === "Codex | GPT-6.1 Sol | high | Standard" && JSON.stringify(codex) === '["provider","model","effort","speed"]',
+      (await line(page, "#work")) === "Codex | GPT-6.2 Sol | high | Standard" && JSON.stringify(codex) === '["provider","model","effort","speed"]',
       `${await line(page, "#work")} ${JSON.stringify(codex)}`);
     check("a button left out leaves no stray text", await page.evaluate(() =>
       [...document.querySelector("#work .start-options").childNodes].every((node) => node.nodeType === Node.ELEMENT_NODE)), "text beside the buttons");
     check("focus stays on the agent button", await page.evaluate(() => document.activeElement.dataset.key === "msg:new-session:provider"),
       "focus moved");
     await choose(page, "#work", "msg:new-session:speed", "ultrafast");
-    check("Sol offers Ultrafast with its included usage cost", (await line(page, "#work")) === "Codex | GPT-6.1 Sol | high | Ultrafast"
+    check("Sol offers Ultrafast with its included usage cost", (await line(page, "#work")) === "Codex | GPT-6.2 Sol | high | Ultrafast"
       && await box.locator('.start-button[data-key="msg:new-session:speed"]').getAttribute("aria-label").then((title) => title.includes("8×")), await line(page, "#work"));
     if (shots) {
       await page.screenshot({ path: path.join(shots, "sol-ultrafast-1440-light.png") });
@@ -411,7 +411,9 @@ async function main() {
     const fits = await page.evaluate(() => [...document.querySelectorAll("#work .start-button, #work .start-pick[open] > .menu-list")]
       .every((each) => each.getBoundingClientRect().left >= 0 && each.getBoundingClientRect().right <= window.innerWidth));
     check("at 390 px the buttons and the last button's open list fit", fits && (await wide(page)) <= 0, `${await wide(page)} px`);
-    await page.locator("#work .start-pick[open] > .menu-list").scrollIntoViewIfNeeded();
+    // Scroll synchronously: a redraw can replace the menu during Playwright's stability wait.
+    await page.locator("#work .start-pick[open] > .menu-list").evaluate((el) =>
+      el.scrollIntoView({ behavior: "instant", block: "center", inline: "nearest" }));
     if (shots) await page.screenshot({ path: path.join(shots, "new-session-390-dark.png"), fullPage: false });
     await page.keyboard.press("Escape");
     await choose(page, "#work", "msg:new-session:provider", "codex");

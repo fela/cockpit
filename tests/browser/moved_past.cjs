@@ -3,9 +3,9 @@
 //
 // PERM-18: at desktop and phone width,
 // - a refusal under a minute old stays off the page;
-// - a refusal the session still needs shows as a card under Blocked and waiting, and counts in Blocked;
-// - a refusal the session got past folds under one line at the end, out of the count, and opens to its card,
-//   which says first how the session got past it;
+// - a refusal the session still needs shows as a warning row in the list at the left, opens to its card, and counts
+//   as blocked;
+// - a refusal the session got past stays off the page and out of the count;
 // - nothing is wider than the window, and the page logs no error.
 "use strict";
 
@@ -81,31 +81,27 @@ function explained(id, movedOn) {
     const errors = [];
     page.on("pageerror", (error) => errors.push(error.message));
     page.on("console", (message) => { if (message.type() === "error") errors.push(message.text()); });
-    await page.goto(origin + "/classic");
-    await page.locator(`#blocked [data-request="${needed}"]`).waitFor();
-    assert.equal(await page.locator(`#blocked [data-request="${fresh}"]`).count(), 0, "a refusal under a minute old shows");
-    assert.equal(await page.locator(`#blocked [data-request="${past}"]`).count(), 0, "the call got past shows before it is opened");
+    await page.goto(origin + "/");
+    const row = `#sidebar li.warn-row[data-request="${needed}"] .side-row`;
+    await page.locator(row).waitFor({ state: "attached" });
+    assert.equal(await page.locator(`[data-request="${fresh}"]`).count(), 0, "a refusal under a minute old shows");
+    assert.equal(await page.locator(`[data-request="${past}"]`).count(), 0, "the call the session got past shows");
     const state = await (await fetch(`${origin}/api/state`, { headers: { Cookie: cookie } })).json();
     assert.deepEqual(state.permission_requests.map((request) => request.id), [needed]);
     assert.deepEqual(state.moved_past.map((request) => request.id), [past]);
     assert.equal(state.counts.blocked, 1);
 
-    const fold = page.locator("#blocked button.more-row", { hasText: "got past without you" });
-    assert.equal((await fold.textContent()).trim(), "1 blocked call the sessions got past without you");
-    await page.locator("#blocked").screenshot({ path: path.join(work, `folded-${width}.png`) });
-    await fold.click();
-    const line = page.locator(`#blocked [data-request="${past}"]`);
-    await line.waitFor();
-    if (await line.evaluate((el) => el.classList.contains("blocked-line"))) await line.click();
-    const card = page.locator(`#blocked .blocked-card[data-request="${past}"]`);
+    // The needed call's row opens its card. On a phone the row sits on the list screen, so the click goes to the
+    // row's button itself.
+    await page.evaluate((selector) => document.querySelector(selector).click(), row);
+    const card = page.locator(`#next > .blocked-card[data-request="${needed}"]`);
     await card.waitFor();
-    const note = card.locator(".explain-note").first();
-    assert.equal((await note.textContent()).trim(), `Already handled: ${MOVED_ON}`);
+    assert.equal(await page.locator(`[data-request="${past}"]`).count(), 0, "the call the session got past shows once a card is open");
     const fits = await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth);
     assert.equal(fits, true, `${width}: the page is wider than the window`);
-    await page.locator("#blocked").screenshot({ path: path.join(work, `opened-${width}.png`) });
+    await page.screenshot({ path: path.join(work, `opened-${width}.png`) });
     assert.deepEqual(errors, []);
-    console.log(`PASS ${width}: a call the session got past folds under one line and opens with how it got past`);
+    console.log(`PASS ${width}: only the call the session still needs shows, and it opens to its card`);
 
     // Each width starts clean: the next width's three refusals are the only ones open.
     for (const id of [fresh, needed, past]) {

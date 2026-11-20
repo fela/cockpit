@@ -3,7 +3,7 @@
 // Starts serve_slow.py (this checkout's Cockpit on a synthetic database, every non-GET /api/
 // request held 2 s), seeds fresh items, steps and permission requests through the agent API, signs
 // in with the harness's cookie, and presses each control. A control passes when the change it should
-// make (the step leaves, Next up changes, a toast says what happened, Update shows busy, ...) is on
+// make (the step leaves, Next up changes, a toast or the row's Undo says what happened, Update shows busy, ...) is on
 // the page within LIMIT_MS of the click. With the server held for 2 s, a change that waits for the
 // server shows up after about 2000 ms and fails. A change after SLOW_MS passes and is marked slow: the page's
 // redraw on the synthetic data takes about 300 ms on a loaded host.
@@ -40,27 +40,34 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 function pageHelpers() {
   const live = (selector) => [...document.querySelectorAll(selector)].filter((el) => !el.closest(".motion-ghost"));
   window.__live = live;
-  // Where a step shows: "next", "queue", "ready", "snoozed", "agents" (You handed these, in All work), or null.
+  // Where a step's row shows in the list: "queue" (Inbox), "snoozed" (in Waiting), "agents" (handed, in Busy or
+  // Waiting), "other", or null.
+  window.__row = (id) => {
+    const row = live(`#sidebar li[data-step="${id}"]`)[0];
+    if (!row) return null;
+    if (row.classList.contains("snoozed")) return "snoozed";
+    if (row.closest(".sidebar-group.queue")) return "queue";
+    if (row.closest(".sidebar-group:is(.busy, .waiting)")) return "agents";
+    return "other";
+  };
+  // Where a step shows: "next" (its card on Next up), "agents" (its working card, or its row in Busy or Waiting), or
+  // where its row is.
   window.__place = (id) => {
-    if (live(`#next [data-step="${id}"]`).length) return "next";
-    if (live(`#work .with-agents [data-step="${id}"]`).length) return "agents";
-    for (const el of live(`#queue [data-step="${id}"]`)) {
-      const group = el.closest("details.group");
-      if (!group) return "queue";
-      const name = group.querySelector(":scope > summary .group-name");
-      const words = name && name.firstChild ? name.firstChild.textContent : "";
-      if (words === "Waiting next") return "ready";
-      if (words === "Snoozed") return "snoozed";
-    }
-    return null;
+    if (live(`#next .working-card[data-step="${id}"]`).length) return "agents";
+    if (live(`#next .next-card[data-step="${id}"]`).length) return "next";
+    return window.__row(id);
   };
-  // The user's places top to bottom: Next up, then the queue's rows.
-  window.__order = () => live("#next [data-step], #queue > .list > .row[data-step]").map((el) => Number(el.dataset.step));
+  // The step on Next up's card, or null.
+  window.__card = () => {
+    const el = live("#next .next-card[data-step]")[0];
+    return el ? Number(el.dataset.step) : null;
+  };
   window.__toast = () => !document.getElementById("toast").hidden;
-  window.__busy = () => {
-    const el = document.getElementById("update");
-    return el.disabled || el.classList.contains("busy");
-  };
+  // The page said what happened to the task: a toast, or the task's row turned into its Undo (a hand-off's or a
+  // close's), which stands in for the toast.
+  window.__said = (itemId) => window.__toast() || live(`#sidebar li:is(.held-hand, .held-close)[data-item="${itemId}"]`).length > 0;
+  // Whether Update is out of reach: it is starting, or a sweep or check runs (app.js).
+  window.__busy = () => updateBlocked(ui.state);
   // Watch for `effect` (an expression over `arg`) from the next click on. Returns true when it holds already.
   // `hideToast`: a toast left from an earlier press goes first, so only a new one counts.
   window.__arm = (effect, arg, hideToast) => {
@@ -162,12 +169,14 @@ async function seed(info, work) {
     closing: { answers: [{ text: "I've sent it myself; close", closes: true }, "Change it"] },
   };
   const steps = {};
+  const items = {};
   const put = async (name) => {
     const answer = await agent("POST", "/api/steps", {
       item_key: `note:instant-${run}-${name}`, need: `instant-${name}-${run}`, ask: `Instant test: ${name}`, score: name === "reorder" ? 99 : 50,
       answers: ["Works", "Change it"], session_id: SESSION_B, ...(extra[name] || {}),
     });
     steps[name] = answer.step.id;
+    items[name] = answer.step.item_id;
   };
   // "reorder" ranks first and is Next up, with its timer running as on a step the user is on (NEXT-16).
   await put("reorder");
@@ -187,15 +196,17 @@ async function seed(info, work) {
     });
     requests[name] = answer.id;
   }));
-  return { run, steps, requests };
+  return { run, steps, items, requests };
 }
 
-async function pressAll(browser, info, { run, steps, requests }) {
+async function pressAll(browser, info, { run, steps, items, requests }) {
   const context = await browser.newContext({ viewport: { width: 1440, height: 1000 }, bypassCSP: true });
   await context.setExtraHTTPHeaders({ cookie: `${info.name}=${info.value}` });
   await context.addInitScript(pageHelpers);
   const page = await context.newPage();
   page.setDefaultTimeout(5000);
+  // The main page's first load takes longer than a press on the synthetic database.
+  page.setDefaultNavigationTimeout(30000);
   const pageErrors = [];
   page.on("pageerror", (error) => pageErrors.push(error.message));
   const inflight = new Set();
@@ -214,8 +225,8 @@ async function pressAll(browser, info, { run, steps, requests }) {
   page.on("request", (request) => note("ask", request));
   page.on("response", (response) => note("answer", response.request()));
   const trafficTail = () => traffic.slice(-8).map(({ at, line }) => `${at - Date.now()} ms ${line}`).join(" | ");
-  await page.goto(`${info.origin}/classic`);
-  await page.waitForSelector("#next .card, #next .empty, #queue .row", { timeout: 15e3 });
+  await page.goto(`${info.origin}/`);
+  await page.waitForSelector("#next .next-card, #sidebar li[data-step]", { timeout: 15e3 });
 
   const results = [];
   // Each result as it comes, so a slow run shows where it is.
@@ -300,56 +311,56 @@ async function pressAll(browser, info, { run, steps, requests }) {
     }
   }
 
-  async function openGroup(words) {
-    // Busy and Finished this week are below the queue (VIEW-18, VIEW-27); the rest are the queue's.
-    const summary = page.locator(`${["Busy", "Finished this week"].includes(words) ? "#work" : "#queue"} details.group > summary`).filter({ hasText: words }).first();
-    if (!(await summary.evaluate((el) => el.parentElement.open))) await summary.click();
+  // Opens the list's group that holds `row` when it is folded.
+  async function openGroupOf(row) {
+    await row.evaluate((el) => {
+      for (let group = el.closest("details"); group; group = group.parentElement.closest("details")) group.open = true;
+    });
   }
 
-  // The steps closed in the last day, folded at the end of Finished this week (VIEW-20).
-  async function openClosedSteps() {
-    await openGroup("Finished this week");
-    const summary = page.locator("#work details.closed-steps > summary").first();
-    if (!(await summary.evaluate((el) => el.parentElement.open))) await summary.click();
-  }
-
-  // The step's full card: Next up, or its row opened (in its group, behind "Show more" if need be).
+  // The step on Next up's card: its row in the list opens it there (behind Inbox's "Show N more" if need be).
   async function card(id) {
+    const shown = page.locator(`#next .next-card:not(.working-card)[data-step="${id}"]`).first();
     for (let attempt = 0; attempt < 4; attempt++) {
       const where = await page.evaluate((step) => window.__place(step), id);
-      if (where === "next") return page.locator(`#next [data-step="${id}"]`).first();
+      if (where === "next") return shown;
       if (where === null) {
-        if (await showAllQueue()) continue;
+        if (await showMore()) continue;
         throw new Error(`step ${id} is not on the page (${await whereIs(id)}; traffic: ${trafficTail()})`);
       }
-      if (where === "agents") throw new Error(`step ${id} is under You handed these`);
-      if (where === "ready") await openGroup("Waiting next");
-      if (where === "snoozed") await openGroup("Snoozed");
-      const row = page.locator(`#queue .row[data-step="${id}"]`).first();
-      if (!(await row.evaluate((el) => el.classList.contains("open")))) {
-        await row.locator(".row-head .row-age").click();
-        await page.waitForSelector(`#queue .row.open[data-step="${id}"] .actions`, { timeout: 5000 });
-      }
-      return row;
+      if (where === "agents") throw new Error(`step ${id} is handed to an agent`);
+      const row = page.locator(`#sidebar li[data-step="${id}"]`).first();
+      await openGroupOf(row);
+      await row.locator(".side-row").click();
+      await shown.waitFor({ timeout: 5000 });
+      return shown;
     }
     throw new Error(`step ${id} did not show (${await whereIs(id)}; traffic: ${trafficTail()})`);
   }
 
-  // Opens the queue's rows behind "Show N more"; false when none are hidden.
-  async function showAllQueue() {
-    const more = page.locator("#queue > .list > .more-row button");
+  // Opens Inbox's ranked steps behind "Show N more"; false when none are hidden.
+  async function showMore() {
+    const more = page.locator("#sidebar li.sidebar-more > .side-row");
     if (!(await more.count()) || !/^Show \d+ more/.test(await more.textContent())) return false;
     await more.click();
     return true;
+  }
+
+  // The Undo of a task's held row (a hand-off's or a close's): the row itself while its group is open, otherwise
+  // the Undo on the folded group's heading.
+  async function heldUndo(itemId, groups) {
+    const row = page.locator(`#sidebar li:is(.held-hand, .held-close)[data-item="${itemId}"] > .side-row`).first();
+    if (await row.isVisible()) return row;
+    return page.locator(`#sidebar .sidebar-group:is(${groups}) > summary .busy-undo`).first();
   }
 
   // For an error: the step's elements on the page and the lists of the page's state that hold it.
   function whereIs(id) {
     return page.evaluate((step) => {
       const els = [...document.querySelectorAll(`[data-step="${step}"]`)].map((el) => {
-        const group = el.closest("details.group");
-        const name = group && group.querySelector(":scope > summary .group-name");
-        return `${el.className}${el.closest(".motion-ghost") ? " (ghost)" : ""} in ${name ? name.firstChild.textContent : el.closest("[id]").id}`;
+        const group = el.closest(".sidebar-group");
+        const name = group && group.querySelector(":scope > summary .sidebar-group-name");
+        return `${el.className}${el.closest(".motion-ghost") ? " (ghost)" : ""} in ${name ? name.textContent : el.closest("[id]").id}`;
       });
       /* global ui */
       const lists = typeof ui === "undefined" || !ui.state ? "no state"
@@ -370,41 +381,49 @@ async function pressAll(browser, info, { run, steps, requests }) {
     return cardEl.locator("details.step-menu .menu-list button").filter({ hasText: words }).first();
   }
 
+  // A permission request's card on Next up, which its red row in Inbox opens.
   async function openRequest(id) {
-    for (let attempt = 0; attempt < 4; attempt++) {
-      const el = page.locator(`#blocked [data-request="${id}"]`).first();
-      if (!(await el.count())) {
-        const more = page.locator("#blocked .more-row");
-        if (await more.count()) { await more.click(); continue; }
-        throw new Error(`request ${id} is not on the page`);
-      }
-      if (await el.evaluate((node) => node.classList.contains("blocked-line"))) { await el.click(); continue; }
-      return el;
-    }
-    throw new Error(`request ${id} did not open`);
+    const el = page.locator(`#next .blocked-card[data-request="${id}"]`).first();
+    if (await el.isVisible()) return el;
+    const row = page.locator(`#sidebar li.warn-row[data-request="${id}"]`).first();
+    if (!(await row.count())) throw new Error(`request ${id} is not on the page`);
+    await openGroupOf(row);
+    await row.locator(".side-row").click();
+    await el.waitFor({ timeout: 5000 });
+    return el;
   }
 
   const gone = (id) => `window.__place(${id}) === null`;
+  // The request's row and card are off the page.
+  const answered = (id) => `!window.__live('#sidebar li.warn-row[data-request="${id}"], #next [data-request="${id}"]').length`;
 
   // Resorted (NEXT-16): the step the user is on keeps its place when another step ranks above it, and shows
-  // Resorted; a press puts it in its ranked place and Next up shows the highest-ranked step. The queue goes by the
-  // sweeper's score (RANK-18): a new step scores above it, and enough above the others to take a place. The new step
-  // is on an item of its own, as an item shows one card at a time (SPEC NEXT-55).
+  // Resorted; a press puts it in its ranked place and Next up shows the highest-ranked step. The user's press on its
+  // card holds its place. The queue goes by the sweeper's score (RANK-18): a new step scores above it, and enough above
+  // the others to take a place. The new step is on an item of its own, as an item shows one card at a time (SPEC
+  // NEXT-55).
   await control("Resorted", async () => {
+    const el = await card(steps.reorder);
+    await el.click({ position: { x: 8, y: 8 } });
     await call(info.origin, AGENT, "POST", "/api/steps", {
       item_key: `note:instant-${run}-rival`, need: `instant-rival-${run}`, ask: "Instant test: rival", score: 100, session_id: SESSION_B,
     });
     // The Resorted key sits on the card's top edge, before the card in #next.
-    const button = "#next .resorted-pin .reorder";
+    const button = "#next .resorted-pin .reorder.resorted";
     await page.waitForSelector(button, { timeout: 15e3 });
     await press("Resorted", page.locator(button),
-      `window.__order()[0] !== ${steps.reorder} && window.__place(${steps.reorder}) === "queue"`, {});
+      `window.__card() !== ${steps.reorder} && window.__row(${steps.reorder}) === "queue"`, {});
   });
   await settle();
 
   // Timer: Start the timer in the card's ⋯ menu. The timer has no Pause (VIEW-29); the page stops it itself afterwards.
+  // Opening the card starts its timer (UI-19), so the page stops that start first, as it would for the user's pause.
   await control("Timer: play (step card)", async () => {
     const el = await card(steps.timer);
+    await settle();
+    /* global setTimer */
+    await page.evaluate((id) => setTimer(id, false), steps.timer);
+    await settle();
     await el.locator(".step-menu > summary").first().click();
     await press("Timer: play (step card)", el.locator('.step-menu [data-timer="start"]').first(),
       `window.__live('[data-step="${steps.timer}"].on-clock').length > 0`, {});
@@ -428,22 +447,19 @@ async function pressAll(browser, info, { run, steps, requests }) {
   await control("One-click answer", async () => {
     const el = await card(steps.answer);
     await press("One-click answer", el.locator(".answers button.answer").first(),
-      `window.__place(${steps.answer}) === "agents" && window.__toast()`, {});
+      `window.__place(${steps.answer}) === "agents" && window.__said(${items.answer})`, {});
   });
   await settle();
-  // The answer goes to the working fake session, so it waits for the turn to end (MSG-3); the next poll
-  // shows it waiting with Interrupt and send.
-  await control("Interrupt and send (You handed these)", async () => {
-    await openGroup("Busy");
-    const waiting = `#work .with-agents li[data-step="${steps.answer}"] button.interrupt`;
-    await page.locator(waiting).first().waitFor({ timeout: 12e3 });
-    await press("Interrupt and send (You handed these)", page.locator(waiting).first(), `window.__live('${waiting}').length === 0`, {});
-  });
-  await settle();
-  await control("Take back (You handed these)", async () => {
-    await openGroup("Busy");
-    const button = page.locator(`#work .with-agents li[data-step="${steps.answer}"] button[aria-label^="Take back"]`).first();
-    await press("Take back (You handed these)", button,
+  // Once the hand-off's Undo time is over, the handed step's row in Busy opens its working card, whose Take back
+  // brings the step back to the user.
+  await control("Take back (working card)", async () => {
+    await page.locator(`#sidebar li.held-hand[data-step="${steps.answer}"]`).waitFor({ state: "detached", timeout: 20e3 });
+    const row = page.locator(`#sidebar li[data-step="${steps.answer}"]`).first();
+    await openGroupOf(row);
+    await row.locator(".side-row").click();
+    const button = page.locator(`#next .working-card[data-step="${steps.answer}"] .working-back`).first();
+    await button.waitFor({ timeout: 5000 });
+    await press("Take back (working card)", button,
       `window.__place(${steps.answer}) !== "agents" && window.__place(${steps.answer}) !== null`, {});
   });
   await settle();
@@ -452,31 +468,24 @@ async function pressAll(browser, info, { run, steps, requests }) {
     const el = await card(steps.send);
     await el.locator(`textarea[data-key="msg:step:${steps.send}"]`).fill(`Instant test reply ${run}`);
     await press("Send (step composer)", el.locator(".composer button.send").first(),
-      `window.__place(${steps.send}) === "agents" && window.__toast()`, {});
-    // The user presses the toast's Take back while the hand-off is still on its way.
-    await press("Take back (toast, right after Send)", page.locator("#toast button", { hasText: "Take back" }),
+      `window.__place(${steps.send}) === "agents" && window.__said(${items.send})`, {});
+    // The user presses the hand-off's Undo while it is still on its way.
+    await press("Undo (right after Send)", await heldUndo(items.send, ".busy, .waiting"),
       `window.__place(${steps.send}) !== "agents" && window.__place(${steps.send}) !== null`, {});
   });
   await settle();
-  await serverHasBack("Take back reaches the server", steps.send);
+  await serverHasBack("Undo of Send reaches the server", steps.send);
 
+  // The step's close key: Done, or Archive session on a session's last step.
+  const doneKey = '.actions button:is([aria-label^="Done"], .archive-key)';
   await control("Archive", async () => {
     const el = await card(steps.archive);
-    await press("Archive", el.locator('.actions button:is([aria-label^="Archive"], [aria-label^="Done"])').first(),
-      `${gone(steps.archive)} && window.__toast()`, {});
-  });
-  await settle();
-  await control("Reopen (Closed)", async () => {
-    await openClosedSteps();
-    const row = page.locator("#work .closed-list li").filter({ hasText: "Instant test: archive" }).first();
-    await press("Reopen (Closed)", row.locator('button[aria-label^="Reopen"]'),
-      `!window.__live("#work .closed-list li").some((li) => li.textContent.includes("Instant test: archive")) || window.__place(${steps.archive}) !== null`, {});
+    await press("Archive", el.locator(doneKey).first(), `${gone(steps.archive)} && window.__toast()`, {});
   });
   await settle();
   await control("Undo (toast, right after Archive)", async () => {
     const el = await card(steps.undo);
-    await press("Archive (second step)", el.locator('.actions button:is([aria-label^="Archive"], [aria-label^="Done"])').first(),
-      `${gone(steps.undo)} && window.__toast()`, {});
+    await press("Archive (second step)", el.locator(doneKey).first(), `${gone(steps.undo)} && window.__toast()`, {});
     await press("Undo (toast, right after Archive)", page.locator("#toast button", { hasText: "Undo" }),
       `window.__place(${steps.undo}) !== null`, {});
   });
@@ -490,17 +499,17 @@ async function pressAll(browser, info, { run, steps, requests }) {
   });
   await settle();
 
-  // Task done on the item's last step completes the item in one press (CONTROL-15).
+  // Task done on the item's last step completes the item in one press (CONTROL-15); the task's row in Finished this
+  // week holds its Undo.
   await control("Task done", async () => {
     const el = await card(steps.complete);
-    await press("Task done", el.locator(".actions button.task-done").first(), `${gone(steps.complete)} && window.__toast()`, {});
+    await press("Task done", el.locator(".actions button.task-done").first(), `${gone(steps.complete)} && window.__said(${items.complete})`, {});
   });
   await settle();
-  await control("Undo (toast, right after Task done)", async () => {
+  await control("Undo (right after Task done)", async () => {
     const el = await card(steps.redo);
-    await press("Task done (second item)", el.locator(".actions button.task-done").first(), `${gone(steps.redo)} && window.__toast()`, {});
-    await press("Undo (toast, right after Task done)", page.locator("#toast button", { hasText: "Undo" }),
-      `window.__place(${steps.redo}) !== null`, {});
+    await press("Task done (second item)", el.locator(".actions button.task-done").first(), `${gone(steps.redo)} && window.__said(${items.redo})`, {});
+    await press("Undo (right after Task done)", await heldUndo(items.redo, ".done"), `window.__place(${steps.redo}) !== null`, {});
   });
   await settle();
   await serverHasBack("Undo of Task done reaches the server", steps.redo);
@@ -511,14 +520,14 @@ async function pressAll(browser, info, { run, steps, requests }) {
     await el.locator(`textarea[data-key="msg:step:${steps.redo}"]`).first().fill("Instant test: one last message");
     const words = await el.locator(".actions button.task-done .label").first().textContent();
     if (words !== "Task done + send") throw new Error(`the key reads ${JSON.stringify(words)}`);
-    await press("Task done + send (last message)", el.locator(".actions button.task-done").first(), `${gone(steps.redo)} && window.__toast()`, {});
+    await press("Task done + send (last message)", el.locator(".actions button.task-done").first(), `${gone(steps.redo)} && window.__said(${items.redo})`, {});
   });
   await settle();
   await serverClosed("Task done + send reaches the server", steps.redo);
 
   await control("Closing answer", async () => {
     const el = await card(steps.closing);
-    await press("Closing answer", el.locator(".answers button.answer.closes").first(), `${gone(steps.closing)} && window.__toast()`, {});
+    await press("Closing answer", el.locator(".answers button.answer.closes:not(.task-done)").first(), `${gone(steps.closing)} && window.__said(${items.closing})`, {});
   });
   await settle();
 
@@ -528,7 +537,7 @@ async function pressAll(browser, info, { run, steps, requests }) {
     await press("Close item: open box", entry, `window.__live('[data-step="${steps.close}"] .close-box').length > 0`, {});
     const box = page.locator(`[data-step="${steps.close}"] .close-box`).first();
     await box.locator("textarea").fill("Instant test: not needed any more");
-    await press("Close item: Close item", box.locator("button.close-item"), `${gone(steps.close)} && window.__toast()`, {});
+    await press("Close item: Close item", box.locator("button.close-item"), `${gone(steps.close)} && window.__said(${items.close})`, {});
   });
   await settle();
 
@@ -536,58 +545,58 @@ async function pressAll(browser, info, { run, steps, requests }) {
     const el = await card(steps.snooze);
     await (await menuEntry(el, "Snooze")).click();
     const entry = el.locator("details.step-menu .menu-choices button").first();
-    await press("Snooze (menu time)", entry, `${gone(steps.snooze)} && window.__toast()`, {});
+    await press("Snooze (menu time)", entry, `window.__card() !== ${steps.snooze} && window.__row(${steps.snooze}) !== "queue" && window.__toast()`, {});
   });
   await settle();
-  // Once the server answered and its state is in, the step shows under Snoozed. A poll (5 s) may
+  // Once the server answered and its state is in, the step's row shows snoozed in Waiting. A poll (5 s) may
   // bring it; when it never shows, a redraw puts it there so Unsnooze can still be pressed.
   await control("Snoozed row shows", async () => {
     const start = Date.now();
-    const shown = await page.waitForFunction((id) => window.__place(id) === "snoozed", steps.snooze, { timeout: 6000, polling: 50 })
+    const shown = await page.waitForFunction((id) => window.__row(id) === "snoozed", steps.snooze, { timeout: 6000, polling: 50 })
       .then(() => true, () => false);
     if (shown) { record({ name: "Snoozed row shows", verdict: "pass", note: `${Date.now() - start} ms after the server's answer had settled` }); return; }
     const where = await whereIs(steps.snooze);
     /* global render */
     await page.evaluate(() => render(false));
-    throw new Error(`not under Snoozed 6 s after the server's answer (${where})`);
+    throw new Error(`no snoozed row 6 s after the server's answer (${where})`);
   });
   await control("Unsnooze", async () => {
     const el = await card(steps.snooze);
     await press("Unsnooze", await menuEntry(el, "Unsnooze"),
-      `window.__place(${steps.snooze}) !== "snoozed"`, {});
+      `window.__row(${steps.snooze}) !== "snoozed"`, {});
   });
   await settle();
 
   await control("Run (step command)", async () => {
     const el = await card(steps.run);
     await press("Run (step command)", el.locator(".step-run button.primary", { hasText: "Run" }),
-      `window.__place(${steps.run}) === "agents" && window.__toast()`, {});
+      `window.__place(${steps.run}) === "agents" && window.__said(${items.run})`, {});
   });
   await settle();
   await control("Allow (step permission)", async () => {
     const el = await card(steps.allow);
     await press("Allow (step permission)", el.locator(".step-run button.primary", { hasText: "Allow" }),
-      `window.__place(${steps.allow}) === "agents" && window.__toast()`, {});
+      `window.__place(${steps.allow}) === "agents" && window.__said(${items.allow})`, {});
   });
   await settle();
 
   await control("Run (permission card)", async () => {
     const el = await openRequest(requests.allow);
-    await press("Run (permission card)", el.locator(".actions button.primary", { hasText: "Run" }).first(),
-      `!window.__live('#blocked [data-request="${requests.allow}"]').length`, {});
+    await press("Run (permission card)", el.locator(".actions button.primary", { hasText: "Run" }).first(), answered(requests.allow), {});
   });
   await settle();
   await control("Deny (permission card)", async () => {
     const el = await openRequest(requests.deny);
-    await press("Deny (permission card)", el.locator('.actions button[aria-label^="Deny"]').first(),
-      `!window.__live('#blocked [data-request="${requests.deny}"]').length`, {});
+    await press("Deny (permission card)", el.locator('.actions button[aria-label^="Deny"]').first(), answered(requests.deny), {});
   });
   await settle();
 
   await control("Add: submit", async () => {
-    await press("Add: open box", page.locator("#add"), "!document.getElementById('add-box').hidden", {});
+    await press("Add: open box", page.locator(".sidebar-add"), "!document.getElementById('add-box').hidden", {});
     await page.locator('#add-box textarea[data-key="add:new"]').fill(`Instant test to-do ${run}`);
-    await press("Add: submit", page.locator("#add-box .add-foot button.primary"), 'window.__toast()', {});
+    // The new to-do's row in Busy, or Busy's heading when it is folded, offers its Undo.
+    await press("Add: submit", page.locator("#add-box .add-foot button.primary"),
+      `window.__live('#sidebar [aria-label^="Undo adding"]').length > 0`, {});
   });
   await settle();
 
@@ -624,15 +633,13 @@ async function pressAll(browser, info, { run, steps, requests }) {
   });
   await settle();
 
-  await control("Full sweep now", async () => {
-    if (await page.evaluate(() => window.__busy())) throw new Error(`Update was already busy: ${await page.locator("#update").getAttribute("title")}`);
-    await page.locator("#sweep-status details.menu > summary").click();
-    await press("Full sweep now", page.locator("#sweep-status .menu-list button").first(), "window.__busy()", {});
-  });
-  await settle();
   await control("Update", async () => {
-    if (await page.evaluate(() => window.__busy())) throw new Error(`Update was busy before the press: ${await page.locator("#update").getAttribute("title")}`);
-    await press("Update", page.locator("#update"), "window.__busy()", {});
+    if (await page.evaluate(() => window.__busy())) throw new Error("Update was busy before the press: a sweep or check was running");
+    // Update board in the command menu, as the U key runs it.
+    await page.locator(".rail-search .command-trigger").click();
+    const dialog = page.locator("dialog.command-dialog[open]");
+    await dialog.locator('.command-search input[role="combobox"]').fill("Update board");
+    await press("Update", dialog.locator('li[role="option"]', { hasText: "Update board" }).first(), "window.__busy()", {});
   });
   await settle();
 

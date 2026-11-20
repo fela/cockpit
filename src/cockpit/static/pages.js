@@ -83,7 +83,7 @@ function taskLinkId(link) {
   } catch {
     return null;
   }
-  if (url.origin !== location.origin || !["/", "/classic"].includes(url.pathname)) return null;
+  if (url.origin !== location.origin || url.pathname !== "/") return null;
   const match = url.hash.match(/^#(?:(?:home|board)\/)?item\/(\d+)$/);
   return match ? Number(match[1]) : null;
 }
@@ -544,7 +544,7 @@ function previewHead(page) {
   }
   const version = page.revision > 1 ? `version ${page.revision}, ` : "";
   const changed = page.updated_at === page.created_at ? "shared" : "changed";
-  // All work opens only items still on it; an archived item, or one done long enough ago to have left it, is named
+  // The page opens only items still on it; an archived item, or one done long enough ago to have left it, is named
   // without a link.
   const item = page.item_on_board ? h("a", { href: itemHref(page), text: page.item_title }) : h("span", { text: page.item_title });
   const back = !stepId && h("a", {
@@ -1057,12 +1057,25 @@ async function load() {
   renderPreview();
 }
 
-async function loadState() {
-  try {
-    state = await api("/api/state");
-  } catch (error) {
-    logError("reading Cockpit's state", error);
-  }
+let stateLoad = null;
+let stateAgain = false;
+function loadState() {
+  stateAgain = true;
+  if (stateLoad) return stateLoad;
+  // Saves made while a status read is slow need one fresh read after it. Each completed read can redraw,
+  // even when more saves or polls arrive while the next read runs.
+  stateLoad = (async () => {
+    try {
+      stateAgain = false;
+      state = await api("/api/state");
+    } catch (error) {
+      logError("reading Cockpit's state", error);
+    } finally {
+      stateLoad = null;
+      if (stateAgain) loadState().then(renderPreview);
+    }
+  })();
+  return stateLoad;
 }
 
 function refresh() {

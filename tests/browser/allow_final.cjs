@@ -1,5 +1,7 @@
-// Run with PLAYWRIGHT_MODULE=/path/to/node_modules/playwright node tests/browser/allow_final.cjs. Uses the keyboard
-// fixture's isolated database; never touches live work or real agents.  NEXT-41.
+// A permission step the user allowed and its session returned says "You allowed this", shows the rule, and offers no
+// second Allow (NEXT-41). Checks at laptop and phone width, light and dark, on the card of the item picked in the list
+// at the left. Run with PLAYWRIGHT_MODULE=/path/to/node_modules/playwright node tests/browser/allow_final.cjs. Uses the
+// keyboard fixture's isolated database; never touches live work or real agents.
 "use strict";
 
 const assert = require("node:assert/strict");
@@ -57,9 +59,15 @@ let browser;
       const errors = [];
       page.on("pageerror", (error) => errors.push(error.message));
       page.on("console", (message) => { if (message.type() === "error") errors.push(message.text()); });
-      await page.goto(origin + "/classic");
-      const block = page.locator(`[data-step="${step.id}"] [aria-label="Permission"]`).first();
-      await block.waitFor();
+      const block = page.locator(`#next [data-step="${step.id}"] [aria-label="Permission"]`).first();
+      // Picks the step's item in the list at the left, so the card shows it whichever step leads the queue.
+      const pick = async () => {
+        await page.locator("#sidebar li[data-item]").first().waitFor({ state: "attached" });
+        await page.evaluate((id) => showInSidebar(id), step.item_id);
+        await block.waitFor();
+      };
+      await page.goto(origin + "/");
+      await pick();
       if (!pressed) {
         // The first look presses Allow; the session then returns the step.
         await block.getByRole("button", { name: "Allow" }).click();
@@ -72,7 +80,7 @@ let browser;
         await send("POST", `/api/steps/${step.id}/return`, { note: "Done: the rule is in" });
         pressed = true;
         await page.reload();
-        await block.waitFor();
+        await pick();
       }
       await block.getByText("You allowed this").waitFor();
       assert.equal(await block.getByRole("button", { name: "Allow" }).count(), 0, "a returned step offers no second Allow");

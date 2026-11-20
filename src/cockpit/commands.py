@@ -117,6 +117,9 @@ def execute(
             log.exception("command run %s did not start", run_id)
             process = None
             note = f"Cockpit could not run it: {exc}"
+        # Delivery can wait for a session to start. Drain the pipe meanwhile so a command that prints more than
+        # the pipe holds keeps running while its start message is being delivered.
+        tail = _Tail(process) if process is not None else None
         _deliver_logged(deliver, start_message_id)
         # A run that started a new session sends its output there, once the start message names it.
         conn.execute(
@@ -126,7 +129,7 @@ def execute(
         )
         cut = 0
         if process is not None:
-            tail = _Tail(process)
+            assert tail is not None
             deadline = began + TIMEOUT_MINUTES * 60
             try:
                 # Done once its output closed and it exited, as before it was read as it came.

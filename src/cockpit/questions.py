@@ -6,10 +6,10 @@ status note, such as one saying a step waits in the user's queue, asks nothing. 
 The user's view covers it (the same rule the page used for its waiting cards: neither a
 step's own session nor a session of the step's item), Cockpit puts a step for it: on
 the session's item, or on an item of its own (`session:<uuid>`) when it has none. The
-ask is the session's own line on what it needs, the body quotes its last message in
-full, and the step names the session, so the user's reply goes to it. The step ranks like
-any question for the user, and the sweep rewrites it in place with answers and a
-recommendation.
+ask is the session's own line on what it needs. The step quotes its last message in full,
+in the body or under Full question, and names the session so the user's reply goes to it.
+The step ranks like any question for the user, and the sweep rewrites it in place with
+answers and a recommendation.
 
 A session that stopped to ask while it holds a step the user handed it asks on that step: Cockpit writes the
 question into it and returns it to the user, so the answer comes back where the user asked (SPEC NEXT-37).
@@ -238,13 +238,14 @@ def _put(conn: sqlite3.Connection, session: Session) -> None:
         if item_id is None:
             log.info("session %s asks a question, but every item it is on is closed; no step", session.session_id)
             return
+        need = f"question:{session.session_id}:{session.updated_at}"
         fields = {
             "item_id": item_id,
-            "need": f"question:{session.session_id}:{session.updated_at}",
+            "need": need,
             "session_id": session.session_id,
             "ask": _ask(conn, session),
             "why": _why(conn, session),
-            "body": _quoted(session.detail if session.provider == "codex" else last_message(session.session_id)),
+            **_question_text(session, need),
         }
         # The user handed the step of this question to an agent: it comes back with what that agent wrote.
         if conn.execute(
@@ -303,8 +304,7 @@ def _ask_in_place(conn: sqlite3.Connection, step: dict[str, Any], session: Sessi
         "session_id": session.session_id,
         "ask": _ask(conn, session),
         "why": _why(conn, session),
-        "body": _quoted(session.detail if session.provider == "codex" else last_message(session.session_id)),
-        "details": [],
+        **_question_text(session, need),
         "draft": "",
         "reply_hint": "",
         "core_links": [],
@@ -358,8 +358,20 @@ def _why(conn: sqlite3.Connection, session: Session) -> str:
     return why if len(why) <= store.TEXT_LIMITS["why"] else "A session stopped to ask you this and waits for your answer."
 
 
+def _question_text(session: Session, need: str) -> dict[str, Any]:
+    """Quote the whole question, folded into details when it exceeds the body word limit."""
+    text = session.detail if session.provider == "codex" else last_message(session.session_id)
+    quote = _quoted(text)
+    if store.body_words(quote, need) <= store.BODY_WORDS:
+        return {"body": quote, "details": []}
+    return {
+        "body": "Open **Full question** for the session's message.",
+        "details": [{"title": "Full question", "body": quote}],
+    }
+
+
 def _quoted(text: str) -> str:
-    """The session's own words, quoted: shown in full and free of the body's limits (SPEC NEXT-24)."""
+    """The session's own words, quoted in full and exempt from character limits (SPEC NEXT-24)."""
     return "\n".join(f"> {line}" if line.strip() else ">" for line in text.strip().splitlines())
 
 

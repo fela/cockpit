@@ -58,12 +58,14 @@ async function main() {
       page.setDefaultTimeout(5000);
       const errors = [];
       page.on("pageerror", (error) => errors.push(error.message));
-      await page.goto(`${info.origin}/classic`);
+      await page.goto(`${info.origin}/`);
       await page.locator(".layout > .primary").waitFor();
       const dialog = page.locator("#add-box");
       const area = page.locator('#add-box textarea[data-key="add:new"]');
+      // The list's + at laptop width; on a phone's item screen, the + in the phone bar.
+      const addKey = page.locator(".sidebar-add:visible, .phone-add:visible");
 
-      await page.locator("#add").click();
+      await addKey.click();
       await area.waitFor();
       const opened = await page.evaluate(() => {
         const panel = document.querySelector("#add-box .add-panel").getBoundingClientRect();
@@ -100,13 +102,13 @@ async function main() {
       await page.keyboard.press("a");
       await area.waitFor();
       await area.press("Escape");
-      check(`${width} px: opened with the A key, focus goes back to Add`, await page.evaluate(() => document.activeElement.id === "add"), "elsewhere");
-      await page.locator("#add").click();
+      check(`${width} px: opened with the A key, focus goes back to Add`, await page.evaluate(() => document.activeElement.matches(".sidebar-add, .phone-add")), "elsewhere");
+      await addKey.click();
       check(`${width} px: the draft is there again`, (await area.inputValue()) === `Dialog test ${width}`, await area.inputValue());
       await page.mouse.click(4, 890);
       check(`${width} px: a press beside the panel closes it`, await dialog.isHidden(), "still open");
 
-      await page.locator("#add").click();
+      await addKey.click();
       await page.locator("#add-box .add-foot button[aria-label^='Attach part']").click();
       check(`${width} px: Attach steps the dialog aside`, await dialog.isHidden(), "still open");
       await page.locator(".layout > .primary section:not(:empty)").first().click({ position: { x: 20, y: 10 } });
@@ -147,11 +149,11 @@ async function main() {
         !moved.adding && moved.picking === "feedback" && moved.words === `Older feedback\n\nDialog test ${width}`, JSON.stringify(moved));
       // A click from the keyboard picks the control under it, wherever the pick bar sits on a phone.
       await page.evaluate(() => document.querySelector(".layout > .primary section:not(:empty)").click());
-      const carried = await page.locator("#pick-box textarea").inputValue();
+      const carried = await page.locator("#pick-box textarea[data-key=\"fb:pick\"]").inputValue();
       check(`${width} px: the feedback box holds the words after the older draft`, carried === `Older feedback\n\nDialog test ${width}`, carried);
       await page.evaluate(() => { ui.drafts.delete("fb:pick"); closePick(); if (ui.picking) stopPicking(); });
 
-      await page.locator("#add").click();
+      await addKey.click();
       await area.fill(`Dialog add ${width}`);
       await area.press("Enter");
       check(`${width} px: Enter adds it and closes the dialog`, await dialog.isHidden(), "still open");
@@ -172,10 +174,10 @@ async function main() {
       page.setDefaultTimeout(5000);
       const errors = [];
       page.on("pageerror", (error) => errors.push(error.message));
-      await page.goto(`${info.origin}/classic`);
+      await page.goto(`${info.origin}/`);
       const dialog = page.locator("#add-box");
       const area = page.locator('#add-box textarea[data-key="add:new"]');
-      await page.locator("#add, .sidebar-add").first().tap();
+      await page.locator(".sidebar-add:visible, .phone-add:visible").tap();
       await area.fill("Phone add");
       await area.press("Enter");
       await area.pressSequentially("second line");

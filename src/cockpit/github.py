@@ -184,15 +184,19 @@ def ask_states(refs: list[str]) -> States:
         repo, number = ref.split("#")
         owner, name = repo.split("/")
         parts.append(STATE_PART.format(index=index, owner=owner, name=name, number=number))
-    try:
-        result = subprocess.run(
-            ["gh", "api", "graphql", "-f", "query={ " + " ".join(parts) + " }"],
-            stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=TIMEOUT_SECONDS, check=False,
-        )
-    except subprocess.TimeoutExpired as exc:
-        raise GitHubError(f"gh took over {TIMEOUT_SECONDS} s") from exc
-    except OSError as exc:
-        raise GitHubError(f"gh did not start: {exc}") from exc
+    args = ["gh", "api", "graphql", "-f", "query={ " + " ".join(parts) + " }"]
+    for attempt in range(2):
+        try:
+            result = subprocess.run(
+                args, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=TIMEOUT_SECONDS, check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            if attempt:
+                raise GitHubError(f"gh took over {TIMEOUT_SECONDS} s twice") from exc
+        except OSError as exc:
+            raise GitHubError(f"gh did not start: {exc}") from exc
+        else:
+            break
     try:
         answer = json.loads(result.stdout)
     except json.JSONDecodeError as exc:

@@ -53,7 +53,9 @@ restarts it.
 
 The host must remain awake and online for Cockpit and its agents to work.
 On Linux, Claude commands run in their own systemd scope; on macOS they run
-directly. `claude_sockets_dir` overrides the platform socket directory if needed.
+directly. Cockpit writes to a live Claude session over the socket that session's
+`sessions/<pid>.json` names. For a Claude release that names none, Cockpit uses the
+platform socket directory, and `claude_sockets_dir` overrides that directory if needed.
 
 ## Updating the service
 
@@ -111,8 +113,10 @@ Completion, resolution and disconnects clear stale prompts. Replies enter item
 history with their turn timestamps.
 
 The worker starts on demand. On Linux it runs as a separate user service managed
-by systemd, named `cockpit-codex-<database-path-hash>`, so a systemd user session
-is required even when running the web server in the foreground. The caller's
+by systemd, named `cockpit-codex-<database-path-hash>-<launch-id>`, so a systemd
+user session is required even when running the web server in the foreground. The
+new service can start while the previous one exits. A lock lets only one worker
+use the database and own the socket at a time. The caller's
 environment is forwarded when the worker starts, including PATH and CODEX_HOME
 when set. Changes to that environment take effect when the worker next starts.
 The CLI keeps its configured login and model provider, including a configured
@@ -121,15 +125,15 @@ On macOS the worker starts as a separate launchd job, named `cockpit.codex.<id>`
 Its log is `~/.local/share/cockpit/logs/codex-worker.log`; Linux logs go to the journal.
 Worker warnings and errors also appear in Cockpit's server logs.
 
-The worker continues using a private copy of its Cockpit package across deploys.
-Copies live under `~/.local/share/cockpit/codex-worker-code`; remove old copies
-only after stopping their workers. Worker code updates take effect when that worker
-next starts. Before explicitly stopping or updating the worker, check that no
-Codex turn or request is active. On Linux, find its unit with
-`systemctl --user list-units 'cockpit-codex-*'` and stop that unit. The next request
-requiring Codex starts the worker with the newly installed code. On macOS, stop the worker
+The worker continues using a private copy of its Cockpit package across deploys,
+so a deploy cuts off no Codex turn. Copies live under `~/.local/share/cockpit/codex-worker-code`.
+When a start or message reaches a worker whose copy differs from the installed package,
+and no Codex turn or request is open, the worker refuses it, exits, and the caller sends it again
+to a new worker on the installed code. Each worker removes the other copies once it holds the worker lock.
+To stop the worker by hand, first check that no Codex turn or request is active. On Linux, find its unit with
+`systemctl --user list-units 'cockpit-codex-*'` and stop that unit. On macOS, stop it
 with `launchctl bootout gui/$(id -u)/cockpit.codex.<id>`, using its job label from
-`launchctl list`. Stopping only the web service leaves Codex work running. A machine reboot or worker loss interrupts
+`launchctl list`. The next request requiring Codex starts a worker. Stopping only the web service leaves Codex work running. A machine reboot or worker loss interrupts
 turns and clears pending approvals. Messages whose delivery status cannot be
 determined stay failed until an explicit retry. Database changes and the protocol between the web server and
 worker must remain compatible with a surviving worker.

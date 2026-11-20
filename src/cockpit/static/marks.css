@@ -7,9 +7,7 @@
 
 /* Every mark: a box the mark fills, painted through the mask. */
 .section-head h2::before,
-:is(#patterns, #time, #permissions) > details.more > summary::after,
 #work .group > summary::after,
-#queue .group > summary::after,
 .prio::before,
 .row:is(.high, .urgent) > .row-head::before,
 a:is(.src-github, .src-linear)::before {
@@ -22,30 +20,13 @@ a:is(.src-github, .src-linear)::before {
 .section-head h2::before { content: ""; flex-shrink: 0; width: 16px; height: 16px; background: currentColor; }
 #pinned .section-head h2::before { --glyph: var(--mark-pin); }
 #work .section-head h2::before { --glyph: var(--mark-doc); }
-/* Patterns, Your time and Permissions open from their heading: the chevron, the emblem, the name. */
 /* The chevron comes first wherever a summary also carries a mark (flex order: chevron, mark, name). */
-:is(#patterns, #time, #permissions) > details.more > summary::before,
-#work .group > summary::before,
-#queue .group > summary::before { order: -2; }
-:is(#patterns, #time, #permissions) > details.more > summary::after { content: ""; order: -1; flex-shrink: 0; width: 16px; height: 16px; background: currentColor; }
-#patterns > details.more > summary::after { --glyph: var(--mark-chart); }
-#time > details.more > summary::after { --glyph: var(--mark-hourglass); }
-#permissions > details.more > summary::after { --glyph: var(--mark-key); }
+#work .group > summary::before { order: -2; }
 
-/* Every group's mark, after the chevron: on All work, Matters most's radar and who has the next move; under
-   the queue, ready next's stack, snoozed's clock and closed's check. The names start on one edge. */
-#work .group > summary::after,
-#queue .group > summary::after { content: ""; order: -1; flex-shrink: 0; width: 16px; height: 16px; background: var(--who, currentColor); }
-#queue .group.ready-next > summary::after { --glyph: var(--mark-layers); }
-#queue .group.snoozed > summary::after { --glyph: var(--mark-clock); }
-#work .group.in-progress > summary::after { --glyph: var(--mark-radar); }
-#work .group.agents > summary::after { --glyph: var(--mark-bot); }
-#work .group.bots > summary::after { --glyph: var(--mark-bug); }
-#work .group.people > summary::after { --glyph: var(--mark-people); }
-#work .group.merge > summary::after { --glyph: var(--mark-merge); }
-#work .group.nobody > summary::after { --glyph: var(--mark-nobody); --who: var(--shield-label); }
+/* Every group's mark, after the chevron: Search's groups (VIEW-21) say who has the next move. The names start on
+   one edge. */
+#work .group > summary::after { content: ""; order: -1; flex-shrink: 0; width: 16px; height: 16px; background: var(--who, currentColor); }
 #work .group.done > summary::after { --glyph: var(--mark-flag); }
-/* Search's filter (VIEW-21) also groups the work waiting for the user, and the work closed earlier. */
 #work .group.you > summary::after { --glyph: var(--mark-person); }
 #work .group.closed-found > summary::after { --glyph: var(--mark-archive); }
 /* The other groupings (by state, stage, priority, repo, account) carry no mark: the name follows the chevron. */
@@ -91,37 +72,6 @@ a:is(.src-github, .src-linear)::before {
 .session-mark > .icon, .session-entry > .icon.session-bot { width: 12px; height: 12px; }
 .session-entry > .icon.session-bot { margin-right: -5px; }
 
-/* Blocked and waiting: its heading is the list's ::after, so it shows only while something waits. */
-#blocked > .blocked-list {
-  position: relative;
-  gap: 0;
-  background: var(--surface);
-  box-shadow: var(--shadow-next), inset 0 1px 0 0 var(--display-hi);
-}
-#blocked > .blocked-list::after {
-  content: "Blocked and waiting";
-  position: absolute;
-  z-index: 5;
-  top: -15px;
-  left: 25px;
-  height: 20px;
-  padding: 2px 11px;
-  background: var(--shield-well);
-  box-shadow: var(--shield-well-in);
-  color: var(--lamp-red);
-  font: var(--readout);
-  font-variant-numeric: tabular-nums;
-  font-synthesis: none;
-  letter-spacing: 1px;
-  text-transform: uppercase;
-  white-space: nowrap;
-  pointer-events: none;
-}
-#blocked > .blocked-list > * { margin: 0; border-radius: 0; box-shadow: none; }
-#blocked > .blocked-list > * + * { box-shadow: inset 0 1px 0 0 var(--line); }
-#blocked > .blocked-list > :first-child { padding-top: 28px; }
-#blocked > .blocked-list > .more-row { justify-self: stretch; padding: 8px 12px; text-align: left; }
-
 /* A step that left: its words fade. */
 .next-card.left > .step-context { opacity: 1; }
 .next-card.left > .step-context > :not(.context-marks, .context-tags), .next-card.left > .step-context > :is(.context-marks, .context-tags) > * { opacity: .55; }
@@ -145,20 +95,18 @@ a:is(.src-github, .src-linear)::before {
   #work .row-side::before { content: ""; order: -1; flex-basis: 100%; height: 4px; }
 }
 
-
 @media (max-width: 640px) {
-  #blocked > .blocked-list::after { left: 7px; }
   /* A blocked call's title takes the first line from the card's text edge, like a queue row's, and wraps
      to two lines; the kind mark leads the line under it, with who asked and how long ago. */
-  :is(#blocked, #next) .blocked-card > .blocked-head { flex-wrap: wrap; row-gap: 4px; }
-  :is(#blocked, #next) .blocked-card > .blocked-head > .what {
+  #next .blocked-card > .blocked-head { flex-wrap: wrap; row-gap: 4px; }
+  #next .blocked-card > .blocked-head > .what {
     order: -1; flex: 1 1 100%;
     display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2;
     white-space: normal; line-height: 20px;
   }
-  :is(#blocked, #next) .blocked-card > .blocked-head > .kind { margin: 0; }
-  :is(#blocked, #next) .blocked-card > .blocked-head > .who { max-width: none; }
-  :is(#blocked, #next) .blocked-card > :is(.why, .explain, .explain-note, .cause) { margin-left: 0; }
+  #next .blocked-card > .blocked-head > .kind { margin: 0; }
+  #next .blocked-card > .blocked-head > .who { max-width: none; }
+  #next .blocked-card > :is(.why, .explain, .explain-note, .cause) { margin-left: 0; }
 }
 
 /* The sweeper's reasons stay quiet, under the ask and on a queue row alike: a pale ground, no line round
@@ -201,18 +149,17 @@ a:is(.src-github, .src-linear)::before {
     opacity: 0;
     pointer-events: none;
   }
-  .next-card > .step-context:hover ~ .chips, .next-card > .chips:hover { opacity: 1; pointer-events: auto; }
+  /* A card with no item's line shows them while the pointer is on its heading, under the short line, where the
+     plate leaves the heading in view. */
+  .next-card:not(:has(> .step-context)) > .chips { top: auto; }
+  .next-card > .step-context:hover ~ .chips, .next-card:not(:has(> .step-context)):has(> .destination-heading > h1:hover) > .chips,
+  .next-card > .chips:hover { opacity: 1; pointer-events: auto; }
   .next-card.left > .chips { opacity: 0; }
-  .next-card.left > .step-context:hover ~ .chips, .next-card.left > .chips:hover { opacity: .55; }
-  /* The step's ⋯ menu also stands on that line; while the pointer is on it or it is open, the plate
-     stays away, so it does not cover the title under the menu. */
-  .next-card > .step-context:has(.step-menu:is(:hover, [open])) ~ .chips { opacity: 0; pointer-events: none; }
+  .next-card.left > .step-context:hover ~ .chips, .next-card.left:not(:has(> .step-context)):has(> .destination-heading > h1:hover) > .chips,
+  .next-card.left > .chips:hover { opacity: .55; }
+  /* While the pointer is on the step's ⋯ menu or it is open, the plate stays away, so it does not cover the menu. */
+  .next-card:has(.step-menu:is(:hover, [open])) > .chips { opacity: 0; pointer-events: none; }
 }
-
-/* Side headings: a hairline from the heading to the panel's right edge (look.css removes it); a key in
-   the head follows it. */
-.side .section-head::after { content: ""; order: 1; flex: 1 1 24px; height: 1px; background: var(--margin-line); }
-.side .section-head > .head-action { order: 2; margin-left: 0; }
 
 /* Hover cards (UI-27): the one tooltip is a small dark card. A tooltip of one line stays a label; one of
    several has a header, the main message, and short muted detail lines under it; an exact time ends it
@@ -226,16 +173,14 @@ a:is(.src-github, .src-linear)::before {
 
 /* Lists: the queue, each group's list and the log's list are cards (look.css rounds them). A group's
    heading stands above its list, alone while the group is closed; look.css sets it in the serif. */
-#queue > .list,
-:is(#queue, #work) .group > :is(.list, .closed-list) {
+#work .group > :is(.list, .closed-list) {
   position: relative;
   border-radius: 0;
   box-shadow: var(--shadow-card);
 }
 #work .group > .list { box-shadow: var(--shadow-flat); }
-:is(#queue, #work) .list > .row > .row-head { border-radius: 0; }
-#queue > .list { padding-top: 10px; }
-:is(#queue, #work) .group > summary {
+#work .list > .row > .row-head { border-radius: 0; }
+#work .group > summary {
   height: 20px;
   padding: 2px 11px;
   border-radius: 0;
@@ -248,37 +193,30 @@ a:is(.src-github, .src-linear)::before {
   letter-spacing: 1px;
   text-transform: uppercase;
 }
-:is(#queue, #work) .group > summary { position: relative; z-index: 1; margin-left: 25px; padding-left: 9px; }
-:is(#queue, #work) .group.you > summary { color: var(--lamp-amber); }
-#work .group.agents > summary { color: var(--lamp-blue); }
-:is(#queue, #work) .group:is(.merge, .done) > summary { color: var(--lamp-green); }
-:is(#queue, #work) .group > summary::before,
-:is(#queue, #work) .group > summary .group-count { color: var(--shield-label); }
+#work .group > summary { position: relative; z-index: 1; margin-left: 25px; padding-left: 9px; }
+#work .group.you > summary { color: var(--lamp-amber); }
+#work .group.done > summary { color: var(--lamp-green); }
+#work .group > summary::before,
+#work .group > summary .group-count { color: var(--shield-label); }
 /* Room between a list and the next group's heading. */
-#queue > .list + .group,
-:is(#queue, #work) .group[open] + .group { margin-top: 20px; }
-:is(#queue, #work) .group[open] > :is(.list, .closed-list) { margin-top: -10px; padding-top: 10px; }
+#work .group[open] + .group { margin-top: 20px; }
+#work .group[open] > :is(.list, .closed-list) { margin-top: -10px; padding-top: 10px; }
 @media (hover: hover) and (pointer: fine) {
-  :is(#queue, #work) .group > summary:hover,
-  :is(#patterns, #time, #permissions) > details.more > summary:hover { background: var(--shield-well-hover); }
-  :is(#patterns, #time, #permissions) > details.more > summary:hover { color: var(--shield-text); }
+  #work .group > summary:hover { background: var(--shield-well-hover); }
 }
 /* On a phone a heading that opens a group or a side panel takes a tap 40 px tall. */
 @media (max-width: 640px) {
-  :is(#queue, #work) .group > summary,
-  :is(#patterns, #time, #permissions) > details.more > summary {
+  #work .group > summary {
     height: 40px;
     margin-block: -10px;
     border-block: 10px solid transparent;
     background-clip: padding-box;
     box-shadow: inset 0 1px 0 0 var(--shield-well-top), inset 0 0 0 1px var(--shield-well-rim);
   }
-  :is(#patterns, #time, #permissions) > details.more[open] > summary { margin-bottom: -2px; }
 }
 
 /* A key's icon: 14 px beside its words, 16 px when it is the key's only content (style.css). */
-.button .icon,
-.sweep-summary .icon { width: 14px; height: 14px; }
+.button .icon { width: 14px; height: 14px; }
 /* Beside another icon the chevron's empty margins close up. */
 .button .icon + .icon-chevron { margin: 0 -2px 0 -4px; }
 /* Next up's Reorder key stands among its line's marks (pause, clock, info), so on a desktop its mark is
@@ -291,13 +229,9 @@ a:is(.src-github, .src-linear)::before {
    line. The counts take their own width and the timer stands after the free room. */
 .top-inner .button, .top-inner summary.button { height: 28px; }
 .top-inner .button.icon-only { width: 28px; }
-.top-inner .sweep-summary { height: 28px; }
-/* The key tray's keys: Update is square like Feedback, its lamp in the corner; the chevron's key is
-   narrow. */
+/* The key tray's Feedback key is square. */
 .top-inner .key-tray :is(.button, summary.button) { height: 24px; }
 .top-inner .key-tray .button.icon-only { width: 24px; }
-.top-inner .key-tray .button.update { width: 24px; }
-.top-inner .key-tray .sweep-summary { width: 20px; }
 /* Add is a square amber key with its plus at 16 px, the header's right bookend to the brand key on the left
    (UI-32); its words are in the tooltip. */
 #add { justify-content: center; width: 28px; padding: 0; }
@@ -309,8 +243,6 @@ a:is(.src-github, .src-linear)::before {
   .counts { margin-right: -24px; padding-right: 24px; }
 }
 
-@media (min-width: 1001px) and (max-width: 1279px) {
-}
 @media (max-width: 1000px) {
   .brand-menu { padding-top: calc((var(--header-h) - 36px) / 2); }
 }
@@ -320,12 +252,10 @@ a:is(.src-github, .src-linear)::before {
   .brand { padding: 0; margin-left: 0; }
   .brand-mark { width: 32px; height: 32px; }
   .brand-menu { padding-top: calc((var(--header-h) - 32px) / 2); }
-  .top-inner .button, .top-inner summary.button, .top-inner .sweep-summary { height: 32px; }
+  .top-inner .button, .top-inner summary.button { height: 32px; }
   .top-inner .button.icon-only, #add { justify-content: center; width: 32px; padding: 0; }
   .page-tabs a { height: 32px; }
   .top-inner .key-tray :is(.button, summary.button) { height: 32px; min-width: 0; }
-  .top-inner .key-tray .button.update { width: 28px; }
-  .top-inner .key-tray .sweep-summary { width: 24px; }
   /* The second line is as wide as the first, from the brand key's left edge to Add's right edge: the counts
      and the usage; on Spec, its filters first. */
   .top-inner { column-gap: 0; }
@@ -336,8 +266,8 @@ a:is(.src-github, .src-linear)::before {
 }
 
 /* Readouts keep normal tracking in dark mode too: dark mode's extra tracking is for running text. */
-:where(.row-age, .rank, .stage, .time-chip, .timer-clock, .light-count, .light-age, .section-head .group-count,
-  .feedback-count, .late-mark, .kind .badge) {
+:where(.row-age, .rank, .stage, .time-chip, .timer-clock, .section-head .group-count,
+  .feedback-count, .kind .badge) {
   letter-spacing: normal;
 }
 

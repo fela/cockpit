@@ -35,13 +35,14 @@ import sqlite3
 import tempfile
 import threading
 from collections import Counter
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from statistics import median
 from typing import Any, Literal
 from urllib.parse import urlsplit
 
-from cockpit import config, db, patterns, rank, store
+from cockpit import checker, config, db, patterns, rank, store
 from cockpit.config import user_name
 from cockpit.sessions import Session
 
@@ -1038,11 +1039,30 @@ def own_worktree(tool_name: str, tool_input: dict[str, Any], cwd: str, home: Pat
     path = tool_input.get("path")
     if tool_name != "EnterWorktree" or not isinstance(path, str) or not path.strip():
         return False
-    target = (Path(cwd) / Path(path).expanduser()).resolve()
-    if not target.is_relative_to(home.resolve()):
-        return False
-    repository = target.parent.parent.parent
-    return target.parts[-3:-1] == (".claude", "worktrees") and (repository / ".git").exists()
+    return _worktree_under_home((Path(cwd) / Path(path).expanduser()).resolve(), home)
+
+
+def _worktree_under_home(folder: Path, home: Path) -> bool:
+    """`folder`, a resolved path, is `<repository>/.claude/worktrees/<name>` for a repository under `home`."""
+    repository = folder.parent.parent.parent
+    return (
+        folder.is_relative_to(home.resolve())
+        and folder.parts[-3:-1] == (".claude", "worktrees")
+        and (repository / ".git").exists()
+    )
+
+
+def worktree_of(cwd: str, home: Path) -> Path | None:
+    """The worktree a session works in: the folder `cwd`, or the nearest one above it, that is a worktree of a
+    repository under the user's home folder (`_worktree_under_home`). None when `cwd` lies in no such worktree, or
+    is not a full path written as it is, with no link on the way."""
+    folder = Path(cwd)
+    try:
+        if not folder.is_absolute() or folder.resolve() != folder:
+            return None
+    except (OSError, RuntimeError):  # links that lead back to themselves
+        return None
+    return next((above for above in (folder, *folder.parents) if _worktree_under_home(above, home)), None)
 
 
 def own_scratch(session_id: str, home: Path) -> Path | None:
@@ -1064,32 +1084,53 @@ def own_scratch(session_id: str, home: Path) -> Path | None:
     return None
 
 
-def _entries_within(target: str, base: str | None, scratch: Path) -> bool:
-    """`target`, a word after `rm`, names entries of a folder inside `scratch`: the folder that holds them is `scratch`
-    or below it, so `scratch` itself and what lies beside it are left out. The folder is written as it is, with no
-    link on the way, so it is the same folder for the shell that runs the call. A relative target counts from `base`.
-    `*` and `?` may stand only in the last name, not as `**`, which can match the folder itself, and not in a name
-    with a leading dot, which could match `.` and `..`. An empty name, `.`, `..` and a trailing slash are refused: rm
-    would follow them elsewhere."""
+def _folder_and_name(target: str, base: str | None) -> tuple[Path, str] | None:
+    """The folder that holds `target`, a word after `rm`, and the target's last name. A relative target counts from
+    `base`. None unless the folder is written as it is, with no link on the way and no `*` or `?`, so it is the same
+    folder for the shell that runs the call. An empty name, `.`, `..` and a trailing slash are refused: rm would
+    follow them elsewhere."""
     if not target.startswith("/"):
         if base is None:
-            return False
+            return None
         target = f"{base}/{target}"
     *folders, name = target.split("/")[1:]
     if any(part in ("", ".", "..") for part in (*folders, name)) or any("*" in part or "?" in part for part in folders):
-        return False
-    if "**" in name or (name.startswith(".") and ("*" in name or "?" in name)):
-        return False
+        return None
     folder = Path("/", *folders)
     try:
-        return folder.resolve() == folder and folder.is_relative_to(scratch)
+        return (folder, name) if folder.resolve() == folder else None
     except (OSError, RuntimeError):  # links that lead back to themselves
+        return None
+
+
+def _entries_within(target: str, base: str | None, scratch: Path) -> bool:
+    """`target`, a word after `rm`, names entries of a folder inside `scratch`: the folder that holds them
+    (`_folder_and_name`) is `scratch` or below it, so `scratch` itself and what lies beside it are left out. `*` and
+    `?` may stand only in the last name, not as `**`, which can match the folder itself, and not in a name with a
+    leading dot, which could match `.` and `..`."""
+    held = _folder_and_name(target, base)
+    if held is None:
         return False
+    folder, name = held
+    if "**" in name or (name.startswith(".") and ("*" in name or "?" in name)):
+        return False
+    return folder.is_relative_to(scratch)
 
 
-def _removes_within(words: list[str], base: str | None, scratch: Path) -> bool:
+def _link_within(target: str, base: str | None, worktree: Path) -> bool:
+    """`target`, a word after `rm`, names a link that lies in `worktree`, such as a `.venv` linked from the main
+    checkout: the folder that holds it (`_folder_and_name`) is `worktree` or below it. rm deletes the link and leaves
+    what it leads to. The name has no `*` or `?`, which could match more than the link."""
+    held = _folder_and_name(target, base)
+    if held is None:
+        return False
+    folder, name = held
+    return "*" not in name and "?" not in name and folder.is_relative_to(worktree) and (folder / name).is_symlink()
+
+
+def _removes_own(words: list[str], own: Callable[[str], bool]) -> bool:
     """The words after `rm` are options that only say how to delete (RM_FLAGS, RM_OPTIONS), then at least one target,
-    each inside `scratch` (`_entries_within`). Every word after the first target is a target: rm reads an option
+    each the session's own to delete (`own`). Every word after the first target is a target: rm reads an option
     there as a file's name when POSIXLY_CORRECT is set."""
     targets, options_over = [], False
     for word in words:
@@ -1100,18 +1141,18 @@ def _removes_within(words: list[str], base: str | None, scratch: Path) -> bool:
             options_over = True
         elif word not in RM_OPTIONS and not (len(word) > 1 and set(word[1:]) <= RM_FLAGS):
             return False
-    return bool(targets) and all(_entries_within(target, base, scratch) for target in targets)
+    return bool(targets) and all(own(target) for target in targets)
 
 
-def _only_removes(command: str, scratch: Path) -> bool:
-    """The call is nothing but `rm` commands on full paths inside `scratch`, in plain characters (PLAIN_CALL), joined
-    by `&&`, `;` or line ends. Read strictly, since Cockpit allows such a call by itself: no `cd` and no relative
-    path, so nothing depends on the folder the shell is in."""
+def _only_removes(command: str, own: Callable[[str], bool]) -> bool:
+    """The call is nothing but `rm` commands on targets that are the session's own to delete (`own`), in plain
+    characters (PLAIN_CALL), joined by `&&`, `;` or line ends. Read strictly, since Cockpit allows such a call by
+    itself: no `cd`, so every target lies where it is written."""
     if PLAIN_CALL.fullmatch(command) is None:
         return False
     parts = [part.split() for part in re.split(r"&&|[;\n]", command) if part.strip()]
     return bool(parts) and all(
-        words[0] == "rm" and "&" not in "".join(words) and _removes_within(words[1:], None, scratch) for words in parts
+        words[0] == "rm" and "&" not in "".join(words) and _removes_own(words[1:], own) for words in parts
     )
 
 
@@ -1122,14 +1163,15 @@ def _with_variables(text: str, variables: dict[str, str]) -> str | None:
     return SHELL_VARIABLE.sub(lambda match: variables[match[1] or match[2]], text)
 
 
-def _removes_among(command: str, scratch: Path) -> bool:
-    """The call runs `rm`, and every `rm` in it deletes inside `scratch`, as far as a loose reading tells: it follows
-    plain `NAME=value` assignments, `$CLAUDE_JOB_DIR` and plain `cd` commands, and takes double quotes off. False
-    when an `rm` deletes elsewhere, stands where this reading cannot follow it (a loop body, a subshell, after
-    `xargs` or `sudo`), or uses a variable or folder it cannot work out. Loose is enough: on this reading Cockpit
-    only tells the session to write the deletion plainly (`split_advice`), and never allows the call."""
-    variables = {"CLAUDE_JOB_DIR": str(scratch.parent)}
-    base: str | None = None
+def _removes_among(command: str, cwd: str, variables: dict[str, str], own: Callable[[str, str | None], bool]) -> bool:
+    """The call runs `rm`, and every `rm` in it deletes what is the session's own (`own`, given a target and the
+    folder the shell is in), as far as a loose reading tells: it starts in `cwd` with `variables`, follows plain
+    `NAME=value` assignments and plain `cd` commands, and takes double quotes off. False when an `rm` deletes
+    something else, stands where this reading cannot follow it (a loop body, a subshell, after `xargs` or `sudo`),
+    or uses a variable or folder it cannot work out. Loose is enough: on this reading Cockpit only tells the session
+    to write the deletion plainly (`split_advice`), and never allows the call."""
+    variables = dict(variables)
+    base: str | None = cwd
     removes = False
     for raw in _raw_commands(command):
         unquoted = raw.replace('"', "")
@@ -1145,7 +1187,7 @@ def _removes_among(command: str, scratch: Path) -> bool:
             plain = _with_variables(unquoted, variables)
             words = plain.split()[1:] if plain is not None and PLAIN_WORDS.fullmatch(plain) is not None else None
             if first == "rm":
-                if words is None or not _removes_within(words, base, scratch):
+                if words is None or not _removes_own(words, lambda target, base=base: own(target, base)):
                     return False
                 removes = True
             elif words is not None and len(words) == 1 and words[0].startswith("/"):
@@ -1165,25 +1207,45 @@ def _removes_among(command: str, scratch: Path) -> bool:
     return removes
 
 
-def scratch_removal(command: str, scratch: Path) -> Literal["only", "among"] | None:
-    """What a Bash call deletes, when all of it lies in `scratch`, the asking session's own scratch folder
-    (`own_scratch`): "only" when the call does nothing but delete there (`_only_removes`), "among" when it does
-    more or is written less plainly (`_removes_among`). None when it deletes elsewhere, deletes nothing, or Cockpit
-    cannot tell."""
-    if _only_removes(command, scratch):
+def own_removal(command: str, cwd: str, scratch: Path | None, worktree: Path | None) -> Literal["only", "among"] | None:
+    """What a Bash call made in the folder `cwd` deletes, when all of it is the asking session's own to delete:
+    entries of `scratch`, its scratch folder (`own_scratch`), and links in `worktree`, the worktree it works in
+    (`worktree_of`). Either is None for a session without one. "only" when the call does nothing but delete those
+    (`_only_removes`): a scratch entry by its full path, a link by its full path or its name in `cwd`. "among" when
+    the call does more or is written less plainly (`_removes_among`). None when it deletes something else, deletes
+    nothing, or Cockpit cannot tell."""
+
+    def own(target: str, scratch_base: str | None, link_base: str | None) -> bool:
+        return (scratch is not None and _entries_within(target, scratch_base, scratch)) or (
+            worktree is not None and _link_within(target, link_base, worktree)
+        )
+
+    if _only_removes(command, lambda target: own(target, None, cwd)):
         return "only"
-    return "among" if _removes_among(command, scratch) else None
+    variables = {} if scratch is None else {"CLAUDE_JOB_DIR": str(scratch.parent)}
+    return "among" if _removes_among(command, cwd, variables, lambda target, base: own(target, base, base)) else None
 
 
-def split_advice(scratch: Path) -> str:
-    """What Cockpit tells a session whose call deletes in its scratch folder among other things, or less plainly
-    than Cockpit allows by itself (`scratch_removal`)."""
+def split_advice(scratch: Path | None, worktree: Path | None) -> str:
+    """What Cockpit tells a session whose call deletes what is its own among other things, or less plainly than
+    Cockpit allows by itself (`own_removal`). It names the scratch folder and the worktree the session has."""
+    own, plainly, keep = [], [], ""
+    if scratch is not None:
+        own.append(f"entries of its scratch folder, {scratch}")
+        plainly.append("a scratch entry by its full path, with `*` only in the last name")
+    if worktree is not None:
+        own.append(f"links in its worktree, {worktree}")
+        plainly.append("a link by its name in the current folder or its full path, with no `*` and no slash at the end")
+        keep = (
+            " A link git ignores, such as a `.venv` linked from the main checkout, can also stay where it is: then"
+            " make the call again without its `rm`."
+        )
     return (
-        f"Cockpit did not ask {user_name()} about this call. Cockpit reads its deletions as all in this session's"
-        f" scratch folder, {scratch}, and allows a Bash call by itself when it is nothing but `rm` commands on paths in"
-        " that folder, each written out in full: no variables, quotes, `~` or `cd`, and `*` only in the last name. Run the"
-        " deletion that way as a call of its own, then the rest of this command as another call. This same command"
-        f" made again goes to {user_name()} as a permission card."
+        f"Cockpit did not ask {user_name()} about this call. Cockpit reads its deletions as all this session's own:"
+        f" {' and '.join(own)}. Cockpit allows a Bash call by itself when it is nothing but `rm` commands on those,"
+        f" written plainly, with no variables, quotes, `~` or `cd`: {'; '.join(plainly)}. Run the deletion that way as"
+        f" a call of its own, then the rest of this command as another call.{keep} This same command made again goes"
+        f" to {user_name()} as a permission card."
     )
 
 
@@ -1208,10 +1270,10 @@ def report(
     Cockpit answers some dialogs as it records them, and the waiting hook passes the answer on at once. Allowed:
     entering a worktree of a repository under the user's home folder (`own_worktree`), the call a session makes again
     after the user allowed it from a dialog whose hook had stopped waiting (`allowed_before_restart`), and a Bash call
-    that does nothing but delete in the session's own scratch folder (`scratch_removal`). Denied, with `advice` in
-    the returned request for the session to read: a Bash call that deletes in that folder among other things, which
-    the session can make again as a plain deletion and the rest. The same command made again after that goes to the
-    user.
+    that does nothing but delete what is the session's own: entries of its scratch folder and links in its worktree
+    (`own_removal`). Denied, with `advice` in the returned request for the session to read: a Bash call that deletes
+    those among other things, which the session can make again as a plain deletion and the rest. The same command
+    made again after that goes to the user.
     """
     text = json.dumps(tool_input, sort_keys=True, ensure_ascii=False)
     if len(text) > TOOL_INPUT_MAX:
@@ -1221,8 +1283,10 @@ def report(
     advice = None
     if kind == "asked":
         command = tool_input.get("command")
-        scratch = own_scratch(session_id, home) if tool_name == "Bash" else None
-        removal = scratch_removal(command, scratch) if scratch is not None and isinstance(command, str) else None
+        removal, scratch, worktree = None, None, None
+        if tool_name == "Bash" and isinstance(command, str):
+            scratch, worktree = own_scratch(session_id, home), worktree_of(cwd, home)
+            removal = own_removal(command, cwd, scratch, worktree)
         if own_worktree(tool_name, tool_input, cwd, home):
             answer = ("allowed", f"a worktree of a repository in {user_name()}'s home folder")
         elif (before := allowed_before_restart(conn, session_id, cwd, tool_name, text, now)) is not None:
@@ -1232,18 +1296,18 @@ def report(
                 " then Cockpit restarted the session",
             )
         elif removal == "only":
-            answer = ("allowed", "it only deletes in the session's own scratch folder")
-        elif removal == "among" and scratch is not None and conn.execute(
+            answer = ("allowed", "it only deletes what is the session's own: scratch entries, links in its worktree")
+        elif removal == "among" and conn.execute(
             "SELECT 1 FROM permission_requests WHERE kind = 'asked' AND state = 'denied' AND session_id = ?"
             " AND tool_name = 'Bash' AND json_extract(tool_input, '$.command') = ? LIMIT 1",
             (session_id, command),
         ).fetchone() is None:
             answer = (
                 "denied",
-                "it deletes in the session's own scratch folder among other things; Cockpit told the session to make"
-                " the deletion a call of its own",
+                "it deletes what is the session's own (scratch entries, links in its worktree) among other things;"
+                " Cockpit told the session to make the deletion a call of its own",
             )
-            advice = split_advice(scratch)
+            advice = split_advice(scratch, worktree)
     if answer is not None:
         state, why = answer
         with db.transaction(conn):
@@ -1273,19 +1337,21 @@ def report(
             ).fetchone()
         if existing is not None:
             conn.execute(
-                "UPDATE permission_requests SET count = count + 1, last_at = ?, reason = ?, tool_use_id = ?,"
-                " asked_by = ?, earlier_call = ? WHERE id = ?",
-                (now, reason, tool_use_id, json.dumps(asked_by), json.dumps(earlier), existing["id"]),
+                "UPDATE permission_requests SET count = count + 1, last_at = ?1, reason = ?2, tool_use_id = ?3,"
+                " asked_by = ?4, earlier_call = ?5,"
+                " no_verdict_since = CASE WHEN ?2 != ?7 THEN NULL WHEN reason = ?7 THEN no_verdict_since ELSE ?1 END"
+                " WHERE id = ?6",
+                (now, reason, tool_use_id, json.dumps(asked_by), json.dumps(earlier), existing["id"], checker.NO_VERDICT),
             )
             request_id = existing["id"]
         else:
             cursor = conn.execute(
                 "INSERT INTO permission_requests (kind, state, session_id, cwd, tool_name, tool_input, tool_use_id,"
-                " reason, asked_by, earlier_call, count, created_at, last_at) VALUES (?, 'open', ?, ?, ?, ?, ?, ?, ?, ?,"
-                " 1, ?, ?)",
+                " reason, asked_by, earlier_call, count, created_at, last_at, no_verdict_since) VALUES (?, 'open', ?,"
+                " ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)",
                 (
                     kind, session_id, cwd, tool_name, text, tool_use_id, reason, json.dumps(asked_by),
-                    json.dumps(earlier), now, now,
+                    json.dumps(earlier), now, now, now if reason == checker.NO_VERDICT else None,
                 ),
             )
             request_id = cursor.lastrowid
@@ -1773,15 +1839,31 @@ def open_rows(conn: sqlite3.Connection, now: datetime, dialogs: dict[str, dateti
             ),
         ).fetchall()
     )
+    retries = checker.retries(conn, requests)
     return [
         request
         | {
-            "hook_ended_at": hook_ended_at(request, now), "held": held(request, now), "moved_past": moved_past(request),
-            "settled": request["state"] == "answered",
+            "hook_ended_at": hook_ended_at(request, now), "settled": request["state"] == "answered",
+            **no_verdict_flags(request, now, retries),
         }
         for request in requests
         if request["state"] == "answered" or on_page(conn, request, now, dialogs)
     ]
+
+
+def no_verdict_flags(request: dict[str, Any], now: datetime, retries: dict[int, checker.Retries]) -> dict[str, Any]:
+    """`held` and `moved_past`, and for a refusal where auto mode's checker gave no verdict, `no_verdict` and
+    `asked_again_at`: Cockpit holds it while it asks the session to try again, folds it away once the session got
+    past it, and shows the rest on one card for the outage (SPEC PERM-32)."""
+    if request["id"] not in retries:
+        return {"held": held(request, now), "moved_past": moved_past(request), "no_verdict": False,
+                "asked_again_at": None}
+    tried = retries[request["id"]]
+    asked = tried.asked_again(request)
+    return {
+        "held": tried.waits(request, now), "moved_past": asked or moved_past(request), "no_verdict": True,
+        "asked_again_at": tried.sent_at if asked else None,
+    }
 
 
 def held(request: dict[str, Any], now: datetime) -> bool:
@@ -2404,8 +2486,10 @@ def _check_note(request: dict[str, Any], note: str | None) -> None:
 def _retry_text(request: dict[str, Any], rule: str, list_name: ListName, replaced: str | None) -> str:
     blocked_at = request["last_at"][11:16]
     return (
-        f"The call that auto mode blocked in this session at {blocked_at} UTC is allowed now: {_effect(rule, list_name, replaced)}. Your session"
-        " reloads the rules by itself. Retry the call if you still need it:\n\n"
+        f"{_effect(rule, list_name, replaced)}. Your session reloads the rules by itself. Check whether the saved rule"
+        " covers the call below. Follow normal permission checks before retrying it if you still need it."
+        " Keep separate unanswered permission requests pending.\n\n"
+        f"Call blocked by auto mode at {blocked_at} UTC:\n\n"
         f"{store.defused(call_summary(request['tool_name'], request['tool_input']))}"
     )
 
@@ -2421,11 +2505,11 @@ def allow(
     note: str | None,
     replaces: str | None,
 ) -> tuple[dict[str, Any], dict[str, Any] | None]:
-    """The user allows a reported call; returns the request and, for a denied call, the retry message to send, with
+    """The user answers a reported call; returns the request and, for a denied call, the recheck message to send, with
     the user's `note` when they wrote one. With `replaces`, the rule is that rule of the list changed in place
     (SPEC PERM-11) rather than a new one beside it.
 
-    A denied call runs again under a rule.
+    A denied call gets a saved rule and a message to recheck its coverage through normal permission checks.
     An asked call runs once without a rule, or always with one. A call its session took
     back keeps the rule, and no message goes. `restart` is the session at a dialog its hook
     stopped waiting on: the answer then goes as the message that restarts it (`restart_with_answer`).

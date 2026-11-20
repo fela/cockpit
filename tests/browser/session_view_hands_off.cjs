@@ -105,9 +105,11 @@ async function main() {
       check(`${width}: the box answers the step again`, back && back.hint === HINT, JSON.stringify(back));
       await page.evaluate(() => { const box = document.querySelector("#session-composer textarea"); box.value = ""; box.dispatchEvent(new Event("input", { bubbles: true })); });
 
-      // A second step of the item for the same session, scored above the first (100 against 60): the box keeps answering the step the
-      // card showed when the conversation opened.
-      await agent("POST", "/api/steps", { item_key: key, need: "decide:other", ask: "the other question?", body: "Another step.",
+      // Each item has one open card. A separate concern for the same session scores above the first (100 against 60):
+      // the box keeps answering the viewed item's step when the session has another question elsewhere.
+      const otherKey = `${key}-other`;
+      await agent("PUT", "/api/items", { key: otherKey, title: "Other hand-off question", priority: "urgent", sessions: [SESSION_B] });
+      const { step: otherStep } = await agent("POST", "/api/steps", { item_key: otherKey, need: "decide:other", ask: "the other question?", body: "Another step.",
         reply_hint: "Other step's hint", score: 100, session_id: SESSION_B });
       await page.evaluate(() => refresh());
       await page.waitForTimeout(3000);
@@ -115,6 +117,9 @@ async function main() {
       check(`${width}: with two steps the box keeps answering the one it opened on`, kept === HINT, kept);
       check(`${width}: no page errors`, errors.length === 0, errors.join(" | "));
       await context.close();
+      // The next viewport starts with neither of this run's questions open on the shared fake session.
+      await agent("POST", `/api/steps/${step.id}/withdraw`, {});
+      await agent("POST", `/api/steps/${otherStep.id}/withdraw`, {});
     }
     console.error(`  screenshots in ${work}`);
   } finally {

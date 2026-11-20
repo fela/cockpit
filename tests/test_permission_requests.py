@@ -3,9 +3,12 @@ from __future__ import annotations
 import io
 import json
 import shutil
+import socket
+import time
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -16,6 +19,12 @@ from tests.test_cli import route_cli_to
 
 PUSH = {"command": "git push origin user/x", "description": "Push the branch"}
 HOME = Path("/home/sam")
+
+
+@pytest.fixture(autouse=True)
+def isolated_cli_time(monkeypatch) -> None:
+    """CLI wait callbacks belong to this test; other threads keep the standard clock."""
+    monkeypatch.setattr(cli, "time", SimpleNamespace(monotonic=time.monotonic, sleep=time.sleep))
 
 
 def report(
@@ -107,7 +116,9 @@ def test_allowing_a_denied_call_adds_the_rule_and_tells_the_session_to_retry(wor
     assert message["author"] == "cockpit"
     assert message["session_id"] == SESSION_A
     assert "`Bash(git push origin user/*)`" in message["text"]
-    assert message["text"].endswith("Retry the call if you still need it:\n\ngit push origin user/x")
+    assert "Check whether the saved rule covers the call below" in message["text"]
+    assert "Follow normal permission checks before retrying it if you still need it." in message["text"]
+    assert message["text"].endswith("\n\ngit push origin user/x")
     # The session has no live process in the fixture, so the message went out by resume.
     assert world.runner.calls and "--resume" in world.runner.calls[-1][0]
     assert kinds[-3:] == ["permission.rule_added", "permission.allowed", "message.sent"]
@@ -116,7 +127,7 @@ def test_allowing_a_denied_call_adds_the_rule_and_tells_the_session_to_retry(wor
     assert state(world)["permission_requests"] == []
 
 
-def test_an_auto_mode_sentence_can_allow_a_denied_call(world: World) -> None:
+def test_an_auto_mode_sentence_is_saved_for_a_denied_calls_recheck(world: World) -> None:
     request = report(world, "denied", PUSH)
     sentence = "Pushing to my own user/ branches is fine."
     allowed = answer(world, request["id"], "allow", {"rule": sentence, "list": "auto"}).json()
@@ -127,6 +138,64 @@ def test_an_auto_mode_sentence_can_allow_a_denied_call(world: World) -> None:
     finally:
         conn.close()
     assert f'auto-mode sentence "{sentence}"' in text
+    assert "which the auto-mode check weighs from now on" in text
+    assert "Check whether the saved rule covers the call below" in text
+    assert "is allowed now" not in text
+
+
+@pytest.mark.parametrize(
+    ("list_name", "rule", "effect"),
+    [
+        (
+            "auto", "Sessions may use Cockpit's CLI and API to manage their work.",
+            'added the auto-mode sentence "Sessions may use Cockpit\'s CLI and API to manage their work.",'
+            " which the auto-mode check weighs from now on",
+        ),
+        (
+            "allow", "Bash(cockpit *)",
+            "added `Bash(cockpit *)` to the Claude Code tool rules, so a matching call now runs without the auto-mode check",
+        ),
+    ],
+)
+def test_a_saved_rule_requires_rechecking_a_blocked_browser_call(
+    world: World, list_name: str, rule: str, effect: str
+) -> None:
+    # The browser command is fixture data only; saving a Cockpit rule authorizes no browser execution.
+    browser = {"command": "chromium --headless --no-sandbox https://example.test"}
+    request = report(world, "denied", browser)
+    independent = report(world, "asked", {"command": "example app launch"})
+    response = answer(world, request["id"], "allow", {"rule": rule, "list": list_name})
+    assert response.status_code == 200, response.text
+    saved = response.json()
+    assert (saved["state"], saved["rule"], saved["rule_list"]) == ("allowed", rule, list_name)
+    section = "autoMode" if list_name == "auto" else "permissions"
+    assert json.loads(world.claude_settings.read_text())[section]["allow"][-1] == rule
+    conn = db.connect(world.db_path)
+    try:
+        message = db.row(conn.execute("SELECT * FROM messages WHERE id = ?", (saved["message_id"],)).fetchone())
+        assert permissions.get_request(conn, independent["id"]) == independent
+        assert permissions.allowed_before_restart(
+            conn, SESSION_A, request["cwd"], "Bash", json.dumps(browser, sort_keys=True), db.now_iso()
+        ) is None
+        allowed_events = conn.execute("SELECT data FROM events WHERE kind = 'permission.allowed'").fetchall()
+    finally:
+        conn.close()
+    assert message["author"] == "cockpit"
+    assert message["text"].startswith(f"Sam {effect}.")
+    assert "Check whether the saved rule covers the call below" in message["text"]
+    assert "Follow normal permission checks before retrying it if you still need it." in message["text"]
+    assert "Keep separate unanswered permission requests pending." in message["text"]
+    assert f"Call blocked by auto mode at {request['last_at'][11:16]} UTC:\n\n{browser['command']}" in message["text"]
+    assert message["text"].endswith(f"\n\n{browser['command']}")
+    assert "is allowed now" not in message["text"]
+    assert [json.loads(event["data"])["request_id"] for event in allowed_events] == [request["id"]]
+    denied_again = report(world, "denied", browser)
+    asked_again = report(world, "asked", browser)
+    assert denied_again["id"] != request["id"] and denied_again["state"] == "open"
+    assert asked_again["state"] == "open"
+    assert {entry["id"] for entry in state(world)["permission_requests"]} == {
+        independent["id"], denied_again["id"], asked_again["id"],
+    }
 
 
 def test_a_waiting_dialog_can_run_without_a_rule_or_be_denied(world: World) -> None:
@@ -815,9 +884,9 @@ def transcript_line(*blocks: dict, role: str = "assistant") -> str:
     return json.dumps({"type": role, "message": {"role": role, "content": list(blocks)}}) + "\n"
 
 
-def hook_input(transcript: Path, tool_input: dict) -> str:
+def hook_input(transcript: Path, tool_input: dict, cwd: str) -> str:
     return json.dumps({
-        "session_id": SESSION_A, "transcript_path": str(transcript), "cwd": "/home/sam/dev/app",
+        "session_id": SESSION_A, "transcript_path": str(transcript), "cwd": cwd,
         "permission_mode": "auto", "hook_event_name": "PermissionRequest", "tool_name": "Bash",
         "tool_input": tool_input, "permission_suggestions": [],
     })
@@ -837,7 +906,7 @@ def waiting_hook(world: World, monkeypatch, tmp_path: Path):
     route_cli_to(world, monkeypatch)
     transcript = tmp_path / "transcript.jsonl"
     transcript.write_text(OLDER_PUSH + PUSH_NOW)
-    monkeypatch.setattr(cli.sys, "stdin", io.StringIO(hook_input(transcript, PUSH)))
+    monkeypatch.setattr(cli.sys, "stdin", io.StringIO(hook_input(transcript, PUSH, "/home/sam/dev/app")))
     return transcript
 
 
@@ -878,6 +947,7 @@ def test_ask_ends_quietly_when_the_session_answers_first(world: World, waiting_h
                 file.write(PUSH_NOW_RESULT)
 
     monkeypatch.setattr(cli.time, "sleep", session_answers)
+    assert time.sleep is not session_answers
     assert cli.main(["permission", "ask", "--as", "permission-hook"]) == 0
     assert capsys.readouterr().out == ""
     assert len(rounds) == 2
@@ -1039,6 +1109,48 @@ def test_only_a_worktree_of_a_repository_under_home_is_allowed(tmp_path: Path, t
     assert permissions.own_worktree(tool_name, tool_input, str(home / "dev"), home) is allowed
 
 
+def worktree_with_links(home: Path, outside: Path) -> Path:
+    """A worktree `fix-x` of the repository `home`/dev/app, as a session leaves it: `.venv` linked from the main
+    checkout, a link in the folder `sub`, a link `to_sub` to that folder, and a real folder and file."""
+    app = home / "dev" / "app"
+    worktree = app / ".claude" / "worktrees" / "fix-x"
+    for folder in (app / ".git", app / ".venv" / "bin", worktree / "sub", worktree / "build", outside):
+        folder.mkdir(parents=True)
+    (worktree / ".venv").symlink_to(app / ".venv")
+    (worktree / "sub" / "link").symlink_to(outside)
+    (worktree / "to_sub").symlink_to(worktree / "sub")
+    (worktree / "notes.txt").write_text("kept")
+    (app / "link").symlink_to(outside)
+    return worktree.resolve()
+
+
+@pytest.mark.parametrize(("cwd", "found"), [
+    ("{home}/dev/app/.claude/worktrees/fix-x", "{home}/dev/app/.claude/worktrees/fix-x"),
+    ("{home}/dev/app/.claude/worktrees/fix-x/sub", "{home}/dev/app/.claude/worktrees/fix-x"),
+    ("{home}/dev/app/.claude/worktrees/fix-x/sub/not/there/yet", "{home}/dev/app/.claude/worktrees/fix-x"),
+    # The main checkout, the folder of worktrees, and a folder that only looks like a worktree.
+    ("{home}/dev/app", None),
+    ("{home}/dev/app/.claude/worktrees", None),
+    ("{home}/dev/not-a-repo/.claude/worktrees/fix-x", None),
+    ("{outside}/app/.claude/worktrees/fix-x", None),
+    # A path that reaches the worktree over a link, or counts from another folder.
+    ("{home}/dev/app/.claude/worktrees/fix-x/to_sub", None),
+    ("{home}/linked", None),
+    ("dev/app/.claude/worktrees/fix-x", None),
+    ("{home}/dev/app/.claude/worktrees/fix-x/../fix-x", None),
+    ("", None),
+])
+def test_the_worktree_a_session_works_in(tmp_path: Path, cwd: str, found: str | None) -> None:
+    home, outside = (tmp_path / "home").resolve(), (tmp_path / "outside").resolve()
+    worktree = worktree_with_links(home, outside / "target")
+    (outside / "app" / ".git").mkdir(parents=True)
+    (outside / "app" / ".claude" / "worktrees" / "fix-x").mkdir(parents=True)
+    (home / "dev" / "not-a-repo" / ".claude" / "worktrees" / "fix-x").mkdir(parents=True)
+    (home / "linked").symlink_to(worktree)
+    expected = None if found is None else Path(found.format(home=home))
+    assert permissions.worktree_of(cwd.format(home=home, outside=outside), home) == expected
+
+
 def job_folder(home: Path, folder: str, session_id: str) -> Path:
     """A background session's job folder as Claude Code makes it in the account folder `folder` under `home`; its
     scratch folder `tmp`."""
@@ -1174,15 +1286,105 @@ def test_what_a_call_deletes_in_the_sessions_scratch_folder(tmp_path: Path, comm
     (scratch / "to_shots").symlink_to(scratch / "shots")
     (scratch / "loop").symlink_to(scratch / "loop")
     text = command.format(scratch=scratch, job=scratch.parent, home=home, other=other)
-    assert permissions.scratch_removal(text, scratch) == removal
+    assert permissions.own_removal(text, str(home / "dev"), scratch, None) == removal
 
 
-def scratch_hook(world: World, monkeypatch, home: Path, command: str) -> None:
-    """The CLI wired to the test app, with SESSION_A's dialog on the Bash call `command`; the server's home is `home`."""
+def test_a_scratch_entry_named_from_the_folder_the_call_runs_in_is_sent_back(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    scratch = job_folder(home, ".claude", SESSION_A)
+    assert permissions.own_removal("rm -f a", str(scratch), scratch, None) == "among"
+    assert permissions.own_removal("rm -f tmp/a", str(scratch.parent), scratch, None) == "among"
+    assert permissions.own_removal("rm -f state.json", str(scratch.parent), scratch, None) is None
+    assert permissions.own_removal(f"rm -f {scratch}/a", str(scratch), scratch, None) == "only"
+
+
+@pytest.mark.parametrize(("cwd", "command", "removal"), [
+    # Nothing but `rm` on links in the session's worktree, by name in the current folder or by full path.
+    ("{worktree}", "rm .venv", "only"),
+    ("{worktree}", "rm -f .venv", "only"),
+    ("{worktree}", "rm -rf .venv", "only"),
+    ("{worktree}", "rm {worktree}/.venv", "only"),
+    ("{worktree}", "rm sub/link", "only"),
+    ("{worktree}", "rm to_sub", "only"),
+    ("{worktree}/sub", "rm link", "only"),
+    ("{worktree}/sub", "rm link {worktree}/.venv", "only"),
+    ("{worktree}", "rm .venv && rm sub/link", "only"),
+    ("{worktree}", "rm -f {scratch}/a.png .venv", "only"),
+    ("{home}/dev", "rm -f {scratch}/a.png", "only"),
+    # A link deleted among other commands, or written with quotes or `cd`.
+    ("{worktree}", "rm .venv; git add -A src tests && git commit -q -m x", "among"),
+    ("{worktree}", "rm .venv && ln -s {home}/dev/app/.venv .venv", "among"),
+    ("{worktree}", "rm .venv && uv sync", "among"),
+    (
+        "{worktree}",
+        'grep -rln "pageSize\\|fetchAll" tests --include=*.py | head; rm .venv; git add -A src tests &&'
+        ' git commit -q -m "Show the whole list" && git fetch -q origin && git rebase -q origin/main &&'
+        " git log --oneline -3",
+        "among",
+    ),
+    ("{worktree}", 'rm "{worktree}/.venv"', "among"),
+    ("{worktree}", "cd sub && rm link", "among"),
+    ("{worktree}", "rm -f {scratch}/a.png; rm .venv; ls", "among"),
+    # What is no link: a real folder, a real file, nothing at all.
+    ("{worktree}", "rm -rf build", None),
+    ("{worktree}", "rm notes.txt", None),
+    ("{worktree}", "rm missing", None),
+    ("{worktree}", "rm .venv; rm -rf build", None),
+    ("{worktree}", "rm .venv build", None),
+    # What a link leads to, and a link on the way to the target.
+    ("{worktree}", "rm -rf .venv/", None),
+    ("{worktree}", "rm -rf .venv/bin", None),
+    ("{worktree}", "rm -rf .venv/.", None),
+    ("{worktree}", "rm to_sub/link", None),
+    # `*` and `?` could match more than the link.
+    ("{worktree}", "rm .v*", None),
+    ("{worktree}", "rm .ven?", None),
+    ("{worktree}", "rm -rf *", None),
+    # An option after the first target is a target.
+    ("{worktree}", "rm .venv -rf", None),
+    # Links and folders outside the session's worktree.
+    ("{worktree}", "rm {home}/dev/app/link", None),
+    ("{worktree}", "rm -rf {home}/dev/app/.venv", None),
+    ("{worktree}", "rm ../../../link", None),
+    ("{worktree}", "cd {home}/dev/app; rm link", None),
+    ("{worktree}", "cd ..; rm fix-x/.venv", None),
+    ("{home}/dev/app", "rm link", None),
+    ("{home}/dev", "cd {worktree} && rm .venv && git status", None),
+    ("{home}/dev/app", "rm {worktree}/.venv", None),
+    ("{home}/dev/app/.claude/worktrees/other", "rm {worktree}/.venv", None),
+    ("{home}/dev/app/.claude/worktrees/other", "rm ../fix-x/.venv", None),
+    # A folder the reading cannot follow.
+    ("{worktree}", "cd $(pwd)/sub; rm link", None),
+    ("{worktree}", "(cd sub; rm link)", None),
+    ("{worktree}", "sudo rm .venv", None),
+])
+def test_what_a_call_deletes_of_the_links_in_the_sessions_worktree(
+    tmp_path: Path, cwd: str, command: str, removal: str | None
+) -> None:
+    home, outside = (tmp_path / "home").resolve(), (tmp_path / "outside").resolve()
+    scratch = job_folder(home, ".claude", SESSION_A)
+    worktree = worktree_with_links(home, outside)
+    (home / "dev" / "app" / ".claude" / "worktrees" / "other").mkdir()
+    folder = cwd.format(worktree=worktree, home=home)
+    text = command.format(worktree=worktree, home=home, scratch=scratch)
+    assert permissions.own_removal(text, folder, scratch, permissions.worktree_of(folder, home)) == removal
+
+
+def test_a_session_without_a_scratch_folder_still_deletes_links_in_its_worktree(tmp_path: Path) -> None:
+    home = (tmp_path / "home").resolve()
+    worktree = worktree_with_links(home, tmp_path / "outside")
+    assert permissions.own_removal("rm .venv", str(worktree), None, worktree) == "only"
+    assert permissions.own_removal("rm .venv; git status", str(worktree), None, worktree) == "among"
+    assert permissions.own_removal("rm -f $CLAUDE_JOB_DIR/tmp/a; rm .venv", str(worktree), None, worktree) is None
+
+
+def scratch_hook(world: World, monkeypatch, home: Path, command: str, cwd: str) -> None:
+    """The CLI wired to the test app, with SESSION_A's dialog on the Bash call `command` made in the folder `cwd`; the
+    server's home is `home`."""
     route_cli_to(world, monkeypatch)
     monkeypatch.setattr(Path, "home", lambda: home)
     tool_input = {"command": command, "description": "x"}
-    monkeypatch.setattr(cli.sys, "stdin", io.StringIO(hook_input(Path("/nonexistent"), tool_input)))
+    monkeypatch.setattr(cli.sys, "stdin", io.StringIO(hook_input(Path("/nonexistent"), tool_input, cwd)))
 
 
 def query(world: World, sql: str) -> list[tuple]:
@@ -1200,7 +1402,7 @@ def test_ask_allows_a_call_that_only_deletes_in_the_scratch_folder_at_once(
     world: World, monkeypatch, capsys, tmp_path: Path, claude_accounts
 ) -> None:
     scratch = job_folder(tmp_path / "home", claude_accounts[0].folder.name, SESSION_A)
-    scratch_hook(world, monkeypatch, tmp_path / "home", f"rm -f {scratch}/a.png {scratch}/b.txt")
+    scratch_hook(world, monkeypatch, tmp_path / "home", f"rm -f {scratch}/a.png {scratch}/b.txt", "/home/sam/dev/app")
     monkeypatch.setattr(cli.time, "sleep", lambda seconds: pytest.fail("the hook waited"))
     assert cli.main(["permission", "ask", "--as", "permission-hook"]) == 0
     output = json.loads(capsys.readouterr().out)
@@ -1214,11 +1416,11 @@ def test_ask_sends_a_call_that_deletes_in_the_scratch_folder_among_more_back_at_
     world: World, monkeypatch, capsys, tmp_path: Path, claude_accounts
 ) -> None:
     scratch = job_folder(tmp_path / "home", claude_accounts[0].folder.name, SESSION_A)
-    scratch_hook(world, monkeypatch, tmp_path / "home", f"rm -f {scratch}/a.png && ls {scratch}")
+    scratch_hook(world, monkeypatch, tmp_path / "home", f"rm -f {scratch}/a.png && ls {scratch}", "/home/sam/dev/app")
     monkeypatch.setattr(cli.time, "sleep", lambda seconds: pytest.fail("the hook waited"))
     assert cli.main(["permission", "ask", "--as", "permission-hook"]) == 0
     output = json.loads(capsys.readouterr().out)
-    advice = permissions.split_advice(scratch)
+    advice = permissions.split_advice(scratch, None)
     assert output == {
         "hookSpecificOutput": {"hookEventName": "PermissionRequest", "decision": {"behavior": "deny", "message": advice}}
     }
@@ -1235,7 +1437,7 @@ def test_ask_leaves_the_same_mixed_call_made_again_to_user(
     monkeypatch.setattr(permissions, "ASK_WAIT_SECONDS", 0)
     outputs = []
     for _ in range(2):
-        scratch_hook(world, monkeypatch, tmp_path / "home", f"rm -f {scratch}/a.png && ls {scratch}")
+        scratch_hook(world, monkeypatch, tmp_path / "home", f"rm -f {scratch}/a.png && ls {scratch}", "/home/sam/dev/app")
         assert cli.main(["permission", "ask", "--as", "permission-hook"]) == 0
         outputs.append(capsys.readouterr().out)
     assert json.loads(outputs[0])["hookSpecificOutput"]["decision"]["behavior"] == "deny"
@@ -1254,8 +1456,157 @@ def test_ask_leaves_other_deletions_to_user(
 ) -> None:
     home, folder = tmp_path / "home", claude_accounts[0].folder.name
     scratch = job_folder(home, folder, SESSION_A) if own_job else home / folder / "jobs" / SESSION_A[:8] / "tmp"
-    scratch_hook(world, monkeypatch, home, command.format(scratch=scratch, home=home))
+    scratch_hook(world, monkeypatch, home, command.format(scratch=scratch, home=home), "/home/sam/dev/app")
     monkeypatch.setattr(permissions, "ASK_WAIT_SECONDS", 0)
     assert cli.main(["permission", "ask", "--as", "permission-hook"]) == 0
     assert capsys.readouterr().out == ""
     assert settled_state(world) == "expired"
+
+
+def test_ask_allows_a_call_that_only_deletes_a_link_in_the_worktree_at_once(
+    world: World, monkeypatch, capsys, tmp_path: Path
+) -> None:
+    home = (tmp_path / "home").resolve()
+    worktree = worktree_with_links(home, tmp_path / "outside")
+    scratch_hook(world, monkeypatch, home, "rm .venv", str(worktree))
+    monkeypatch.setattr(cli.time, "sleep", lambda seconds: pytest.fail("the hook waited"))
+    assert cli.main(["permission", "ask", "--as", "permission-hook"]) == 0
+    output = json.loads(capsys.readouterr().out)
+    assert output == {"hookSpecificOutput": {"hookEventName": "PermissionRequest", "decision": {"behavior": "allow"}}}
+    assert settled_state(world) == "allowed"
+    assert state(world)["permission_requests"] == []
+    assert query(world, PERMISSION_EVENTS)[-1] == ("cockpit", "permission.allowed")
+
+
+TIDY_THEN_COMMIT = "rm .venv; git add -A src tests && git commit -q -m x && git fetch -q origin"
+
+
+def test_ask_sends_a_call_that_deletes_a_link_in_the_worktree_among_more_back_once(
+    world: World, monkeypatch, capsys, tmp_path: Path
+) -> None:
+    home = (tmp_path / "home").resolve()
+    worktree = worktree_with_links(home, tmp_path / "outside")
+    monkeypatch.setattr(permissions, "ASK_WAIT_SECONDS", 0)
+    outputs = []
+    for _ in range(2):
+        scratch_hook(world, monkeypatch, home, TIDY_THEN_COMMIT, str(worktree))
+        assert cli.main(["permission", "ask", "--as", "permission-hook"]) == 0
+        outputs.append(capsys.readouterr().out)
+    advice = permissions.split_advice(None, worktree)
+    assert json.loads(outputs[0]) == {
+        "hookSpecificOutput": {"hookEventName": "PermissionRequest", "decision": {"behavior": "deny", "message": advice}}
+    }
+    assert str(worktree) in advice
+    assert "scratch" not in advice
+    assert outputs[1] == ""
+    assert query(world, "SELECT state FROM permission_requests ORDER BY id") == [("denied",), ("expired",)]
+
+
+@pytest.mark.parametrize(("cwd", "command"), [
+    ("{worktree}", "rm -rf build"),
+    ("{worktree}", "rm .venv; rm -rf build"),
+    ("{worktree}", "rm -rf .venv/"),
+    ("{home}/dev/app", "rm link"),
+])
+def test_ask_leaves_other_deletions_in_a_worktree_to_user(
+    world: World, monkeypatch, capsys, tmp_path: Path, cwd: str, command: str
+) -> None:
+    home = (tmp_path / "home").resolve()
+    worktree = worktree_with_links(home, tmp_path / "outside")
+    scratch_hook(world, monkeypatch, home, command, cwd.format(worktree=worktree, home=home))
+    monkeypatch.setattr(permissions, "ASK_WAIT_SECONDS", 0)
+    assert cli.main(["permission", "ask", "--as", "permission-hook"]) == 0
+    assert capsys.readouterr().out == ""
+    assert settled_state(world) == "expired"
+
+
+def test_a_refused_connection_is_told_apart_from_other_failures(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(cli.config, "TOKEN_PATH", tmp_path / "token")
+    with socket.socket() as closed:
+        closed.bind(("127.0.0.1", 0))
+        port = closed.getsockname()[1]
+    monkeypatch.setattr(cli.config, "api_base", lambda: f"http://127.0.0.1:{port}")
+    with pytest.raises(cli.CockpitUnreachable, match="Connection refused"):
+        cli.fetch("POST", "/api/permissions/requests", (b"{}", "application/json"), "permission-hook")
+
+
+def refused_first(monkeypatch, times: int) -> list[str]:
+    """The CLI's requests refused `times` times, as while cockpit.service restarts, then sent on; returns the
+    refused paths."""
+    real_fetch, refused = cli.fetch, []
+
+    def restarting(method: str, path: str, data, name):
+        if len(refused) < times:
+            refused.append(path)
+            raise cli.CockpitUnreachable("Cockpit is not reachable: Connection refused.")
+        return real_fetch(method, path, data, name)
+
+    monkeypatch.setattr(cli, "fetch", restarting)
+    return refused
+
+
+def test_ask_waits_through_a_restart_then_records_the_call(world: World, waiting_hook: Path, monkeypatch, capsys) -> None:
+    refused = refused_first(monkeypatch, 3)
+    sleeps = []
+
+    def user_answers_once_recorded(seconds: float) -> None:
+        sleeps.append(seconds)
+        if state(world)["permission_requests"]:
+            answer(world, state(world)["permission_requests"][0]["id"], "allow", {"rule": None, "list": None})
+
+    monkeypatch.setattr(cli.time, "sleep", user_answers_once_recorded)
+    assert cli.main(["permission", "ask", "--as", "permission-hook"]) == 0
+    printed = capsys.readouterr()
+    assert json.loads(printed.out)["hookSpecificOutput"]["decision"] == {"behavior": "allow"}
+    assert refused == ["/api/permissions/requests"] * 3
+    assert sleeps[:3] == [cli.RESTART_POLL_SECONDS] * 3
+    # One notice for the whole wait, not one per try.
+    assert printed.err.count("trying again") == 1
+
+
+def test_ask_settles_through_a_restart_after_the_session_answers(world: World, waiting_hook: Path, monkeypatch, capsys) -> None:
+    real_fetch, refused = cli.fetch, []
+
+    def restarting_at_settle(method: str, path: str, data, name):
+        if path.endswith("/settle") and len(refused) < 2:
+            refused.append(path)
+            raise cli.CockpitUnreachable("Cockpit is not reachable: Connection refused.")
+        return real_fetch(method, path, data, name)
+
+    monkeypatch.setattr(cli, "fetch", restarting_at_settle)
+    def session_answers(seconds: float) -> None:
+        with waiting_hook.open("a") as file:
+            file.write(PUSH_NOW_RESULT)
+
+    monkeypatch.setattr(cli.time, "sleep", session_answers)
+    assert cli.main(["permission", "ask", "--as", "permission-hook"]) == 0
+    assert len(refused) == 2
+    assert settled_state(world) == "answered"
+
+
+def test_ask_fails_when_cockpit_stays_down(world: World, waiting_hook: Path, monkeypatch, capsys) -> None:
+    refused_first(monkeypatch, 1000)
+    monkeypatch.setattr(cli, "RESTART_WAIT_SECONDS", 0)
+    assert cli.main(["permission", "ask", "--as", "permission-hook"]) == 1
+    assert "Connection refused" in capsys.readouterr().err
+    assert state(world)["permission_requests"] == []
+
+
+def test_report_waits_through_a_restart_then_records_the_denial(world: World, monkeypatch) -> None:
+    route_cli_to(world, monkeypatch)
+    refused = refused_first(monkeypatch, 2)
+    monkeypatch.setattr(cli.time, "sleep", lambda seconds: None)
+    payload = {
+        "session_id": SESSION_A, "transcript_path": "/nonexistent", "cwd": "/home/sam", "hook_event_name": "PermissionDenied",
+        "tool_name": "Bash", "tool_input": {"command": "rm -rf build", "description": "Clean"},
+        "tool_use_id": "toolu_9", "reason": "deletes files",
+    }
+    monkeypatch.setattr(cli.sys, "stdin", io.StringIO(json.dumps(payload)))
+    assert cli.main(["permission", "report", "--as", "permission-hook"]) == 0
+    assert refused == ["/api/permissions/requests"] * 2
+    assert [request["tool_use_id"] for request in state(world)["permission_requests"]] == ["toolu_9"]
+
+
+def test_report_retries_within_its_hook_timeout() -> None:
+    # The PermissionDenied hook runs with a 10 s timeout in the session's settings.
+    assert cli.REPORT_RESTART_WAIT_SECONDS + cli.RESTART_POLL_SECONDS <= 10

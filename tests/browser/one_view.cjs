@@ -1,23 +1,16 @@
-// One view (SPEC VIEW-18) with Matters most (SPEC VIEW-17). Puts a list of three items that wait on someone other than
-// the user and hands one step to an agent, then checks, at desktop and phone width:
-// - the queue holds only the user's own groups: no Agents on it and no In progress there;
-// - the work beyond the queue continues its list: no heading, no line about it, no rule, and its first group sits as
-//   close to the queue as the queue's own groups sit to each other;
-// - no group repeats the queue: there is no Waiting for you group, and no item with a step on Next up, in the queue,
-//   Ready next or Snoozed also has a row below, also when its step is a result to read;
-// - only the group whose name does not say what it holds (No one) has a line under its heading, and Finished this week
-//   is the last group, with no Closed group beside it (VIEW-20);
-// - Matters most is the first group below the queue, with each item's title and the sweep's line, in the order put; a
-//   long line wraps instead of being cut off;
-// - You handed these shows the handed step at the top of its item's group; its arrow key opens the item's row;
-// - every item shows once, a handed step's item too;
-// - every group's heading count matches the tasks it shows when open;
-// - the Sessions tab scrolls down to the list of work on the same page, which holds the sessions too;
-// - opening an item from elsewhere (a status light, the Pinned list) opens its row under Matters most, and opening one
-//   that waits for the user opens its step, whose card folds in the task's controls and sessions;
-// - an old item link (#board/item/N) opens the item on Cockpit too;
-// - an empty list hides Matters most, and its items go back to their groups.
-// Saves a screenshot of the work below the queue per width in the work dir.
+// One view (SPEC VIEW-18): every item shows once in the list on the left, in its first group. Puts five steps for the
+// user, three items that wait on someone other than the user, and a step handed to an agent, then checks, at desktop
+// and phone width:
+// - Inbox is the first group, Finished this week the last, and there is no Waiting for you group;
+// - every item shows once, a handed step's item too, and an item with a step in Inbox, Ready next or Snoozed shows as
+//   that step;
+// - the handed step shows in its item's group, Busy or Waiting;
+// - every group's heading count matches the rows it shows when open;
+// - opening an item that waits for the user shows its step on the card, whose Task details fold holds the task's
+//   controls and where it stands;
+// - an old item link (#board/item/N) opens the item on Cockpit too, and leaves the address once followed, so a reload
+//   after the user moved on to another task shows that task (regression check).
+// Saves a screenshot of the list per width in the work dir.
 //
 // Starts serve_preview.py (this checkout's Cockpit on a synthetic database; README.md says what it needs) and
 // drives a headless Chromium. Prints one line per check and exits 1 when one failed.
@@ -38,11 +31,6 @@ const { chromium } = require(PLAYWRIGHT);
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-const LINES = [
-  "review-bot checks the reminder change",
-  "Alex is checking whether shared lists keep their reminder dates when exported",
-  "Ana chooses a default reminder time for shared lists",
-];
 const SESSION_B = "22222222-2222-4222-8222-222222222222";
 const AGENT = { authorization: `Bearer ${"t".repeat(40)}`, "x-cockpit-as": "one-view", "content-type": "application/json" };
 
@@ -74,7 +62,7 @@ async function main() {
       await call(AGENT, "PUT", "/api/items", { key, title: `One view: yours ${n}`, stage: "review", summary: `Waits for your look at part ${n}` });
       await call(AGENT, "POST", "/api/steps", { item_key: key, need: "decide", ask: `One view: decide part ${n}?`, score: 100 - n, session_id: SESSION_B });
     }
-    // Three items in progress that wait on someone other than the user, for Matters most.
+    // Three items in progress that wait on someone other than the user, in Waiting.
     const waiting = [];
     for (const [n, who] of ["review-bot", "Alex", "Alex"].entries()) {
       const key = `note:one-view-waiting-${run}-${n}`;
@@ -83,9 +71,6 @@ async function main() {
     }
     const state = await call(headers, "GET", "/api/state");
     const picked = waiting.map((key) => state.items.find((item) => item.key === key));
-    const put = (entries) => fetch(`${info.origin}/api/in-progress`, { method: "PUT", headers, body: JSON.stringify({ entries }) });
-    const stored = await put(picked.map((item, index) => ({ item_id: item.id, line: LINES[index] })));
-    check("the list is stored", stored.ok, `HTTP ${stored.status}: ${await stored.text()}`);
     // A step the user hands to an agent.
     const handedKey = `note:one-view-${Date.now()}`;
     const handedItem = await call(AGENT, "PUT", "/api/items", { key: handedKey, title: "One view: handed", stage: "building", sessions: [SESSION_B] });
@@ -100,120 +85,64 @@ async function main() {
       page.setDefaultTimeout(5000);
       const errors = [];
       page.on("pageerror", (error) => errors.push(error.message));
-      await page.goto(`${info.origin}/classic`);
-      const group = page.locator("#work details.group.in-progress");
-      await group.locator(".row").first().waitFor();
+      await page.goto(`${info.origin}/`);
+      await page.locator("#sidebar li.side-item[data-item]").first().waitFor({ state: "attached", timeout: 20e3 });
 
-      const seen = await page.evaluate((handedItemId) => {
-        const group = document.querySelector("#work details.group.in-progress");
-        const groups = [...document.querySelectorAll("#work details.group")];
-        const handed = document.querySelector("#work .with-agents");
-        const rows = [...document.querySelectorAll("#work .row[data-item]")].map((row) => Number(row.dataset.item));
-        const work = document.getElementById("work");
-        const queue = document.getElementById("queue");
-        const queueGroups = [...queue.querySelectorAll(":scope > details.group")];
-        // Items with a step on Next up, in the queue, Ready next or Snoozed: they show as that step.
-        const stepItems = new Set([...ui.state.queue, ...ui.state.ready_next, ...ui.state.snoozed].map((step) => step.item_id));
+      // Every group opened, with Inbox's ready-next steps shown too.
+      await page.evaluate(() => { for (const each of document.querySelectorAll("#sidebar details.sidebar-group")) each.open = true; });
+      const more = page.locator("#sidebar .sidebar-more .side-row");
+      if (await more.count() && (await more.getAttribute("aria-expanded")) === "false") await more.evaluate((el) => el.click());
+      await page.waitForFunction(() => !document.querySelector("#sidebar .sidebar-more .side-row[aria-expanded='false']"));
+
+      const seen = await page.evaluate((handedStepId) => {
+        const groups = [...document.querySelectorAll("#sidebar details.sidebar-group")];
+        const keyOf = (group) => [...group.classList].find((cls) => cls !== "sidebar-group");
+        const ids = [...document.querySelectorAll("#sidebar li[data-item]")].map((row) => Number(row.dataset.item));
+        // The steps the list shows as their item's row.
+        const steps = [...ui.state.queue, ...ui.state.ready_next, ...ui.state.snoozed].filter((step) => !step.left);
+        const handed = document.querySelector(`#sidebar li[data-step="${handedStepId}"]`);
         return {
-          queueGroups: queueGroups.map((each) => each.className),
-          heading: [...work.querySelectorAll(":scope > .section-head, :scope > .group-caption, :scope > h2")].map((el) => el.textContent),
-          rule: getComputedStyle(work).borderTopStyle,
-          // The list starts with its Sort, Group and New session row (VIEW-21).
-          gap: Math.round(work.firstElementChild.getBoundingClientRect().top - queue.getBoundingClientRect().bottom),
-          queueGap: queueGroups.length > 1 ? Math.round(queueGroups[1].getBoundingClientRect().top - queueGroups[0].getBoundingClientRect().bottom) : null,
-          youGroup: document.querySelectorAll("details.group.you").length,
-          repeated: rows.filter((id) => stepItems.has(id)),
-          lastGroup: groups.at(-1).className,
-          closed: document.querySelectorAll("details.group.closed").length,
-          captioned: groups.filter((each) => each.querySelector(":scope > .group-caption")?.textContent).map((each) => each.className),
-          first: groups[0] === group,
-          head: [group.querySelector(".group-name").firstChild.textContent, group.querySelector(".group-count").textContent].join(" "),
-          entries: [...group.querySelectorAll(":scope > .list > .row")].map((row) => ({
-            id: Number(row.dataset.item), title: row.querySelector(".row-title").textContent, line: row.querySelector(".row-sub").textContent,
+          groups: groups.map(keyOf),
+          twice: ids.filter((id, at) => ids.indexOf(id) !== at),
+          notAsStep: steps.filter((step) => !document.querySelector(`#sidebar li[data-item="${step.item_id}"][data-step="${step.id}"]`)).map((step) => step.id),
+          handed: handed ? { item: Number(handed.dataset.item), group: keyOf(handed.closest("details.sidebar-group")) } : null,
+          counts: groups.map((group) => ({
+            group: keyOf(group),
+            count: Number(group.querySelector(":scope > summary .group-count").textContent),
+            shown: group.querySelectorAll(":scope > ul > li:not(.sidebar-sub):not(.sidebar-more)").length,
           })),
-          handedShown: Boolean(handed && handed.querySelector(`li[data-step]`) && handed.querySelector(".handed-head").textContent.startsWith("You handed these")),
-          handedRow: rows.includes(handedItemId),
-          twice: rows.filter((id, at) => rows.indexOf(id) !== at),
         };
-      }, handedItem.id);
-      check(`${width} px: the queue holds only the user's groups`,
-        seen.queueGroups.every((cls) => !/with-agents|in-progress/.test(cls)), JSON.stringify(seen.queueGroups));
-      check(`${width} px: no heading or line sets the work below the queue apart`, seen.heading.length === 0 && seen.rule === "none", JSON.stringify([seen.heading, seen.rule]));
-      check(`${width} px: the list below starts as close to the queue as the queue's groups to each other`,
-        seen.queueGap !== null && Math.abs(seen.gap - seen.queueGap) <= 4, JSON.stringify([seen.gap, seen.queueGap]));
-      check(`${width} px: there is no Waiting for you group`, seen.youGroup === 0, String(seen.youGroup));
-      check(`${width} px: no item with a step in the queue, Ready next or Snoozed has a row below`, seen.repeated.length === 0, JSON.stringify(seen.repeated));
-      check(`${width} px: Finished this week is the last group, and there is no Closed group`, /\bdone\b/.test(seen.lastGroup) && seen.closed === 0, JSON.stringify([seen.lastGroup, seen.closed]));
-      check(`${width} px: only the No one group has a line under its heading`, seen.captioned.every((cls) => /\bnobody\b/.test(cls)), JSON.stringify(seen.captioned));
-      check(`${width} px: Matters most is the first group below the queue`, seen.first, "another group first");
-      check(`${width} px: it is headed Matters most 3`, seen.head === "Matters most 3", seen.head);
-      const expected = picked.map((item, index) => ({ id: item.id, title: item.title, line: LINES[index] }));
-      check(`${width} px: titles and lines show in the order put`, JSON.stringify(seen.entries) === JSON.stringify(expected),
-        JSON.stringify(seen.entries));
-      check(`${width} px: the handed step shows under You handed these`, seen.handedShown, "not there");
-      check(`${width} px: the handed step's item has its own row`, seen.handedRow, "no row for it");
+      }, handedStep.id);
+      check(`${width} px: Inbox is the first group`, seen.groups[0] === "queue", JSON.stringify(seen.groups));
+      check(`${width} px: Finished this week is the last group`, seen.groups.at(-1) === "done", JSON.stringify(seen.groups));
+      check(`${width} px: there is no Waiting for you group`, !seen.groups.includes("you"), JSON.stringify(seen.groups));
       check(`${width} px: every item shows once`, seen.twice.length === 0, JSON.stringify(seen.twice));
-      const long = group.locator(".row").nth(1).locator(".row-sub");
-      const wraps = await long.evaluate((el) => ({ cut: el.scrollWidth > el.clientWidth + 1 || el.scrollHeight > el.clientHeight + 1 }));
-      check(`${width} px: a long line is not cut off`, !wraps.cut, JSON.stringify(wraps));
+      check(`${width} px: an item with a step in Inbox, Ready next or Snoozed shows as that step`, seen.notAsStep.length === 0, JSON.stringify(seen.notAsStep));
+      check(`${width} px: the handed step shows in its item's group`,
+        seen.handed && seen.handed.item === handedItem.id && ["busy", "waiting"].includes(seen.handed.group), JSON.stringify(seen.handed));
+      const off = seen.counts.filter((entry) => entry.count !== entry.shown);
+      check(`${width} px: each of ${seen.counts.length} groups shows as many rows as its count`, seen.counts.length >= 3 && off.length === 0, JSON.stringify(off));
 
-      // Every group opened: its heading count is the rows under it.
-      const counts = await page.evaluate(async () => {
-        const groups = [...document.querySelectorAll("#queue details.group, #work details.group")];
-        for (const each of groups) each.open = true;
-        await new Promise((resolve) => setTimeout(resolve, 50));
-        return groups.map((each) => {
-          const rows = each.querySelectorAll(":scope > .list > [data-step], :scope > .list > [data-item], :scope > ul > li:not(.more-row), :scope > .with-agents > ul > li");
-          // A group that lists only its newest names the rest on its "Show N more" button. Finished this week counts
-          // its tasks; the closed steps folded at its end have their own count.
-          const more = Number((each.querySelector(":scope > ul > li.more-row")?.textContent.match(/Show (\d+) more/) || [0, 0])[1]);
-          const shown = [...rows].filter((row) => row.getBoundingClientRect().height > 0).length + more;
-          return { group: each.className, count: Number(each.querySelector(".group-count").textContent), shown };
-        });
-      });
-      const off = counts.filter((entry) => entry.count !== entry.shown);
-      check(`${width} px: each of ${counts.length} groups shows as many rows as its count`, counts.length >= 3 && off.length === 0, JSON.stringify(off));
-      await page.reload();
-      await group.locator(".row").first().waitFor();
-
-      const views = await page.evaluate(() => ({ work: getComputedStyle(document.getElementById("work")).display }));
-      check(`${width} px: the work shows on Cockpit`, views.work !== "none", JSON.stringify(views));
-      const shot = path.join(work, `work-${width}.png`);
-      await page.locator("#work").screenshot({ path: shot });
+      // The list is the phone's list screen.
+      if (width <= 1000) await page.locator(".phone-bar .phone-back").click();
+      const shot = path.join(work, `list-${width}.png`);
+      await page.locator("#sidebar").screenshot({ path: shot });
       console.error(`  screenshot ${shot}`);
 
-      // The handed step's arrow key opens its item.
-      // A handed step shows in its item's group: Busy, or Waiting once its agent stopped (VIEW-27).
-      await page.evaluate(() => { for (const g of document.querySelectorAll("#work details.group.busy, #work details.group.waiting")) g.open = true; });
-      await page.locator(`#work .with-agents li[data-step="${handedStep.id}"] .handed-open`).click();
-      const handedOpen = await waitFor(() => page.evaluate((id) => !!document.querySelector(`#work .row.open[data-item="${id}"]`), handedItem.id), (now) => now);
-      check(`${width} px: the handed step's arrow key opens its item`, handedOpen, "not opened");
-
-      // A status light or the Pinned list opens the item through openInWork with the item's own group.
-      await page.evaluate(() => { document.querySelector("#work details.group.in-progress").open = false; });
-      await page.evaluate(([id, group]) => window.openInWork(id, group), [picked[0].id, picked[0].group]);
-      const opened = await waitFor(() => page.evaluate((id) => ({
-        open: !!document.querySelector(`#work details.group.in-progress[open] .row.open[data-item="${id}"]`),
-      }), picked[0].id), (now) => now.open);
-      check(`${width} px: opening an item from elsewhere opens its row under Matters most`, opened.open, JSON.stringify(opened));
-
-      // An item that waits for the user opens as its step: Next up's card, or its row in the queue or Ready next,
-      // opened, with Task details folded into the card.
+      // An item that waits for the user shows as its step on the card, with Task details in the card's menu (VIEW-29),
+      // which draws the fold open.
       const mine = await page.evaluate(() => {
-        const step = [...ui.state.queue, ...ui.state.ready_next].find((one) => !ui.next || one.item_id !== ui.next.item_id);
+        const step = [...ui.state.queue, ...ui.state.ready_next].find((one) => one.ask === "One view: decide part 3?");
         return step && { item: step.item_id, step: step.id };
       });
-      if (!mine) throw new Error("the fixture database has no step past Next up; the check needs one");
-      const stepShown = await page.evaluate(async (id) => {
-        const shown = await window.openInWork(id, "you");
-        return shown ? { step: Number(shown.dataset.step), open: shown.classList.contains("open") } : null;
-      }, mine.item);
-      check(`${width} px: opening an item that waits for you opens its step`, stepShown && stepShown.step === mine.step && stepShown.open, JSON.stringify(stepShown));
-      // Task details is an entry of the card's ⋯ menu (VIEW-29), which draws the fold open.
-      const card = page.locator(`#queue .row[data-step="${mine.step}"]`);
+      if (!mine) throw new Error("the run's third step is not in Inbox or Ready next; the check needs it");
+      await page.locator(`#sidebar li[data-step="${mine.step}"] .side-row`).click();
+      const card = page.locator(`#next [data-step="${mine.step}"]`).first();
+      await card.waitFor();
+      check(`${width} px: opening an item that waits for you shows its step on the card`, await card.isVisible(), "not shown");
       await card.locator(".step-menu > summary").click();
       await card.locator(".step-menu").getByRole("menuitem", { name: "Task details" }).click();
-      const fold = page.locator(`#queue .row[data-step="${mine.step}"] .task-details`);
+      const fold = card.locator(".task-details");
       await fold.waitFor();
       const task = await fold.evaluate((el, id) => {
         const item = ui.state.items.find((one) => one.id === id);
@@ -221,7 +150,7 @@ async function main() {
         return {
           pin: !!el.querySelector(".item-controls .pin-key"), stage: !!el.querySelector(".item-controls .stage-menu"),
           close: !!el.querySelector(".close-item"),
-          // Where it stands, as the row showed it: the stage chip (naming the review), the summary, the latest status.
+          // Where it stands: the stage chip (naming the review), the summary, the latest status.
           stands: !!el.querySelector(".task-stands .chip"),
           note: !note || (el.querySelector(".item-note")?.textContent === note),
           status: !item.agent_summary || (el.querySelector(".item-status")?.textContent || "").includes(item.agent_summary),
@@ -230,46 +159,44 @@ async function main() {
       check(`${width} px: the step's card folds in the task's pin and stage, and no second Close`, task.pin && task.stage && !task.close, JSON.stringify(task));
       check(`${width} px: the step's card folds in where the task stands`, task.stands && task.note && task.status, JSON.stringify(task));
 
-      // Sessions is the list of work lower on the same page (VIEW-3): its tab scrolls down to it and reads as
-      // current there. The list rises to just under the header, or as far as the page's end lets it.
-      await page.locator(".page-tabs a[data-view='sessions']").click();
-      const board = await waitFor(() => page.evaluate(() => {
-        const header = document.querySelector("header").getBoundingClientRect().bottom;
-        const top = document.getElementById("work").getBoundingClientRect().top;
-        const atEnd = window.scrollY + window.innerHeight >= document.documentElement.scrollHeight - 2;
-        return {
-          hash: location.hash, top: Math.round(top), header: Math.round(header), atEnd,
-          work: getComputedStyle(document.getElementById("work")).display,
-          current: document.querySelector(".page-tabs [aria-current]")?.dataset.view,
-          sessionsPanel: !!document.getElementById("sessions"),
-        };
-      }), (now) => (now.top < now.header + 40 || now.atEnd) && now.current === "sessions");
-      check(`${width} px: the Sessions tab scrolls down to the list of work on the same page`,
-        board.hash === "#sessions" && (board.top < board.header + 40 || board.atEnd) && board.work !== "none" && board.current === "sessions" && !board.sessionsPanel,
-        JSON.stringify(board));
-
-      await page.goto(`${info.origin}/classic#board/item/${picked[2].id}`);
+      await page.goto(`${info.origin}/#board/item/${picked[2].id}`);
       const linked = await waitFor(() => page.evaluate((id) => ({
-        open: !!document.querySelector(`#work .row.open[data-item="${id}"]`),
-      }), picked[2].id), (now) => now.open);
-      check(`${width} px: an old #board/item link opens the item on Cockpit`, linked.open, JSON.stringify(linked));
+        picked: !!document.querySelector(`#sidebar li.side-item.sel[data-item="${id}"]`), shown: ui.shownItem,
+      }), picked[2].id), (now) => now.picked);
+      check(`${width} px: an old #board/item link opens the item on Cockpit`, linked.picked && linked.shown === picked[2].id, JSON.stringify(linked));
+      check(`${width} px: the link's task route leaves the address once followed`, new URL(page.url()).hash === "", page.url());
+      // The user moves on to another task, then reloads (Reload after a deploy): the page shows that task, not the one
+      // the link once named (regression check).
+      if (width <= 1000) await page.locator(".phone-bar .phone-back").click();
+      await page.locator(`#sidebar li[data-step="${mine.step}"] .side-row`).click();
+      await page.locator(`#next [data-step="${mine.step}"]`).first().waitFor();
+      await page.reload({ timeout: 20e3 });
+      await page.waitForFunction(() => ui.state && ui.shownItem, null, { timeout: 20e3 });
+      await sleep(1500);
+      const reloaded = await page.evaluate(() => ui.shownItem);
+      check(`${width} px: a reload after moving on shows the task moved to, not the linked one`, reloaded === mine.item, JSON.stringify({ reloaded, linked: picked[2].id, mine: mine.item }));
+      if (width <= 1000) {
+        // A phone that opens the link in a new tab puts the list's entry before the task's. Back reaches the list, and
+        // no entry keeps the link's address, so Back does not follow the link again (regression check).
+        const fresh = await context.newPage();
+        fresh.setDefaultTimeout(5000);
+        fresh.on("pageerror", (error) => errors.push(error.message));
+        await fresh.goto(`${info.origin}/#home/item/${picked[2].id}`, { timeout: 20e3 });
+        await fresh.waitForFunction((id) => ui.shownItem === id && !location.hash, picked[2].id, { timeout: 20e3 });
+        // Back steps through the task's entry, then the item screen's, to the list's. An entry that kept the link's
+        // address would bring it back as a hashchange, which the page then follows again.
+        await fresh.evaluate(() => { window.replayed = []; addEventListener("hashchange", (event) => replayed.push(new URL(event.newURL).hash)); });
+        for (let step = 0; step < 2; step += 1) {
+          await fresh.goBack();
+          await sleep(500);
+        }
+        const back = await fresh.evaluate(() => ({ replayed, list: document.body.classList.contains("phone-list") }));
+        check(`${width} px: Back from a link opened in a new tab reaches the list without the link's address`, back.replayed.length === 0 && back.list, JSON.stringify(back));
+        await fresh.close();
+      }
       check(`${width} px: no page errors`, errors.length === 0, errors.join(" | "));
       await context.close();
     }
-
-    const cleared = await put([]);
-    const context = await browser.newContext({ viewport: { width: 1280, height: 900 } });
-    await context.setExtraHTTPHeaders({ cookie: headers.cookie });
-    const page = await context.newPage();
-    await page.goto(`${info.origin}/classic`);
-    await page.locator("#work details.group").first().waitFor();
-    await sleep(500);
-    const after = await page.evaluate((ids) => ({
-      groups: document.querySelectorAll("#work details.group.in-progress").length,
-      back: ids.every((id) => document.querySelector(`#work .row[data-item="${id}"]`)),
-    }), picked.map((item) => item.id));
-    check("an empty list hides Matters most, and its items go back to their groups", cleared.ok && after.groups === 0 && after.back, JSON.stringify(after));
-    await context.close();
   } finally {
     if (browser) await browser.close();
     server.kill();

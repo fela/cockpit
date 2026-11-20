@@ -15,7 +15,7 @@ from html import escape as html_escape
 from pathlib import Path
 from typing import Any
 
-from cockpit import accounts, auth, config, db, github, history, parts, patterns, projects, rank, timesheet
+from cockpit import accounts, auth, config, db, github, history, parts, patterns, projects, rank, spend, timesheet
 from cockpit.config import user_name
 from cockpit.failures import failure_reason
 from cockpit.render import (
@@ -457,7 +457,8 @@ def upsert_item(conn: sqlite3.Connection, fields: dict[str, Any], actor: str) ->
     SPEC STATE-5); `finish_how` says which close asked. An agent's move to stage done of an item whose PR merged closes it with
     no finish step (`_merged_pull`, SPEC CONTROL-15): the response names the PR in `merged`, and the user's next
     step shows a line on it (`merged_closes`). So does an agent's move to stage done, with a note, of a to-do the
-    user added as fire and forget (SPEC CONTROL-24): the response's `alone` is true. `pinned` is
+    user added as fire and forget (SPEC CONTROL-24) or of a recurring item (CONTROL-33): the response's `alone` is
+    true. `pinned` is
     the user's alone (SPEC CONTROL-13): it sets `pinned_at`, which keeps the time of the
     first pin while the item stays pinned.
     """
@@ -493,6 +494,8 @@ def upsert_item(conn: sqlite3.Connection, fields: dict[str, Any], actor: str) ->
         closing = bool(changes.get("archived")) or changes.get("stage") == "done"
         finishes = None
         alone = False
+        # Which exception an agent's close with no finish step used, kept on its event (`merged_closes`).
+        alone_recurring = False
         if actor != "user":
             # What the agent's close would have done: the user decides it on the finish step. A task the user
             # already finished (stage done) or closed asks nothing more, and keeps its stage: a close that also
@@ -512,15 +515,19 @@ def upsert_item(conn: sqlite3.Connection, fields: dict[str, Any], actor: str) ->
                 finishes = None
             else:
                 merged = None
-                # A fire-and-forget to-do's session closes it itself (SPEC CONTROL-24), on the terms a merge does.
+                # A fire-and-forget to-do's session closes it itself (SPEC CONTROL-24), and so does the session of
+                # a schedule's latest run's own item when the run has nothing to report (CONTROL-33), on the terms a
+                # merge does. A recurring item that several runs share stays open for the next run.
                 if (
-                    finishes == "complete" and existing is not None and existing["fire_and_forget"]
-                    and _merge_closes(conn, existing)
+                    finishes == "complete" and existing is not None
+                    and (existing["fire_and_forget"] or _schedule_run(conn, existing)) and _merge_closes(conn, existing)
                 ):
                     if not note.strip():
-                        raise Invalid(FORGOTTEN_NOTE.format(user=user_name()))
+                        what = "to-do is fire and forget" if existing["fire_and_forget"] else "item is a recurring run"
+                        raise Invalid(FORGOTTEN_NOTE.format(what=what, user=user_name()))
                     finishes = None
                     alone = True
+                    alone_recurring = not existing["fire_and_forget"]
             if finishes is not None:
                 _require_finish_step(conn, existing)
             if changes.get("archived"):
@@ -580,7 +587,9 @@ def upsert_item(conn: sqlite3.Connection, fields: dict[str, Any], actor: str) ->
         if merged is not None:
             _close_by_agent(conn, item_id, "item.merged", {"pull": merged, "note": note}, actor, note, now)
         elif alone:
-            _close_by_agent(conn, item_id, "item.finished_alone", {"note": note}, actor, note, now)
+            # The event keeps which exception the close used, so a later edit of the item's flags does not relabel it.
+            data = {"note": note, "recurring": alone_recurring}
+            _close_by_agent(conn, item_id, "item.finished_alone", data, actor, note, now)
         item = get_item(conn, item_id)
         if finishes is None and actor.startswith("agent:") and not untended and _shipped_untended(conn, item, None):
             what = f"This put leaves new item {item['key']}" if existing is None else f"This put leaves item {item_id}"
@@ -629,17 +638,35 @@ def upsert_item(conn: sqlite3.Connection, fields: dict[str, Any], actor: str) ->
 NO_FINISH_STEP = (
     "{first} a step with need {need}, with what {user} asked and when, what was done and how it was"
     " checked, what is left and who has it, and a closing answer. That step asks {user} to close the task, and the"
-    " item keeps the stage its work is in. A close put is needed only for a merged PR, which closes its item with no"
-    " finish step when GitHub confirms the merge and no other step is open on the item."
+    " item keeps the stage its work is in. A close put closes an item with no finish step only while no other step"
+    " is open on it, and only for a merged PR once GitHub confirms the merge, a to-do {user} added as fire and forget,"
+    " or a scheduled run's own recurring item when the run has nothing to report; the last two need a note. An item"
+    " that several runs share stays open, so the next run can put its step."
 )
+
+
+# The start of the key of the item `schedules.start_run` makes for each run; only the scheduler makes one.
+SCHEDULE_RUN_KEY = "note:schedule-"
+
+
+def _schedule_run(conn: sqlite3.Connection, item: dict[str, Any]) -> bool:
+    """Whether the item is the one `schedules.start_run` made for a schedule's latest run.
+
+    The scheduler alone writes `last_item_id`, so an item an agent made, or a run's item once the next run has
+    started, does not count.
+    """
+    return bool(item["recurring"]) and conn.execute(
+        "SELECT 1 FROM schedules WHERE last_item_id = ?", (item["id"],),
+    ).fetchone() is not None
 
 
 # The events of an agent's close that asks no finish step (`_close_by_agent`), as an SQL list.
 AGENT_CLOSES = "('item.merged', 'item.finished_alone')"
 
-# Why an agent's close of a fire-and-forget to-do without a note is refused (SPEC CONTROL-24).
+# Why an agent's close of a fire-and-forget to-do (SPEC CONTROL-24) or a recurring item (CONTROL-33) without a note
+# is refused.
 FORGOTTEN_NOTE = (
-    "This to-do is fire and forget: a put with stage done closes it with no finish step, and {user} reads only its"
+    "This {what}: a put with stage done closes it with no finish step, and {user} reads only its"
     ' note, in one line on their next step. Add a "note" saying what was done and where it is.'
 )
 
@@ -779,7 +806,8 @@ def _close_by_agent(
     conn: sqlite3.Connection, item_id: int, kind: str, data: dict[str, Any], actor: str, note: str, now: str
 ) -> None:
     """Record an agent's close that asks no finish step: an `item.merged` event for an item whose PR merged (SPEC
-    CONTROL-15), an `item.finished_alone` event for a fire-and-forget to-do (CONTROL-24). Also a closure, which the
+    CONTROL-15), an `item.finished_alone` event for a fire-and-forget to-do (CONTROL-24) or a recurring item
+    (CONTROL-33). Also a closure, which the
     item's row in Finished this week names (`how_done`); the user's next step names the event (`merged_closes`). Its
     finish steps close as done."""
     _record_closure(conn, "item", item_id, item_id, "stage done", actor, now, note)
@@ -1119,7 +1147,7 @@ def add_item(
             conn.execute("UPDATE items SET summary = ? WHERE id = ?", (summary + attached, item_id))
         patterns.record(conn, "item.added", "user", item_id, None, None, {})
         item: dict[str, Any] = _on_board(get_item(conn, item_id), {}, set(), set(), set(), set(), set(), {}, untriaged_ids(conn), {}, {}) | {"step_sessions": [], "stalled_since": None, "ended": None}
-        item |= work_group(item, {}, {}, False, "", datetime.now(UTC))
+        item |= work_group(item, {}, {}, False, "", datetime.now(UTC), None, True)
         item["activity"] = "Agent starting"
         refs = mention_refs(conn)
         item |= {"summary_html": mentions_html(item["summary"], refs), "agent_summary_html": mentions_html(item["agent_summary"], refs)}
@@ -1291,19 +1319,20 @@ def _with_attachments(conn: sqlite3.Connection, items: list[dict[str, Any]]) -> 
     pages: dict[int, list[dict[str, Any]]] = {item["id"]: [] for item in items}
     marks = ", ".join("?" for _ in images)
     for image in conn.execute(
-        f"SELECT {IMAGE_FIELDS} FROM item_images WHERE item_id IN ({marks}) ORDER BY id", list(images)
+        f"SELECT {IMAGE_FIELDS} FROM item_images WHERE item_id IN ({marks}) ORDER BY item_id, id", list(images)
     ).fetchall():
         images[image["item_id"]].append(
             {key: image[key] for key in ("id", "content_type", "size", "created_at", "added_by")}
         )
     for page in conn.execute(
-        f"SELECT {PAGE_FIELDS} FROM item_pages WHERE item_id IN ({marks}) ORDER BY id", list(pages)
+        f"SELECT {PAGE_FIELDS} FROM item_pages WHERE item_id IN ({marks}) ORDER BY item_id, id", list(pages)
     ).fetchall():
         pages[page["item_id"]].append(
             {key: page[key] for key in ("id", "title", "size", "created_at", "updated_at", "added_by")}
         )
-    merges = item_merges(conn, list(images))
-    changes = step_changes(conn, list(images))
+    acted = _last_user_acts(conn, list(images))
+    merges = item_merges(conn, list(images), acted)
+    changes = step_changes(conn, list(images), acted)
     mentioned = _mentioned_links(conn, list(images))
     return [
         item | {
@@ -2180,21 +2209,37 @@ def merge_item(conn: sqlite3.Connection, side_ref: int | str, main_ref: int | st
     }
 
 
-def item_merges(conn: sqlite3.Connection, item_ids: list[int]) -> dict[int, list[dict[str, Any]]]:
+def _last_user_acts(conn: sqlite3.Connection, item_ids: list[int]) -> dict[int, str]:
+    """When the user last wrote or pressed on each of these items: their latest message on the item or one of its
+    steps, or their latest press answering one of its steps (`_USER_PRESSES`). Items they never acted on are left out."""
+    marks = ", ".join("?" for _ in item_ids)
+    presses = ", ".join("?" for _ in _USER_PRESSES)
+    return dict(conn.execute(
+        "SELECT item_id, MAX(at) FROM ("
+        f" SELECT item_id, created_at AS at FROM messages WHERE author = 'user' AND item_id IN ({marks})"
+        " UNION ALL SELECT s.item_id, g.created_at FROM messages g JOIN steps s ON s.id = g.step_id"
+        f" WHERE g.author = 'user' AND s.item_id IN ({marks})"
+        f" UNION ALL SELECT item_id, at FROM events WHERE actor = 'user' AND item_id IN ({marks}) AND kind IN ({presses})"
+        ") GROUP BY item_id",
+        (*item_ids, *item_ids, *item_ids, *_USER_PRESSES),
+    ).fetchall())
+
+
+def item_merges(
+    conn: sqlite3.Connection, item_ids: list[int], acted: dict[int, str]
+) -> dict[int, list[dict[str, Any]]]:
     """Each item's merges the user has not acted on since (SPEC NEXT-55): the page shows them as a banner on the
-    item's card until the user's next message or press on the item. Oldest first."""
+    item's card until the user's next message or press on the item. `acted` is `_last_user_acts` for these items.
+    Oldest first."""
     if not item_ids:
         return {}
     marks = ", ".join("?" for _ in item_ids)
     found: dict[int, list[dict[str, Any]]] = {}
     for merge in db.rows(conn.execute(
-        f"SELECT m.* FROM item_merges m WHERE m.item_id IN ({marks}) AND NOT EXISTS ("
-        " SELECT 1 FROM messages g LEFT JOIN steps s ON s.id = g.step_id WHERE g.author = 'user'"
-        " AND (g.item_id = m.item_id OR s.item_id = m.item_id) AND g.created_at > m.at"
-        ") AND NOT EXISTS (SELECT 1 FROM events e WHERE e.actor = 'user' AND e.item_id = m.item_id AND e.at > m.at"
-        " AND e.kind IN ('step.ran', 'step.allowed', 'step.done', 'step.dismiss')) ORDER BY m.at, m.id",
-        item_ids,
+        f"SELECT m.* FROM item_merges m WHERE m.item_id IN ({marks}) ORDER BY m.at, m.id", item_ids,
     ).fetchall()):
+        if acted.get(merge["item_id"], "") > merge["at"]:
+            continue
         found.setdefault(merge["item_id"], []).append(
             {key: merge[key] for key in ("id", "from_item_id", "from_key", "from_title", "moved_steps", "note", "actor", "at")}
         )
@@ -2230,34 +2275,30 @@ def _read_time(conn: sqlite3.Connection, step_id: int, start: str, end: str) -> 
     return seconds, last
 
 
-def step_changes(conn: sqlite3.Connection, item_ids: list[int]) -> dict[int, list[dict[str, Any]]]:
+def step_changes(
+    conn: sqlite3.Connection, item_ids: list[int], acted: dict[int, str]
+) -> dict[int, list[dict[str, Any]]]:
     """Each item's agent rewrites of its open steps that the user read before (SPEC NEXT-61), which the user has not
     read, nor acted on, since: the page shows them as a band on the step's card until the user's next message or
     press on the item, as for a merge (`item_merges`), or until the user's timer ran LOOK_SECONDS on the rewritten
     card. A rewrite counts what the user read only since their last message or press on the item before it; under
     LOOK_SECONDS is a glance and shows no band. Each change has `read_seconds`, that reading time, and `read_until`,
-    when it stopped. Oldest first."""
+    when it stopped. `acted` is `_last_user_acts` for these items. Oldest first."""
     if not item_ids:
         return {}
     marks = ", ".join("?" for _ in item_ids)
-    presses = ", ".join("?" for _ in _USER_PRESSES)
     found: dict[int, list[dict[str, Any]]] = {}
     now = db.now_iso()
     for change in db.rows(conn.execute(
-        "SELECT c.*, s.item_id, (SELECT MAX(at) FROM ("
-        "  SELECT g.created_at AS at FROM messages g LEFT JOIN steps gs ON gs.id = g.step_id WHERE g.author = 'user'"
-        "  AND (g.item_id = s.item_id OR gs.item_id = s.item_id) AND g.created_at <= c.at"
-        f" UNION ALL SELECT e.at FROM events e WHERE e.actor = 'user' AND e.item_id = s.item_id AND e.kind IN ({presses})"
-        "  AND e.at <= c.at)) AS acted_at"
-        " FROM step_changes c JOIN steps s ON s.id = c.step_id"
-        f" WHERE s.item_id IN ({marks}) AND s.status = 'open' AND s.withdrawn_at IS NULL AND NOT EXISTS ("
-        " SELECT 1 FROM messages g LEFT JOIN steps gs ON gs.id = g.step_id WHERE g.author = 'user'"
-        " AND (g.item_id = s.item_id OR gs.item_id = s.item_id) AND g.created_at > c.at"
-        ") AND NOT EXISTS (SELECT 1 FROM events e WHERE e.actor = 'user' AND e.item_id = s.item_id AND e.at > c.at"
-        f" AND e.kind IN ({presses})) ORDER BY c.at, c.id",
-        (*_USER_PRESSES, *item_ids, *_USER_PRESSES),
+        "SELECT c.*, s.item_id FROM step_changes c JOIN steps s ON s.id = c.step_id"
+        f" WHERE s.item_id IN ({marks}) AND s.status = 'open' AND s.withdrawn_at IS NULL ORDER BY c.at, c.id",
+        item_ids,
     ).fetchall()):
-        read_seconds, read_until = _read_time(conn, change["step_id"], change["acted_at"] or "", change["at"])
+        # A change the user acted on since is gone; otherwise their last act on the item came before it.
+        acted_at = acted.get(change["item_id"], "")
+        if acted_at > change["at"]:
+            continue
+        read_seconds, read_until = _read_time(conn, change["step_id"], acted_at, change["at"])
         if read_seconds < LOOK_SECONDS or _read_time(conn, change["step_id"], change["at"], now)[0] >= LOOK_SECONDS:
             continue
         found.setdefault(change["item_id"], []).append(
@@ -2698,6 +2739,28 @@ def _apply_held(conn: sqlite3.Connection, change: dict[str, Any]) -> bool:
     return True
 
 
+TIMER_PAGE_PRESS = re.compile(r"t-([0-9a-f]{32})-([1-9][0-9]{0,8})-([1-9][0-9]{0,18})")
+
+
+def _timer_page_press(press: str | None, step_id: int) -> tuple[str, int] | None:
+    found = TIMER_PAGE_PRESS.fullmatch(press or "")
+    if found is None or found[3] != str(step_id):
+        return None
+    return found[1], int(found[2])
+
+
+def _remember_timer_press(conn: sqlite3.Connection, page_press: tuple[str, int]) -> bool:
+    page, sequence = page_press
+    now = datetime.now(UTC)
+    conn.execute("DELETE FROM timer_page_presses WHERE at < ?", (_iso(now - timedelta(days=1)),))
+    return bool(conn.execute(
+        "INSERT INTO timer_page_presses (page, sequence, at) VALUES (?, ?, ?)"
+        " ON CONFLICT (page) DO UPDATE SET sequence = excluded.sequence, at = excluded.at"
+        " WHERE excluded.sequence > timer_page_presses.sequence",
+        (page, sequence, _iso(now)),
+    ).rowcount)
+
+
 def start_timer(conn: sqlite3.Connection, step_id: int, press: str | None) -> dict[str, Any]:
     """Start the timer on an open step the user holds; one running on another step stops (`switch`),
     and what agents did to that step meanwhile applies. `press`: the page's id for the press, kept on the span
@@ -2706,26 +2769,31 @@ def start_timer(conn: sqlite3.Connection, step_id: int, press: str | None) -> di
     action record let through (the first try failed after its span began, applying held changes) finds the span
     by its press and does nothing either.
 
-    Returns {"started": False} when the step's timer already runs or the press began a span before.
+    Returns {"started": False} when the step's timer already runs, the press began a span before, or a newer
+    start or a pause from the same page took its place.
     """
     with db.transaction(conn):
         step = get_step(conn, step_id)
-        if (reason := _untimeable(conn, step)) is not None:
-            raise Conflict(reason)
-        if running_step(conn) == step_id:
-            return {"started": False}
-        if press is not None and conn.execute("SELECT 1 FROM time_spans WHERE start_press = ?", (press,)).fetchone():
-            return {"started": False}
-        now = db.now_iso()
-        conn.execute("UPDATE time_spans SET ended_at = ?, ended_by = 'switch' WHERE ended_at IS NULL", (now,))
-        conn.execute(
-            "INSERT INTO time_spans (step_id, started_at, start_press) VALUES (?, ?, ?)", (step_id, now, press)
-        )
-        # A start anywhere answers the question after a stop for no activity, as Return would (`_away`). It counts
-        # as the user's input, so a stop a page worked out before it, for the span it ended, is refused (`stop_away`).
-        db.kv_set(conn, "away", None)
-        count = _count_input(conn)
-        patterns.mark_seen(conn, step["item_id"], now, False)
+        page_press = _timer_page_press(press, step_id)
+        superseded = page_press is not None and not _remember_timer_press(conn, page_press)
+        reason = _untimeable(conn, step)
+        if reason is None:
+            if superseded or running_step(conn) == step_id:
+                return {"started": False}
+            if press is not None and conn.execute("SELECT 1 FROM time_spans WHERE start_press = ?", (press,)).fetchone():
+                return {"started": False}
+            now = db.now_iso()
+            conn.execute("UPDATE time_spans SET ended_at = ?, ended_by = 'switch' WHERE ended_at IS NULL", (now,))
+            conn.execute(
+                "INSERT INTO time_spans (step_id, started_at, start_press) VALUES (?, ?, ?)", (step_id, now, press)
+            )
+            # A start anywhere answers the question after a stop for no activity, as Return would (`_away`). It counts
+            # as the user's input, so a stop a page worked out before it, for the span it ended, is refused (`stop_away`).
+            db.kv_set(conn, "away", None)
+            count = _count_input(conn)
+            patterns.mark_seen(conn, step["item_id"], now, False)
+    if reason is not None:
+        raise Conflict(reason)
     release_held(conn)
     return {"started": True, "input_count": count}
 
@@ -2765,12 +2833,15 @@ def pause_timer_at(
     paused and started the timer again then), the earlier one is the one that ran, and the later one runs on.
     `start_press`: the id of the page's start of the step that came just before this pause, or None. The span that
     start began at or after the press (both pressed while the page had no connection) ends where it started, also
-    when the start's answer never came back. A repeat after a lost answer is the page's action, which Cockpit
-    answers once (actions.py).
+    when the start's answer never came back. If the named start has not arrived yet, the pause cancels it without
+    creating a span. A repeat after a lost answer is the page's action, which Cockpit answers once (actions.py).
     """
     with db.transaction(conn):
         get_step(conn, step_id)
         at = _iso(min(pressed, datetime.now(UTC)))
+        page_press = _timer_page_press(start_press, step_id)
+        if page_press is not None:
+            _remember_timer_press(conn, page_press)
         span = conn.execute(
             "SELECT id, ended_at, started_at AS stop FROM time_spans WHERE step_id = ? AND start_press = ?"
             " AND started_at >= ?",
@@ -2778,11 +2849,17 @@ def pause_timer_at(
         ).fetchone()
         if span is None:
             span = conn.execute(
-                "SELECT id, ended_at, ? AS stop FROM time_spans WHERE step_id = ? AND started_at <= ?"
+                "SELECT id, ended_at, start_press, ? AS stop FROM time_spans WHERE step_id = ? AND started_at <= ?"
                 " AND (ended_at IS NULL OR ended_at >= ?) ORDER BY started_at, id LIMIT 1",
                 (at, step_id, at, at),
             ).fetchone()
+            if span is not None and page_press is not None:
+                found = _timer_page_press(span["start_press"], step_id)
+                if found is not None and found[0] == page_press[0] and found[1] > page_press[1]:
+                    span = None
         if span is None:
+            if page_press is not None:
+                return {"paused": False}
             raise Conflict(f"no timer ran on step {step_id} when the pause was pressed")
         if span["ended_at"] is None or span["ended_at"] > span["stop"]:
             conn.execute("UPDATE time_spans SET ended_at = ?, ended_by = 'pause' WHERE id = ?", (span["stop"], span["id"]))
@@ -2897,6 +2974,27 @@ def _away(conn: sqlite3.Connection) -> dict[str, Any] | None:
         "since": away["since"],
         "seconds": sum(length for _, length in _item_spans(conn, item["id"], now)),
     }
+
+
+def _running_timer(conn: sqlite3.Connection, timers: dict[int, dict[str, Any]]) -> dict[str, Any] | None:
+    """The running timer for the header, from `_timers`: its step and item, and the item's time before this span."""
+    running = next(((step_id, timer) for step_id, timer in timers.items() if timer["started_at"]), None)
+    if running is None:
+        return None
+    step_id, timer = running
+    return {
+        "step_id": step_id,
+        "item_id": timer["item_id"],
+        "item_title": get_item(conn, timer["item_id"])["title"],
+        "started_at": timer["started_at"],
+        "seconds": sum(each["seconds"] for each in timers.values() if each["item_id"] == timer["item_id"]),
+    }
+
+
+def timer_check(conn: sqlite3.Connection) -> dict[str, Any]:
+    """The state's `timer`, `input` and `away` alone, in a fraction of the state's time: a page back after a stretch
+    without activity asks about it at once, rather than after the whole state came (SPEC TRACK-5)."""
+    return {"timer": _running_timer(conn, _timers(conn)), "input": _input(conn), "away": _away(conn)}
 
 
 def _drop_away(conn: sqlite3.Connection, item_id: int) -> None:
@@ -3567,7 +3665,7 @@ def hand_off_step(
 
 def release_message(conn: sqlite3.Connection, message_id: int) -> bool:
     """End a hand-off's wait for Take back (SPEC MSG-8). True when the message is now free to go; false when
-    it no longer waited for Take back: the user took the step back, or it was released or sent now before. From
+    it no longer waited for Take back: the user took the step back, or it was released before. From
     the release on it waits for its turn (`waits_since`), so a later prompt checked before it goes still waits
     behind it (`delivery._older_waits`)."""
     get_message(conn, message_id)
@@ -3748,15 +3846,16 @@ def archive_session(
 ) -> dict[str, Any] | None:
     """Record the user's archive of the session, inside the caller's transaction. `told` is a message the
     session gets anyway that says so (a closing answer, SPEC CONTROL-15): Cockpit stops the session once its
-    turn on that message is over, and returns None. Otherwise a running session, or a stopped one whose turn
-    did not end done (it still shows in `claude agents`), gets Cockpit's message with `text`: returns it,
-    queued to wait for the session's turn. A stopped session whose turn ended done is archived as it is.
-    Returns None then, and when an archive of the session is already pending."""
+    turn on that message is over, and returns None. Otherwise a running session gets Cockpit's message with
+    `text`: returns it, queued to wait for the session's turn. A stopped session is archived as it is, without
+    a message that would restart it and reread its conversation (SPEC SESSION-28); the sweep's check of
+    archives finds a stopped session whose work was left unfinished. Returns None then, and when an archive of
+    the session is already pending."""
     if pending_archive(conn, session.session_id) is not None:
         return None
     now = db.now_iso()
     message = None
-    if told is None and (session.alive or session.state != "done"):
+    if told is None and session.alive:
         message = cockpit_prompt(conn, session.session_id, step["id"], text, checkouts_dir)
     waits_on = told or message
     conn.execute(
@@ -4277,14 +4376,35 @@ def session_starts(conn: sqlite3.Connection, session_ids: set[str]) -> dict[str,
     }
 
 
+def session_tasks(conn: sqlite3.Connection, session_ids: set[str]) -> dict[str, int]:
+    """The item each session works on now, by session id: of the items that list the session, the one whose message
+    reached it last. A message still waiting, taken back or failed has not reached it. A session no item lists has
+    none."""
+    marks = ",".join("?" * len(session_ids))
+    return dict(conn.execute(
+        "SELECT sent.session_id, sent.item_id FROM"
+        " (SELECT session_id, item_id, MAX(sent_at) AS last, MAX(id) AS newest FROM messages"
+        f" WHERE state = 'sent' AND item_id IS NOT NULL AND session_id IN ({marks}) GROUP BY session_id, item_id) sent"
+        " JOIN items ON items.id = sent.item_id"
+        " WHERE EXISTS (SELECT 1 FROM json_each(items.sessions) WHERE value = sent.session_id)"
+        " ORDER BY sent.last, sent.newest",
+        sorted(session_ids),
+    ).fetchall())
+
+
 def shown_session_names(conn: sqlite3.Connection, sessions: list[Session]) -> dict[str, str]:
-    """Each session's name as the page and `cockpit get` show it, by session id (SPEC SESSION-3): a session Cockpit
-    started on an item, still under the name Cockpit gave it, goes by the item's title now, cut as at the start. A
-    to-do's session starts under the user's whole first words, the title the to-do has then, and `claude agents` keeps
-    that name; once an agent gives the item its short title, the session shows that. A session renamed since keeps
-    its own name. Only for showing: checks such as which session is the sweep go by `Session.name`."""
+    """Each session's name as the page and `cockpit get` show it, by session id (SPEC SESSION-3, SESSION-26): a
+    session Cockpit started on an item, still under the name Cockpit gave it, goes by the title of the item it works
+    on now, cut as at the start. That is the item whose message reached it last among the items that list it, and the item
+    it started on while none lists it. A to-do's session starts under the user's whole first words, the title the
+    to-do has then, and `claude agents` keeps that name; once an agent gives the item its short title, the session
+    shows that. A session renamed since keeps its own name. Only for showing: checks such as which session is the
+    sweep go by `Session.name`."""
     starts = session_starts(conn, {session.session_id for session in sessions}) if sessions else {}
-    item_ids = sorted({start["item_id"] for start in starts.values() if start["item_id"] is not None})
+    tasks = session_tasks(conn, set(starts)) if starts else {}
+    for session_id, start in starts.items():
+        tasks.setdefault(session_id, start["item_id"])
+    item_ids = sorted({item_id for item_id in tasks.values() if item_id is not None})
     titles = dict(conn.execute(
         f"SELECT id, title FROM items WHERE id IN ({','.join('?' * len(item_ids))})", item_ids
     ).fetchall()) if item_ids else {}
@@ -4293,7 +4413,7 @@ def shown_session_names(conn: sqlite3.Connection, sessions: list[Session]) -> di
         start = starts.get(session.session_id)
         if start is None:
             return session.name
-        title = titles.get(start["item_id"])
+        title = titles.get(tasks[session.session_id])
         if not title or not start["new_name"] or session.name != start["new_name"]:
             return session.name
         return title[:NEW_SESSION_NAME_CHARS]
@@ -4664,8 +4784,13 @@ def create_message(
     fork_of = target.get("fork_of")
     provider = target.get("provider")
     chosen = {key: target.get(key) for key in START_OPTION_KEYS}
-    if (provider is not None or any(chosen.values())) and (new_cwd is None or fork_of is not None):
-        raise Invalid("provider, model, effort, account and speed are only set when starting a new session, not a fork")
+    selected = provider is not None or any(chosen.values())
+    if selected and fork_of is not None:
+        raise Invalid("a fork keeps its source session's options")
+    if selected and new_cwd is None and author != "user":
+        raise Invalid("only the user chooses a session's next model and effort")
+    if new_cwd is None and chosen["account"] is not None:
+        raise Invalid("change an existing Claude account with Move to account")
     if fork_of is not None and new_cwd is None:
         raise Invalid("a fork starts in the folder of the session it forks")
     new_name = None
@@ -4687,7 +4812,6 @@ def create_message(
             provider, chosen, dropped = still_offered(stored["provider"], {key: stored.get(key) for key in START_OPTION_KEYS})
             if dropped:
                 log.error("item %s's picks from Add no longer offered start at the defaults: %s", item_id, ", ".join(dropped))
-    provider, new_options = start_options(provider, chosen)
     if session_id is None and new_cwd is None:
         if item_id is None:
             raise Invalid("pick where the message goes: an item, a session, or a new session")
@@ -4703,6 +4827,13 @@ def create_message(
         new_name = title[:NEW_SESSION_NAME_CHARS]
     if item_id is not None:
         get_item(conn, item_id)
+    if session_id is not None:
+        from cockpit.handovers import destination
+
+        session_id = destination(conn, session_id)
+    if selected and new_cwd is None and provider is None:
+        provider = "codex" if conn.execute("SELECT 1 FROM codex_threads WHERE session_id = ?", (session_id,)).fetchone() else "claude"
+    provider, new_options = start_options(provider, chosen)
     cursor = conn.execute(
         "INSERT INTO messages (author, item_id, step_id, step_ask, step_version, session_id, new_cwd, new_name, text,"
         " state, created_at, as_prompt, provider, new_options, fork_of) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?)",
@@ -4716,13 +4847,27 @@ def create_message(
     return get_message(conn, cursor.lastrowid)  # ty: ignore[invalid-argument-type]
 
 
+def chosen_models(conn: sqlite3.Connection) -> dict[str, spend.ModelChoices]:
+    """The models deliberately chosen for each session, latest choice first (SPEC SESSION-20). Only delivered
+    choices count; an unsent request has not changed the session. A new session's implicit choice is MAIN_MODEL."""
+    chosen: dict[str, spend.ModelChoices] = {}
+    # `+state` keeps SQLite off the messages_state index: nearly every message is sent, so reading the table newest
+    # first beats reading most of the index and sorting.
+    for session_id, model, via in conn.execute(
+        "SELECT session_id, COALESCE(json_extract(new_options, '$.model'), ?), via FROM messages WHERE +state = 'sent'"
+        " AND (via = 'new' OR json_extract(new_options, '$.model') IS NOT NULL)"
+        " AND session_id IS NOT NULL ORDER BY id DESC", (config.MAIN_MODEL,)
+    ):
+        selection = chosen.setdefault(session_id, spend.ModelChoices(models=[], launched=False))
+        selection.launched |= via == "new"
+        if model not in selection.models:
+            selection.models.append(model)
+    return chosen
+
+
 def started_models(conn: sqlite3.Connection) -> dict[str, str]:
-    """The model each session Cockpit started was started on, by session id: the one the user picked (SPEC
-    SESSION-22), else config.MAIN_MODEL. The wrong-model warning counts it as the session's intended model (SESSION-20)."""
-    return dict(conn.execute(
-        "SELECT session_id, COALESCE(json_extract(new_options, '$.model'), ?) FROM messages WHERE via = 'new'"
-        " AND session_id IS NOT NULL", (config.MAIN_MODEL,)
-    ).fetchall())
+    """Each session's latest delivered model choice, or its launch model before any switch (SPEC SESSION-22)."""
+    return {session_id: selection.models[0] for session_id, selection in chosen_models(conn).items()}
 
 
 def wrong_model_investigation(row: dict[str, Any], name: str) -> str:
@@ -4874,6 +5019,19 @@ def snooze_reads(conn: sqlite3.Connection, now: datetime) -> dict[str, dict[str,
             if datetime.fromisoformat(entry["at"]) > now - SNOOZE_READ_KEPT}
 
 
+SNOOZE_READ_CUT = "Cockpit restarted before it read the time"
+
+
+def interrupt_snooze_reads(conn: sqlite3.Connection, now: datetime) -> int:
+    """At startup: the reads a restart cut off, which no process will finish, end unread, so each target wakes with
+    SNOOZE_READ_CUT on its card in place of waking at the stand-in time while its row still says Reading. The number
+    of reads ended."""
+    cut = [(target, entry["id"]) for target, entry in snooze_reads(conn, now).items() if entry["status"] == "reading"]
+    for target, read_id in cut:
+        settle_snooze_read(conn, target, read_id, None, SNOOZE_READ_CUT, now)
+    return len(cut)
+
+
 def forget_snooze_read(conn: sqlite3.Connection, target: str, now: datetime) -> None:
     """The user acted on `target` again: how its words were read no longer applies. Reads past SNOOZE_READ_KEPT go
     too."""
@@ -4888,16 +5046,25 @@ WARNINGS_HANDED_KEY = "warnings_handed"
 
 def hand_warning(conn: sqlite3.Connection, key: str, item_id: int) -> None:
     """The user's message on a warning (SPEC UI-82) hands the warning, by its key, to the to-do the message made: it
-    stays out of Inbox while that to-do is open (handed_warnings). Hand-offs whose to-do closed are dropped."""
+    stays out of Inbox until that to-do ships or closes (handed_warnings). Hand-offs whose to-do closed are dropped."""
     with db.transaction(conn):
         handed = handed_warnings(conn)
         db.kv_set(conn, WARNINGS_HANDED_KEY, handed | {key: item_id})
 
 
+def unhand_warning(conn: sqlite3.Connection, key: str) -> None:
+    """Gives the warning handed under `key` (hand_warning) back to Inbox."""
+    with db.transaction(conn):
+        handed: dict[str, int] = db.kv_get(conn, WARNINGS_HANDED_KEY)
+        del handed[key]
+        db.kv_set(conn, WARNINGS_HANDED_KEY, handed)
+
+
 def handed_warnings(conn: sqlite3.Connection) -> dict[str, int]:
     """The warnings handed to a to-do that is still open (hand_warning), each key with that to-do's id. A to-do merged
-    into another hands its warnings on to the item it joined. A warning whose to-do is done or archived is left out,
-    so it comes back to Inbox while its cause still holds."""
+    into another hands its warnings on to the item it joined. A warning whose to-do shipped (prod), is done or is
+    archived is left out, so it comes back to Inbox while its cause still holds: a shipped to-do can wait days on the
+    user's finish step, and the warning must not stay away that long."""
     handed: dict[str, int] = db.kv_get(conn, WARNINGS_HANDED_KEY) or {}
     if not handed:
         return {}
@@ -4907,7 +5074,7 @@ def handed_warnings(conn: sqlite3.Connection) -> dict[str, int]:
         row = rows[item_id]
         while row["merged_into"] is not None:
             row = rows[row["merged_into"]]
-        if row["stage"] != "done" and not row["archived"]:
+        if row["stage"] not in ("prod", "done") and not row["archived"]:
             open_ids[key] = row["id"]
     return open_ids
 
@@ -4915,8 +5082,8 @@ def handed_warnings(conn: sqlite3.Connection) -> dict[str, int]:
 def chosen_effort(conn: sqlite3.Connection, session_id: str) -> str | None:
     """The effort the user picked when `session_id` started (SPEC SESSION-22), or None for the default."""
     found = conn.execute(
-        "SELECT json_extract(new_options, '$.effort') FROM messages WHERE via = 'new' AND session_id = ?"
-        " AND json_extract(new_options, '$.effort') IS NOT NULL ORDER BY id LIMIT 1", (session_id,)
+        "SELECT json_extract(new_options, '$.effort') FROM messages WHERE state = 'sent' AND session_id = ?"
+        " AND json_extract(new_options, '$.effort') IS NOT NULL ORDER BY id DESC LIMIT 1", (session_id,)
     ).fetchone()
     return found[0] if found else None
 
@@ -4983,11 +5150,16 @@ def get_message(conn: sqlite3.Connection, message_id: int) -> dict[str, Any]:
 
 
 def retry_message(conn: sqlite3.Connection, message_id: int, actor: str) -> dict[str, Any]:
-    """Queue a failed message again. The user may retry any message; an agent only its own. A dismissed one is
-    refused until the user restores it, so a retry never undoes a dismissal on its own."""
+    """Queue an unchanged failed message again, preserving its author and saved choices.
+
+    Record who retried it. A dismissed message stays dismissed.
+    """
     message = get_message(conn, message_id)
-    if actor != "user" and message["author"] != actor:
-        raise Forbidden(f"message {message_id} is {message['author']}'s; an agent can retry only its own messages")
+    pending_handover = conn.execute(
+        "SELECT 1 FROM session_handovers WHERE message_id = ? AND target_session_id IS NULL", (message_id,),
+    ).fetchone()
+    if pending_handover is not None and message["handover_context"] is None:
+        raise Conflict("Use Hand to Codex again so Cockpit can check and stop the Claude session before retrying.")
     with db.transaction(conn):
         updated = conn.execute(
             "UPDATE messages SET state = 'queued', detail = '', waits_since = NULL, capacity_since = NULL"
@@ -4998,11 +5170,16 @@ def retry_message(conn: sqlite3.Connection, message_id: int, actor: str) -> dict
             message = get_message(conn, message_id)
             if message["dismissed_at"] is not None:
                 raise Conflict(
-                    f"message {message_id} was dismissed by {message['dismissed_by']}; {user_name()} restores it before"
-                    " a retry"
+                    f"message {message_id} was dismissed by {message['dismissed_by']}; a dismissed message is not retried"
                 )
             raise Conflict(f"message {message_id} is {message['state']}; only failed messages can be retried")
+        if actor == "user":
+            conn.execute("UPDATE messages SET quota_recovery_stop = NULL WHERE id = ?", (message_id,))
         reopened = _retry_reopens(conn, message, actor) and reopen_for_message(conn, message["item_id"])
+        patterns.record(
+            conn, "message.retried", actor, message["item_id"], message["step_id"], None,
+            {"message_id": message_id},
+        )
     return get_message(conn, message_id) | {"reopened": reopened}
 
 
@@ -5021,30 +5198,15 @@ def _retry_reopens(conn: sqlite3.Connection, message: dict[str, Any], actor: str
     return finish is None or finish["message_id"] != message["id"]
 
 
-def send_now_message(conn: sqlite3.Connection, message_id: int) -> dict[str, Any]:
-    """The user's Send now on a message that waits for its session's turn to end (SPEC MSG-3) or for Take back
-    (SPEC MSG-8), whose caller stops the session at once and resumes it with the message; or on one that waits for a
-    place among the working sessions (SPEC SESSION-23), whose caller delivers it past the limit and stops no session.
-    The returned message's `capacity_since` tells the two apart."""
-    message = get_message(conn, message_id)
-    if message["state"] != "queued" or all(
-        message[column] is None for column in ("waits_since", "take_back_until", "capacity_since")
-    ):
-        raise Conflict(f"message {message_id} is {message['state']}; only a message that waits can be sent now")
-    if message["capacity_since"] is None:
-        release_message(conn, message_id)
-    return get_message(conn, message_id)
-
-
 def dismiss_message(conn: sqlite3.Connection, message_id: int, reason: str | None, actor: str) -> dict[str, Any]:
     """Set a message aside: a failed one whose work was done another way or is no longer needed, or one that
     waits for its session's turn (SPEC MSG-3) or for a place among the working sessions (SPEC SESSION-23) whose text
     reached the session another way (SPEC MSG-5).
 
     The user may leave out the reason; an agent gives one line. A waiting message
-    becomes `failed` with "Not sent", so the user can restore and retry it. Either
-    records who dismissed it, when and why; the failure counts and lists leave
-    it out from then on.
+    becomes `failed` with "Not sent". Either records who dismissed it, when and
+    why; the failure counts and lists leave it out from then on, and a retry of
+    it is refused.
     """
     reason = reason.strip() if reason is not None else None
     if actor != "user" and not reason:
@@ -5123,23 +5285,6 @@ def confirm_uncertain(conn: sqlite3.Connection, now: datetime) -> None:
     """Record as sent each uncertain message still `confirming` that its session's transcript shows."""
     for message in confirming(conn, now):
         confirm_delivery(conn, message)
-
-
-def restore_message(conn: sqlite3.Connection, message_id: int) -> dict[str, Any]:
-    """The user undoes a dismissal: the failed message counts and shows again."""
-    with db.transaction(conn):
-        updated = conn.execute(
-            "UPDATE messages SET dismissed_at = NULL, dismissed_by = NULL, dismiss_reason = NULL"
-            " WHERE id = ? AND dismissed_at IS NOT NULL",
-            (message_id,),
-        )
-        message = get_message(conn, message_id)
-        if updated.rowcount == 0:
-            raise Conflict(f"message {message_id} is not dismissed")
-        patterns.record(
-            conn, "message.restored", "user", message["item_id"], message["step_id"], None, {"message_id": message_id}
-        )
-    return message
 
 
 def failure_sentence(message: dict[str, Any], session_names: dict[str, str]) -> str:
@@ -5664,11 +5809,9 @@ def stalled_since(
     return _iso(last) if last is not None and now - last >= STALL_AFTER else None
 
 
-# The two groups below the user's queue (SPEC VIEW-27). Busy is the agents' work while it moves: a session works on it,
-# its step was handed to one, or its agent picks it up within BUSY_WITHIN. Waiting is every other open item, agent work
-# that stopped longer ago or picks up later among it. "you" and "done" are as `ball_holder` has them.
+# The two groups below the user's queue (SPEC VIEW-27). Busy holds work running now or a message on its way.
+# Waiting holds idle agents, future work and snoozed steps. "you" and "done" are as `ball_holder` has them.
 GROUPS = ("you", "busy", "waiting", "done")
-BUSY_WITHIN = timedelta(hours=1)
 # Each row's hover line says in a few words what the agent works on or what the item waits for. `tip_at`, when set, is
 # the time the page adds to it in the user's own time zone.
 TIP_CHARS = 48
@@ -5692,7 +5835,8 @@ def _short(text: str, chars: int) -> str:
 
 
 def work_group(
-    item: dict[str, Any], handed_asks: dict[int, str], names: dict[str, str], active: bool, blocked: str, now: datetime
+    item: dict[str, Any], handed_asks: dict[int, str], names: dict[str, str], active: bool, blocked: str, now: datetime,
+    snoozed_until: str | None, messaged: bool,
 ) -> dict[str, Any]:
     """The item's group on the page and its hover line (SPEC VIEW-27): {group, wait, tip, tip_at, why}. Busy's line is the
     agent's goal: the ask of the step the user handed it, else the `doing` the agent put, else where the item stands.
@@ -5700,7 +5844,8 @@ def work_group(
     or the agent that stopped and when. `wait` sorts a Waiting item into its part of Waiting by what it waits for
     (WAIT_KINDS, or "snoozed" for a rest the user chose; None outside Waiting), and `why` says why a resting agent's
     work picks up only then. `names` holds the listed sessions' names by id; `active` says one of the
-    item's sessions works now, which keeps it Busy whatever another agent's `until`. `item["stalled_since"]` and
+    item's sessions works now, which keeps it Busy whatever another agent's `until`. A `snoozed_until` keeps idle
+    work in the user's snoozes; `messaged` keeps work Busy while its message reaches an agent. `item["stalled_since"]` and
     `item["ball"]` are already set."""
     ball = item["ball"]
     if ball in ("you", "done"):
@@ -5714,23 +5859,25 @@ def work_group(
         return f"agent “{name}”"
 
     if ball == "agents":
-        if blocked and not active:
+        if snoozed_until and not active and not messaged:
+            return {"group": "waiting", "wait": "snoozed", "tip": "Snoozed until",
+                    "tip_at": snoozed_until, "why": ""}
+        if blocked and not active and not messaged:
             return {"group": "waiting", "wait": "blocked", "tip": blocked, "tip_at": None, "why": ""}
-        stopped = item["stalled_since"] and now - rank.parse_time(item["stalled_since"]) >= BUSY_WITHIN  # ty: ignore[unsupported-operator]
         later = sorted(
             ((rank.parse_time(entry["until"]), entry) for entry in item["waiting_on"]
              if entry["kind"] == "agent" and entry.get("until")),
             key=lambda pair: pair[0],
         )
         agents = [entry["who"] for entry in item["waiting_on"] if entry["kind"] == "agent"] + item["sessions"]
-        # A rest the user chose, such as a reminder they asked for, is their snooze: it stays snoozed until
-        # its time, as a snoozed step does, rather than turning Busy in its last hour.
-        if not active and later and all(at - now > (timedelta(0) if entry.get("by_user") else BUSY_WITHIN) for at, entry in later):  # ty: ignore[unsupported-operator]
+        if not active and not messaged and later and all(at > now for at, entry in later):  # ty: ignore[unsupported-operator]
             resumes, entry = later[0]
             return {"group": "waiting", "wait": "snoozed" if entry.get("by_user") else "resumes",
                     "tip": f"{agent(entry['who'])} resumes", "tip_at": _iso(resumes), "why": entry.get("why") or ""}  # ty: ignore[invalid-argument-type]  # Entries with no until were filtered out above.
-        if stopped and not active:
-            return {"group": "waiting", "wait": "stuck", "tip": f"{agent(agents[0]) if agents else 'its agent'} stopped",
+        if not active and not messaged:
+            who = agent(agents[0]) if agents else "its agent"
+            return {"group": "waiting", "wait": "stuck",
+                    "tip": f"{who} stopped" if item["stalled_since"] else f"{who} is idle",
                     "tip_at": item["stalled_since"], "why": ""}
         goal = _short(handed_asks.get(item["id"]) or item["doing"] or item["agent_summary"] or item["summary"], TIP_CHARS)
         # A to-do's summary is often its title's own words, which the hover already shows above the line.
@@ -5749,19 +5896,34 @@ def work_group(
     return {"group": "waiting", "wait": "stuck", "tip": "no next move", "tip_at": None, "why": ""}
 
 
+def rate_limited(session: Session) -> bool:
+    """The provider limit ended this session's turn, even if a background command remains alive."""
+    words = f"{session.needs} {session.detail}".lower()
+    return session.state in ("blocked", "stopped") and any(
+        word in words for word in ("429", "rate limit", "rate_limit", "usage limit")
+    )
+
+
+def moving(session: Session) -> bool:
+    """Work running now, apart from a timer or artifact watch that merely keeps its process alive."""
+    resting = session.in_flight and all(kind in ("session_cron", "artifact_watch") for kind in session.in_flight)
+    return working(session) and not session.waits_on_dialog and not rate_limited(session) and (
+        session.working_now or not resting
+    )
+
+
 def work_activity(related: list[Session]) -> tuple[str, str]:
     """The visible agent state and, when no agent can work, its blocking reason."""
     if any(session.working_now for session in related):
         return "Working now", ""
-    if any(working(session) and not session.waits_on_dialog for session in related):
+    if any(moving(session) for session in related):
         return "Background work", ""
     if any(session.waits_on_dialog for session in related):
         if any(session.waits_on_dialog and "setup" in session.needs.lower() for session in related):
             return "Waiting for setup", "Waiting for setup"
         return "Waiting for approval", "Waiting for approval"
     for session in related:
-        words = f"{session.needs} {session.detail}".lower()
-        if session.state in ("blocked", "stopped") and any(word in words for word in ("429", "rate limit", "rate_limit", "usage limit")):
+        if rate_limited(session):
             return "Claude rate limit" if session.provider == "claude" else "Codex rate limit", "Provider rate limit"
     if any(session.state == "failed" for session in related):
         return "Agent error", "Agent stopped with an error"
@@ -5841,21 +6003,29 @@ def mention_refs(conn: sqlite3.Connection) -> Refs:
 
 
 def _round_starts(conn: sqlite3.Connection, step_ids: list[int]) -> dict[int, str]:
-    """When each step's round on its item began: the time the item's latest step put before it was put. A step card
-    shows the agents' images added since then as its own, and older ones under a closed "Other images" (SPEC NEXT-17).
-    Steps order by when they were put, since a withdrawn step put again keeps its id with a new time; steps put in
-    the same second order by id. A step put first on its item has no entry: every image on the item is from its
-    round."""
+    """When each step's image round began (SPEC NEXT-17): the previous step's creation, or the text the user
+    answered before an agent rewrote this same step, whichever is later. The saved version on a message orders
+    replies within one second. Further edits and ranking changes keep the round's images visible.
+    A step put first with no answered version has no entry: every image on the item is from its round."""
     if not step_ids:
         return {}
     marks = ",".join("?" * len(step_ids))
-    return {
+    starts = {
         row[0]: row[1] for row in conn.execute(
             f"SELECT s.id, (SELECT MAX(o.created_at) FROM steps o WHERE o.item_id = s.item_id"
             f" AND (o.created_at < s.created_at OR (o.created_at = s.created_at AND o.id < s.id)))"
             f" FROM steps s WHERE s.id IN ({marks})", step_ids,
         ).fetchall() if row[1] is not None
     }
+    for step_id, at in conn.execute(
+        "SELECT m.step_id, MAX(v.at) FROM messages m JOIN step_versions v ON v.id = m.step_version"
+        f" WHERE m.step_id IN ({marks}) AND m.author = 'user' AND m.state IN ('queued', 'sending', 'sent')"
+        " AND m.dismissed_at IS NULL AND EXISTS (SELECT 1 FROM step_versions newer"
+        " WHERE newer.step_id = m.step_id AND newer.id > v.id AND newer.actor != 'user')"
+        " GROUP BY m.step_id", step_ids,
+    ).fetchall():
+        starts[step_id] = max(starts.get(step_id, at), at)
+    return starts
 
 
 def _rendered_step(step: dict[str, Any], revisions: dict[int, int], verdicts: dict[int, str], refs: Refs) -> dict[str, Any]:
@@ -5964,7 +6134,8 @@ def how_done(conn: sqlite3.Connection, item_ids: list[int]) -> dict[int, dict[st
 
 def merged_closes(conn: sqlite3.Connection, now: datetime) -> list[dict[str, Any]]:
     """The items an agent closed because their PR merged (SPEC CONTROL-15), or because it finished a fire-and-forget
-    to-do (CONTROL-24; `pull` null), after the user last acted
+    to-do (CONTROL-24) or a recurring item (CONTROL-33, `recurring` true, as the close recorded; both with `pull` null),
+    after the user last acted
     on a step (any `step.*` event of the user's, or Task done), in the last day, oldest first, each by its latest
     such close and the PR GitHub confirmed then: the user's next step names them in one line, so the user sees the outcome.
     Events order by id, since two in one second share
@@ -5985,6 +6156,7 @@ def merged_closes(conn: sqlite3.Connection, now: datetime) -> list[dict[str, Any
     ).fetchone()[0] or 0
     return [
         {"item_id": merge["item_id"], "title": merge["title"], "pull": merge["data"].get("pull"),
+         "recurring": bool(merge["data"].get("recurring")),
          "note": merge["data"].get("note") or "", "closed_by": merge["actor"], "closed_at": merge["at"]}
         for merge in merges if merge["id"] > acted
     ]
@@ -6090,7 +6262,6 @@ def page_state(
         spent = item_time.setdefault(timer["item_id"], {"seconds": 0, "started_at": None})
         spent["seconds"] += timer["seconds"]
         spent["started_at"] = spent["started_at"] or timer["started_at"]
-    running_timer = next(((step_id, timer) for step_id, timer in timers.items() if timer["started_at"]), None)
     for step in ordered["with_agents"]:
         step["handoff"] = get_message(conn, step["handoff_message_id"])
 
@@ -6153,6 +6324,11 @@ def page_state(
     hidden_sessions = {
         session_id for item_id, item in items.items() if item_id not in shown for session_id in item["sessions"]
     } - {session_id for item in item_list for session_id in item["sessions"]}
+    handover_sources = {row[0] for row in conn.execute(
+        "SELECT h.source_session_id FROM session_handovers h WHERE EXISTS ("
+        " SELECT 1 FROM items i, json_each(i.sessions) s WHERE s.value = h.source_session_id"
+        " AND i.archived = 0 AND COALESCE(i.stage, '') != 'done')"
+    )}
     listed_sessions = [
         session
         for session in sorted(sessions, key=lambda session: session.updated_at, reverse=True)
@@ -6160,6 +6336,7 @@ def page_state(
         if (
             session.alive or (session.state == "blocked" and not session.removed_at)
             or session.updated_at >= recent_since or parts.is_standing(session.session_id)
+            or session.session_id in handover_sources
         )
         and archives.get(session.session_id, {}).get("state") != "archived"
         and session.session_id not in hidden_sessions
@@ -6174,6 +6351,7 @@ def page_state(
     snoozed_items = {
         step["item_id"] for step in ordered["snoozed"] if not is_read(step) or step["item_id"] not in agent_held
     }
+    snoozed_until = {step["item_id"]: step["snoozed_until"] for step in ordered["snoozed"]}
     ended = how_done(conn, [item["id"] for item in item_list if item["stage"] == "done"])
     handed_asks = {step["item_id"]: step["ask"] for step in ordered["with_agents"]}
     session_names_by_id = {session_id: name for session_id, name in names.items() if name}
@@ -6190,8 +6368,9 @@ def page_state(
         held_by = item["sessions"] + [entry["who"] for entry in item["waiting_on"] if entry["kind"] == "agent"]
         related = [by_session[sid] for sid in dict.fromkeys(held_by + item["step_sessions"]) if sid in by_session]
         item["activity"], blocked = work_activity(related)
-        active = any(working(session) and not session.waits_on_dialog for session in related)
-        item |= work_group(item, handed_asks, session_names_by_id, active, blocked, now)
+        active = any(moving(session) for session in related)
+        item |= work_group(item, handed_asks, session_names_by_id, active, blocked, now,
+                           snoozed_until.get(item["id"]), item["id"] in messaged_items)
 
     balls = [item["ball"] for item in item_list]
     in_progress_ids = {
@@ -6279,9 +6458,9 @@ def page_state(
         "recent_archives": recent_archives(conn, now),
         "linked_sessions": sorted({sid for item in items.values() for sid in item["sessions"]}),
         # Every failed message that is not dismissed stays listed with its Retry,
-        # and every one that waits for its session's turn or for a place with its
-        # Send now, however many messages came after it; a dismissed one shows like
-        # any other message while it is among the newest, so the list does not grow.
+        # and every one that waits for its session's turn or for a place, however
+        # many messages came after it; a dismissed one shows like any other message
+        # while it is among the newest, so the list does not grow.
         # The user's own messages of the last day all stay, for the work list's
         # Your latest message view.
         "messages": [
@@ -6300,14 +6479,7 @@ def page_state(
             )
         ],
         "unread_feedback": conn.execute("SELECT COUNT(*) FROM feedback WHERE read_at IS NULL").fetchone()[0],
-        # The running timer for the header: its step and item, and the item's time before this span.
-        "timer": {
-            "step_id": running_timer[0],
-            "item_id": running_timer[1]["item_id"],
-            "item_title": get_item(conn, running_timer[1]["item_id"])["title"],
-            "started_at": running_timer[1]["started_at"],
-            "seconds": item_time[running_timer[1]["item_id"]]["seconds"],
-        } if running_timer else None,
+        "timer": _running_timer(conn, timers),
         # The user's last input on any page, which the page counts as activity, and the count of inputs (SPEC TRACK-5).
         "input": _input(conn),
         # The question after a timer stopped for no activity, while the user has not answered it (SPEC TRACK-5).

@@ -151,6 +151,8 @@ with sqlite3.connect(Path(sys.argv[1]).as_uri() + "?mode=ro", uri=True) as conn:
     }
     assert.equal((await lastingReport).status(), 200);
     assert.ok(ranMs >= 120e3, `reported after ${ranMs} ms, before two minutes`);
+    // The report says how long Cockpit has been away, so the server can tell a restart's errors from an outage's.
+    assert.equal(typeof (await lastingReport).request().postDataJSON().away_ms, "number", "a 502 report carries away_ms");
     const [lastingRow] = await storedRows();
     assert.ok(lastingRow, "a lasting 502 is stored");
     assert.equal(lastingRow.place, "control uses");

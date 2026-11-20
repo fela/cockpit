@@ -61,7 +61,7 @@ async function main() {
     page.setDefaultTimeout(20000);
     const errors = [];
     page.on("pageerror", (error) => errors.push(error.message));
-    await page.goto(`${info.origin}/classic`);
+    await page.goto(`${info.origin}/`);
     const card = page.locator(`#next [data-step="${step.id}"]`).first();
     // The first load reads the fixture database; on a busy host that takes a while.
     await card.waitFor({ timeout: 90000 });
@@ -137,8 +137,16 @@ async function main() {
     await page.emulateMedia({ colorScheme: "dark" });
     await box.scrollIntoViewIfNeeded();
     await box.screenshot({ path: path.join(work, "phone-dark.png") });
-    const fits = await box.evaluate((el) => el.scrollWidth <= el.clientWidth + 1 && el.getBoundingClientRect().right <= innerWidth);
-    check("at phone width the box fits the screen", fits, "it overflows");
+    // The box's contents stay inside it, and it and the page stay inside the window. The band of page colour the
+    // reply box's ::before draws around it reaches past its edge on purpose, so the box's scroll width is not used.
+    const size = await box.evaluate((el) => {
+      const box = el.getBoundingClientRect();
+      return { left: box.left, right: box.right, window: innerWidth, page: document.documentElement.scrollWidth,
+        wide: [...el.querySelectorAll("*")].filter((node) => node.getBoundingClientRect().right > box.right + 1)
+          .map((node) => `${node.tagName}.${node.className} ${Math.round(node.getBoundingClientRect().right)}`) };
+    });
+    const fits = size.wide.length === 0 && size.left >= 0 && size.right <= size.window && size.page <= size.window;
+    check("at phone width the box fits the screen", fits, `it overflows: ${JSON.stringify(size)}`);
     await page.setViewportSize({ width: 1440, height: 900 });
     await page.emulateMedia({ colorScheme: "light" });
 

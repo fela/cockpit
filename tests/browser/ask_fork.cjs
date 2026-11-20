@@ -1,8 +1,7 @@
 // Ask and Fork (SPEC MSG-11). Puts its own item, whose step asks for the harness's working fake session, into the user's
-// queue, then checks, at desktop width in the light scheme (the step's card) and at phone width in the dark one (the
-// item's row, once the first width's Send handed the step to the session):
-// - the box where the item shows (its step's card when the step is in the queue, VIEW-18; else the item's row) shows
-//   Ask and Fork in the menu of the arrow beside Send once the user writes;
+// queue, then checks, on the item's card at desktop width in the light scheme (its step in the queue) and at phone
+// width in the dark one (the step handed, once the first width's Send handed it to the session):
+// - the card's reply box shows Ask and Fork in the menu of the arrow beside Send once the user writes;
 // - Ask shows the question above the box within 300 ms, with a line saying a copy is answering, and a toast, while
 //   the words stay in the box;
 // - the fake copy's answer (serve_slow.fake_copy, about 2 s) shows under the question as rendered Markdown, with a
@@ -68,8 +67,8 @@ async function main() {
 
     browser = await chromium.launch({ executablePath: CHROMIUM });
     for (const [width, scheme] of [[1280, "light"], [390, "dark"]]) {
-      // The step is in the user's queue, where its item shows as the step's card (VIEW-18), until the first width's
-      // Send hands it to the session; its item then has its row below the queue.
+      // The step is in the user's queue until the first width's Send hands it to the session; either way the item's
+      // card shows it, with its reply box.
       const state = await getState();
       const queued = state.queue.some((one) => one.id === own.id);
       const step = own;
@@ -83,25 +82,12 @@ async function main() {
       page.setDefaultTimeout(90000);
       const errors = [];
       page.on("pageerror", (error) => errors.push(error.message));
-      await page.goto(`${info.origin}/classic`);
-      let row;
-      let key;
-      if (queued) {
-        await page.locator(`#next [data-step], #queue .row[data-step]`).first().waitFor({ state: "attached" });
-        await page.evaluate((id) => window.openItemStep(id), itemId);
-        row = page.locator(`#next [data-step="${step.id}"], #queue .row.open[data-step="${step.id}"]`).first();
-        await row.waitFor();
-        key = `msg:step:${step.id}`;
-      } else {
-        row = page.locator(`#work .row[data-item="${itemId}"]`).first();
-        await row.waitFor({ state: "attached" });
-        // The item's group may start folded.
-        const group = page.locator("#work details.group", { has: page.locator(`.row[data-item="${itemId}"]`) }).first();
-        if (!(await group.evaluate((el) => el.open))) await group.locator(":scope > summary").click();
-        await row.scrollIntoViewIfNeeded();
-        await row.locator(".row-head").click();
-        key = `msg:item:${itemId}`;
-      }
+      await page.goto(`${info.origin}/`);
+      await page.locator(`#sidebar li.side-item[data-item="${itemId}"]`).waitFor({ state: "attached" });
+      await page.evaluate((id) => showInSidebar(id), itemId);
+      const row = page.locator(`#next .next-card[data-step="${step.id}"]`);
+      await row.waitFor();
+      const key = `msg:step:${step.id}`;
       const area = row.locator(`textarea[data-key="${key}"]`);
       const question = `How far is the work? (${width})`;
       await area.fill(question);
@@ -183,8 +169,7 @@ async function main() {
       check(`${width}: no sideways scroll`, overflow <= 0, `${overflow} px`);
 
       // A refused Fork puts the words back, and the box's To where the user left it (regression check). Fork forks the
-      // session the box writes to, so To stays on it; an item row's box shows its To, a step card's box shows none
-      // but records one all the same.
+      // session the box writes to, so To stays on it; a box that shows no To records one all the same.
       const refusedWords = `Fork refused (${width})`;
       await row.locator(`textarea[data-key="${key}"]`).fill(refusedWords);
       const to = row.locator(`select[data-key="${key}:to"]`);
@@ -209,7 +194,8 @@ async function main() {
       await row.locator(`textarea[data-key="${key}"]`).fill(forkWords);
       await row.locator(".composer summary.send-more").click({ noWaitAfter: true });
       await row.locator(".composer button.fork-way").click();
-      await page.locator("#toast", { hasText: "Forked" }).waitFor({ timeout: 15000 });
+      // A string would match the refused Fork's "Not forked" too, which may still show.
+      await page.locator("#toast", { hasText: /Forked .*the new session works on/ }).waitFor({ timeout: 15000 });
       const emptied = await row.locator(`textarea[data-key="${key}"]`).inputValue();
       check(`${width}: Fork empties the box`, emptied === "", JSON.stringify(emptied));
       const forked = (await getState()).items.find((item) => (item.summary || "").includes(forkWords) || (item.title || "").includes(forkWords.slice(0, 20)));
@@ -238,8 +224,8 @@ async function main() {
         delete body.side_chats;
         await route.fulfill({ response, json: body }).catch(() => {});
       });
-      await page.goto(`${info.origin}/classic`);
-      await page.locator("#work .row").first().waitFor({ state: "attached" });
+      await page.goto(`${info.origin}/`);
+      await page.locator("#sidebar li.side-item").first().waitFor({ state: "attached" });
       await sleep(1500);
       check("a state without side_chats draws with no error", errors.length === 0, errors.join("; "));
       await context.close();

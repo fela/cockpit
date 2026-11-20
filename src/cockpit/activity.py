@@ -89,7 +89,7 @@ def claim(conn: sqlite3.Connection, code: str, now: datetime) -> str | None:
 
 
 def disconnect(conn: sqlite3.Connection) -> None:
-    """The Mac was uninstalled: its key stops working, and the page offers Connect a Mac again."""
+    """The Mac was uninstalled: its key stops working, and the page offers Install on your Mac again."""
     db.kv_set(conn, KEY_SHA, None)
 
 
@@ -97,11 +97,16 @@ def _sha(secret: str) -> str:
     return hashlib.sha256(secret.encode()).hexdigest()
 
 
-def key_matches(conn: sqlite3.Connection, header: str | None) -> bool:
+# The Mac sends its key in a header of its own: the proxy in front of Cockpit drops Authorization, so a remote request
+# cannot use the agents' local token (docs/REASONING.md), and Cockpit reads that token from Authorization alone.
+MAC_KEY_HEADER = "x-cockpit-mac-key"
+
+
+def key_matches(conn: sqlite3.Connection, key: str | None) -> bool:
     stored = db.kv_get(conn, KEY_SHA)
-    if stored is None or header is None or not header.startswith("Bearer "):
+    if stored is None or key is None:
         return False
-    return hmac.compare_digest(_sha(header.removeprefix("Bearer ").strip()), stored)
+    return hmac.compare_digest(_sha(key.strip()), stored)
 
 
 def set_paused(conn: sqlite3.Connection, paused: bool, now: datetime) -> None:

@@ -71,8 +71,8 @@ SESSION_OPTIONS: dict[str, dict[str, Any]] = {
         "effort": "high",
     },
     "codex": {
-        "models": [("gpt-6.1-sol", "GPT-6.1 Sol"), ("gpt-6.1-terra", "GPT-6.1 Terra"), ("gpt-6-luna", "GPT-6 Luna"),
-                   ("gpt-6-astra", "GPT-6 Astra")],
+        "models": [("gpt-6.2-sol", "GPT-6.2 Sol"), ("gpt-6.1-terra", "GPT-6.1 Terra"), ("gpt-6-luna", "GPT-6 Luna"),
+                   ("gpt-6.2-astra", "GPT-6.2 Astra")],
         "efforts": ["low", "medium", "high", "xhigh"],
         "effort": "high",
         "speeds": [
@@ -87,7 +87,7 @@ SESSION_OPTIONS: dict[str, dict[str, Any]] = {
 def session_speeds(provider: str, model: str) -> list[dict[str, str]]:
     """The speeds supported by this model; Ultrafast also needs an eligible provider account."""
     return [speed for speed in SESSION_OPTIONS[provider].get("speeds", [])
-            if speed["name"] != "ultrafast" or model in ("gpt-6.1-sol", "gpt-6-astra")]
+            if speed["name"] != "ultrafast" or model in ("gpt-6.2-sol", "gpt-6.2-astra")]
 
 
 def validate_speed(provider: str, model: str, speed: str | None) -> None:

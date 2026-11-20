@@ -1,6 +1,7 @@
-// An open item row shows its history as compactly as a step card. Checks, on an item of its own whose five steps the
-// user closed one by one (four exchanges, no step waiting for the user): - the open row shows Earlier folded, with at
-// most two exchanges outside it; - opening Earlier shows the rest; - at phone width the row has no sideways scroll.
+// An item picked in the list shows its history on the card compactly. Checks, on an item of its own whose five steps
+// the user closed one by one (four exchanges, no step waiting for the user): - the item's card shows Earlier folded,
+// with at most two exchanges outside it; - opening Earlier shows the rest; - at phone width the page has no sideways
+// scroll.
 // Starts serve_preview.py (this checkout's Cockpit on a synthetic database; README.md says what it needs) and
 // drives a headless Chromium. Prints one line per check and exits 1 when one failed. Screenshots go to the folder
 // given as the first argument, when one is given.  Usage, from the checkout: node
@@ -59,18 +60,23 @@ async function main() {
       const context = await browser.newContext({ viewport });
       await context.setExtraHTTPHeaders({ cookie: `${info.name}=${info.value}` });
       const page = await context.newPage();
-      // All work's rows are on the page from before the sidebar (SPEC VIEW-26), at /classic.
-      await page.goto(`${info.origin}/classic`, { waitUntil: "networkidle" });
-      await page.waitForFunction(() => typeof window.openInWork === "function" && document.querySelector("#work details.group"));
-      await page.evaluate(([id, group]) => window.openInWork(id, group), [pick.item.id, pick.item.group]);
-      const row = page.locator(`.row.open[data-item="${pick.item.id}"]`);
-      await row.locator("section.history").waitFor({ timeout: 60e3 });
+      await page.goto(`${info.origin}/`, { waitUntil: "networkidle" });
+      // On a phone the list and the card are two screens, and the page opens on the card's.
+      const back = page.locator(".phone-back:visible");
+      if (await back.count()) await back.click();
+      const listed = page.locator(`#sidebar li[data-item="${pick.item.id}"] > .side-row`);
+      // The item's group can be folded; showInSidebar opens it, as search and the keys do.
+      await page.waitForFunction((id) => typeof window.showInSidebar === "function" && document.querySelector(`#sidebar li[data-item="${id}"]`), pick.item.id);
+      if (!(await listed.isVisible())) await page.evaluate((id) => window.showInSidebar(id), pick.item.id);
+      await listed.click();
+      const card = page.locator("#next .card").filter({ has: page.locator(`section.history[data-item="${pick.item.id}"]`) }).first();
+      await card.locator("section.history").waitFor({ timeout: 60e3 });
       await sleep(300);
-      const outside = await row.locator("section.history > ol > li.hist-entry").count();
-      const fold = row.locator("section.history > ol > li.hist-earlier");
+      const outside = await card.locator("section.history > ol > li.hist-entry").count();
+      const fold = card.locator("section.history > ol > li.hist-earlier");
       check(`${label}: two exchanges or fewer outside Earlier`, outside <= 2, `${outside} shown`);
       check(`${label}: Earlier folded`, await fold.count() === 1 && !(await fold.locator("details").first().evaluate((el) => el.open)), "no closed Earlier");
-      if (shots) await row.screenshot({ path: path.join(shots, `item-history-${label}.png`) });
+      if (shots) await card.screenshot({ path: path.join(shots, `item-history-${label}.png`) });
       await fold.locator("summary").first().click();
       const inside = await fold.locator("li.hist-entry").count();
       check(`${label}: Earlier holds the rest`, outside + inside === pick.entries + pick.start, `${outside} + ${inside} of ${pick.entries} and ${pick.start} start line`);

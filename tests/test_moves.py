@@ -773,3 +773,22 @@ def test_sign_ins_go_unused_while_claude_code_sends_sessions_to_an_api_server(
     # New work starts although the machine's own sign-in ended, and nothing asks Anthropic about the accounts.
     assert accounts.usable(accounts.in_use(config.ACCOUNTS, []), NOW) == [personal, work]
     assert server.signed_in() == []
+
+
+def test_an_explicit_move_adopts_a_pending_automatic_retry(world, work_signed_in, limit_stopped):
+    from tests.test_api import put_item, put_step
+    task = put_item(world, stage="building", sessions=[SESSION_A])
+    put_step(world, item_key=task["key"], need="decide")
+    conn = db.connect(world.db_path)
+    pending = store.create_message(conn, "cockpit", limits.RETRY.format(why="10 minutes passed"),
+                                   {"session_id": SESSION_A}, world.checkout.parent)
+    conn.execute("UPDATE messages SET quota_recovery_stop = ? WHERE id = ?", (STOP, pending["id"]))
+    conn.close()
+    result = world.deliverer.move(SESSION_A, "work", "user", world.checkout.parent, None)
+    assert result["moved"] and result["message_id"] == pending["id"]
+    conn = db.connect(world.db_path)
+    updated = store.get_message(conn, pending["id"])
+    conn.close()
+    assert updated["state"] == "queued" and updated["quota_recovery_stop"] is None
+    assert "moved you to the work account" in updated["text"]
+    assert world.runner.calls == []

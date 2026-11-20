@@ -10,6 +10,9 @@ dependencies = [
     "markdown-it-py[linkify]>=3.0",
     # Zone data with every name a browser may report, such as Asia/Calcutta, which system data may lack.
     "tzdata>=2025.2",
+    "mcp>=1.30,<2",
+    "jsonschema>=4.23,<5",
+    "referencing>=0.36,<1",
 ]
 
 [project.optional-dependencies]
