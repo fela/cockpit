@@ -300,7 +300,11 @@ def sync(conn: sqlite3.Connection, sessions: list[Session], sweeper: str | None,
     swept = None
     for turn in lost(conn, sessions, now):
         if turn.session.session_id == sweeper:
-            swept = turn
+            # Judged again here too: a close that came in after `lost` read the sweeper keeps it closed.
+            if _unanswered(conn, turn.session.session_id, turn.stopped):
+                swept = turn
+            else:
+                log.info("the sweeper %s got an answer since it was found lost to a sign-out", turn.session.session_id)
             continue
         text = CONTINUE.format(account=turn.session.account, at=turn.signed_in.astimezone(now.tzinfo))
         # Judged again in the message's transaction: a message, an archive or an agent's close that came

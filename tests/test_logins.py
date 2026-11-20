@@ -229,6 +229,28 @@ def test_a_close_that_comes_after_the_scan_still_keeps_the_session_closed(
     assert messages(world) == []
 
 
+def test_a_close_after_the_scan_keeps_the_sweeper_from_a_full_sweep(
+    world: World, transcripts: Path, claude_accounts: tuple[config.Account, config.Account],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    personal, _ = claude_accounts
+    sign_in(personal, NOW - timedelta(minutes=1))
+    world.cache.sessions = [make_session(SESSION_A, pid=None, state="stopped")]
+    transcript(transcripts, SESSION_A, login_expired(STOPPED))
+    scan = logins.lost
+
+    def scan_then_close(conn, sessions, now):
+        found = scan(conn, sessions, now)
+        conn.execute(
+            "INSERT INTO events (at, kind, actor, data) VALUES (?, 'session.closed', 'agent:sweep', ?)",
+            ((STOPPED + timedelta(minutes=30)).strftime("%Y-%m-%dT%H:%M:%SZ"), json.dumps({"session_id": SESSION_A})),
+        )
+        return found
+
+    monkeypatch.setattr(logins, "lost", scan_then_close)
+    assert sync(world, sweeper=SESSION_A) == ([], None)
+
+
 def test_the_sweeper_gets_a_full_sweep_in_place_of_the_wake_up_it_lost(
     world: World, transcripts: Path, claude_accounts: tuple[config.Account, config.Account],
 ) -> None:
