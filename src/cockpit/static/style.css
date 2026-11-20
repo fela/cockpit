@@ -1972,7 +1972,7 @@ details.menu:not([open]) > .menu-list { display: none; }
   .step-menu .menu-group > :is(button, a) { min-height: 44px; padding: 10px 12px; }
   .step-menu .menu-choices > button { padding-left: 36px; }
 }
-.vim-setting .when, .zone-setting .when { margin-left: auto; }
+.zone-setting .when { margin-left: auto; }
 .zone-panel .zone-pick { width: 100%; }
 .zone-panel .zone-own { margin-top: 8px; }
 /* Composer: one box with the target, the text and the send buttons. */

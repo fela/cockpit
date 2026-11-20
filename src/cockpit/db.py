@@ -1613,6 +1613,26 @@ MIGRATIONS: list[str] = [
         checked_at TEXT NOT NULL
     );
     """,
+    # The weekly digest (SPEC VIEW-36) is stored with the morning briefings, of kind 'weekly': one of each kind
+    # per day, so Sunday holds both.
+    """
+    CREATE TABLE new_briefings (
+        id INTEGER PRIMARY KEY,
+        kind TEXT NOT NULL DEFAULT 'daily' CHECK (kind IN ('daily', 'weekly')),
+        day TEXT NOT NULL,
+        since TEXT NOT NULL,
+        until TEXT NOT NULL,
+        body TEXT NOT NULL,
+        created_by TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE (kind, day)
+    );
+    INSERT INTO new_briefings (id, kind, day, since, until, body, created_by, created_at, updated_at)
+        SELECT id, 'daily', day, since, until, body, created_by, created_at, updated_at FROM briefings;
+    DROP TABLE briefings;
+    ALTER TABLE new_briefings RENAME TO briefings;
+    """,
 ]
 
 JSON_COLUMNS = frozenset(

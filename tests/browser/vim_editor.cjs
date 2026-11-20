@@ -115,17 +115,21 @@ let browser, page;
   await startComposer();
   await editor.waitFor();
   assert.equal(await area.inputValue(), "alpha beta gamma delta");
+  // The switch is on the Settings page (SPEC CONTROL-33); the Cockpit tab follows it through the storage event.
+  // As when the user opens the menu to reach Settings, the reply box gives up focus first.
   await page.locator(".brand-menu > summary").click();
-  const toggle = page.getByRole("switch", { name: "Vim editing", exact: true });
-  assert.equal(await toggle.getAttribute("aria-checked"), "true");
+  await page.locator(".brand-menu > summary").click();
+  const settingsPage = await context.newPage();
+  await settingsPage.goto(origin + "/settings");
+  const toggle = settingsPage.getByRole("switch", { name: "Vim editing", exact: true });
+  assert.equal(await toggle.isChecked(), true);
   await toggle.click();
-  assert.equal(await toggle.evaluate((node) => node === document.activeElement), true);
-  assert.equal(await toggle.getAttribute("aria-checked"), "false");
-  assert.equal(await page.locator(".cm-editor").count(), 0);
+  assert.equal(await toggle.isChecked(), false);
+  await page.waitForFunction(() => document.querySelectorAll(".cm-editor").length === 0);
   assert.equal(await area.inputValue(), "alpha beta gamma delta");
-  await page.locator(".brand-menu > summary").click();
+  await settingsPage.close();
   await command("Enable Vim editing");
-  console.log("PASS Preference and drafts survive reload; settings switch restores the native field without losing text");
+  console.log("PASS Preference and drafts survive reload; the Settings switch restores the native field without losing text");
 
   const second = await context.newPage();
   await second.goto(origin + "/classic"); await second.locator("#next [data-step]").waitFor();

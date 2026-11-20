@@ -170,6 +170,18 @@ def launch_briefing_once(deliverer: delivery.Deliverer) -> None:
         deliverer.start(f"send-{message_id}", deliverer.send, message_id)
 
 
+def launch_digest_once(deliverer: delivery.Deliverer) -> None:
+    """Start a session on the weekly digest's task when the digest is due (briefing.py, SPEC VIEW-36)."""
+    conn = db.connect(config.DB_PATH)
+    try:
+        message_id = briefing.launch_digest_once(conn, config.setup(), datetime.now(UTC))
+    finally:
+        conn.close()
+    if message_id is not None:
+        log.info("asking for the weekly digest with message %s", message_id)
+        deliverer.start(f"send-{message_id}", deliverer.send, message_id)
+
+
 def launch_projects_tidy_once(deliverer: delivery.Deliverer) -> None:
     """Ask the projects session to tidy the projects when it is due (projects.py, SPEC SWEEP-23)."""
     conn = db.connect(config.DB_PATH)
@@ -198,8 +210,8 @@ def cut_short(what: str, exc: Exception) -> bool:
 def wake_sweeper_forever(
     deliverer: delivery.Deliverer, session_cache: sessions.SessionCache, spend_index: spend.SpendIndex
 ) -> None:
-    """Every poll: close held permission withdrawals; ask for the morning briefing when it
-    is due (briefing.py); put each session's question to
+    """Every poll: close held permission withdrawals; ask for the morning briefing and the weekly digest when
+    they are due (briefing.py); put each session's question to
     the user as a step and close the ones answered (questions.py); tell the sessions Claude's usage limit
     stopped to continue once usage is back (limits.py), and the ones a sign-out stopped once their account is
     signed in again, the sweeper with a full sweep (logins.py); send the
@@ -222,6 +234,10 @@ def wake_sweeper_forever(
             launch_briefing_once(deliverer)
         except Exception:
             log.exception("asking for the morning briefing failed")
+        try:
+            launch_digest_once(deliverer)
+        except Exception:
+            log.exception("asking for the weekly digest failed")
         try:
             launch_projects_tidy_once(deliverer)
         except Exception:
