@@ -40,6 +40,7 @@ import logging
 import os
 import re
 import sqlite3
+import sys
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -699,7 +700,12 @@ def fold(conn: sqlite3.Connection, now: datetime, zone: ZoneInfo) -> int:
 
 def track_forever(db_path: Path, listing: Callable[[], list[Any]], zone: Callable[[], ZoneInfo]) -> None:
     """Sample every SAMPLE_SECONDS, write every FLUSH_SECONDS, fold old rows every FOLD_SECONDS. `listing` gives
-    Cockpit's current session listing (Session objects) and `zone` the user's timezone, which the user can change."""
+    Cockpit's current session listing (Session objects) and `zone` the user's timezone, which the user can change.
+    The samples come from Linux's /proc, so on other systems, such as macOS, nothing is sampled. On Linux a failed
+    sample is logged and retried."""
+    if sys.platform != "linux":
+        log.info("processor and memory use are not sampled on %s: they come from Linux's /proc", sys.platform)
+        return
     sampler = Sampler(Path("/proc"), os.getuid(), os.sysconf("SC_CLK_TCK"), os.sysconf("SC_PAGE_SIZE") // 1024)
     next_write = time.monotonic() + FLUSH_SECONDS
     next_fold = time.monotonic()
@@ -968,4 +974,8 @@ def session_titles(conn: sqlite3.Connection, session_ids: set[str]) -> dict[str,
 
 
 def memory_total_mb() -> float:
-    return _meminfo(Path("/proc/meminfo").read_bytes()).get("MemTotal", 0) / 1024
+    """The machine's memory in MiB. On Linux it comes from /proc/meminfo, which a container can scope to itself,
+    as it does MemAvailable; elsewhere, such as on macOS, from the physical page count."""
+    if sys.platform == "linux":
+        return _meminfo(Path("/proc/meminfo").read_bytes()).get("MemTotal", 0) / 1024
+    return os.sysconf("SC_PHYS_PAGES") * os.sysconf("SC_PAGE_SIZE") / 1024**2
