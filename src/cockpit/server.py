@@ -699,7 +699,7 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     started_at = db.now_iso()
     setup = config.setup()
-    # Before anything starts a process, so every session and run it starts belongs to this instance (SPEC SCOPE-6).
+    # Before anything starts a process, so every session and run it starts belongs to this instance (SPEC SCOPE-7).
     os.environ.update(config.instance_environment())
     config.private_data_dirs()
     settings = Settings(

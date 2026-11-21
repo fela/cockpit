@@ -8,9 +8,9 @@ with an error that names it. `docs/setup.example.toml` shows every key. The inst
 of their own from the same file.
 
 One user can run more than one Cockpit side by side, such as one for work and one for personal projects (SPEC
-SCOPE-6). Each is an instance with a name, set by COCKPIT_INSTANCE, and keeps everything of its own: its setup file,
-database, port, service, and its Claude and Codex folders, so the sessions, sign-ins and usage of one never show in
-the other. The instance without a name keeps the folders a single Cockpit has always used.
+SCOPE-7). Each is an instance with a name, set by COCKPIT_INSTANCE and by nothing else, and keeps everything of its
+own: its setup file, database, port, service, and its Claude and Codex folders, so the sessions, sign-ins and usage of
+one never show in the other. Without COCKPIT_INSTANCE, Cockpit uses the folders a single Cockpit has always used.
 """
 
 from __future__ import annotations
@@ -41,35 +41,32 @@ class InstanceError(ValueError):
     """COCKPIT_INSTANCE is not a name an instance can have."""
 
 
-def find_instance(environ: Mapping[str, str], home: Path) -> str:
-    """The instance this process belongs to (SPEC SCOPE-6): COCKPIT_INSTANCE when set, else the instance whose
-    Claude or Codex folder CLAUDE_CONFIG_DIR or CODEX_HOME names, so a session started outside Cockpit, or by a
-    daemon another process started, still reaches its own Cockpit; else "", the unnamed one. A folder counts only
-    while that instance's config folder exists."""
+def find_instance(environ: Mapping[str, str]) -> str:
+    """The instance this process belongs to (SPEC SCOPE-7): COCKPIT_INSTANCE, or "" for the unnamed one."""
     named = environ.get("COCKPIT_INSTANCE", "")
-    if named:
-        if not INSTANCE_NAME.fullmatch(named) or named in RESERVED_INSTANCES:
-            raise InstanceError(f"COCKPIT_INSTANCE must be a lowercase letter followed by up to 19 lowercase letters or"
-                                f" digits, and not {', '.join(sorted(RESERVED_INSTANCES))}: {named!r}")
-        return named
-    for variable, prefix in (("CLAUDE_CONFIG_DIR", ".claude-"), ("CODEX_HOME", ".codex-")):
-        folder = Path(environ.get(variable) or "/").expanduser()
-        if folder.parent != home or not folder.name.startswith(prefix):
-            continue
-        name = folder.name.removeprefix(prefix).removesuffix("-2")
-        if (INSTANCE_NAME.fullmatch(name) and name not in RESERVED_INSTANCES
-                and (home / ".config" / f"cockpit-{name}").is_dir()):
-            return name
-    return ""
+    if named and (not INSTANCE_NAME.fullmatch(named) or named in RESERVED_INSTANCES):
+        raise InstanceError(f"COCKPIT_INSTANCE must be a lowercase letter followed by up to 19 lowercase letters or"
+                            f" digits, and not {', '.join(sorted(RESERVED_INSTANCES))}: {named!r}")
+    return named
 
 
-INSTANCE = find_instance(os.environ, HOME)
+INSTANCE = find_instance(os.environ)
 # What the instance's folders and service names end in: "" for the unnamed instance, else "-<name>".
 SUFFIX = f"-{INSTANCE}" if INSTANCE else ""
 DATA_DIR = HOME / ".local" / "share" / f"cockpit{SUFFIX}"
 DB_PATH = DATA_DIR / "cockpit.db"
 BACKUP_DIR = DATA_DIR / "backups"
 BACKUP_KEEP_DAYS = 14
+
+
+def deploy_lock(data_dir: Path) -> Path:
+    """The lock a deploy holds while it replaces the installed code, given an instance's data folder, with its folder
+    made: the unnamed instance's for every instance, since instances may share one virtualenv (SPEC SCOPE-7)."""
+    path = data_dir.parent / "cockpit" / "deploy.lock"
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    return path
+
+
 CONFIG_DIR = HOME / ".config" / f"cockpit{SUFFIX}"
 TOKEN_PATH = CONFIG_DIR / "token"
 LOCAL_LOGIN_PATH = CONFIG_DIR / "local-login-token"
@@ -161,8 +158,6 @@ class Account:
     # The instance's first account: always in use, the one the others link their shared entries to, and where a
     # retired account's sessions resume.
     default: bool
-    # A named instance's folder (SPEC SCOPE-6), never Claude's own default, even for the instance's first account.
-    instance_folder: bool = False
 
     @property
     def jobs(self) -> Path:
@@ -172,8 +167,8 @@ class Account:
     def claude_default(self) -> bool:
         """Whether the folder is Claude's own default, ~/.claude: `claude` runs there with CLAUDE_CONFIG_DIR unset, and
         on macOS its sign-in is the Keychain's unnamed one. Set to ~/.claude, Claude reads ~/.claude/.claude.json
-        instead of ~/.claude.json, which holds no trust."""
-        return self.default and not self.instance_folder
+        instead of ~/.claude.json, which holds no trust. Only the unnamed instance's first account uses it."""
+        return self.default and not INSTANCE
 
 
 def instance_accounts(instance: str, home: Path) -> tuple[Account, ...]:
@@ -188,10 +183,8 @@ def instance_accounts(instance: str, home: Path) -> tuple[Account, ...]:
         )
     first, second = home / f".claude-{instance}", home / f".claude-{instance}-2"
     return (
-        Account(name=instance, letter=instance[0].upper(), folder=first, state=first / ".claude.json", default=True,
-                instance_folder=True),
-        Account(name=f"{instance}2", letter="2", folder=second, state=second / ".claude.json", default=False,
-                instance_folder=True),
+        Account(name=instance, letter=instance[0].upper(), folder=first, state=first / ".claude.json", default=True),
+        Account(name=f"{instance}2", letter="2", folder=second, state=second / ".claude.json", default=False),
     )
 
 
@@ -275,7 +268,7 @@ class Setup:
     retired_accounts: tuple[str, ...] = ()
     # The machine that runs sessions' slow commands ([offload], SPEC BG-29); None runs them here.
     offload: Offload | None = None
-    # The loopback port the server listens on; a second instance needs one of its own (SPEC SCOPE-6).
+    # The loopback port the server listens on; a second instance needs one of its own (SPEC SCOPE-7).
     port: int = DEFAULT_PORT
 
 
@@ -394,14 +387,8 @@ def _read_offload(path: Path, table: Any) -> Offload | None:
     return Offload(host=table["host"], repos=repos)
 
 
-def validate_local_origin(origin: str, port: int | None = None) -> None:
-    """Local mode is deliberately limited to the server's loopback HTTP address, on `port`; without one, on the port
-    the origin itself names, which then still has to be written exactly as the loopback address on that port."""
-    if port is None:
-        try:
-            port = urlsplit(origin).port or DEFAULT_PORT
-        except ValueError:
-            port = DEFAULT_PORT
+def validate_local_origin(origin: str, port: int) -> None:
+    """Local mode is deliberately limited to the server's loopback HTTP address on `port`."""
     if origin not in {f"http://127.0.0.1:{port}", f"http://localhost:{port}"}:
         raise SetupError(f"local origin must be http://127.0.0.1:{port} or http://localhost:{port}")
 
@@ -435,11 +422,12 @@ def api_base() -> str:
 
 def instance_environment() -> dict[str, str]:
     """What a named instance's server puts in its own environment, so everything it starts belongs to it: the `cockpit`
-    commands its sessions run reach it, and a Codex run without a folder of its own uses the instance's first Codex
-    folder rather than ~/.codex. Nothing for the unnamed instance."""
+    commands its sessions run reach it, and Codex runs on the instance's first Codex folder. That replaces a CODEX_HOME
+    the shell set, which names another instance's folder or one Cockpit does not count. Nothing for the unnamed
+    instance."""
     if not INSTANCE:
         return {}
-    return {"COCKPIT_INSTANCE": INSTANCE, "CODEX_HOME": os.environ.get("CODEX_HOME") or str(CODEX_HOMES[0])}
+    return {"COCKPIT_INSTANCE": INSTANCE, "CODEX_HOME": str(CODEX_HOMES[0])}
 
 
 def private_data_dirs() -> None:

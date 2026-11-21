@@ -1,5 +1,5 @@
 """Bootstrap a local install, manage the macOS LaunchAgent, and deploy to it or to the Linux systemd user service
-`cockpit`. No Google account required. A named instance (SPEC SCOPE-6) has a LaunchAgent and a systemd unit of its
+`cockpit`. No Google account required. A named instance (SPEC SCOPE-7) has a LaunchAgent and a systemd unit of its
 own, `cockpit.server.<name>` and `cockpit-<name>`."""
 
 from __future__ import annotations
@@ -26,6 +26,8 @@ from typing import IO
 from cockpit import auth, cli, config, parts
 
 LABEL = "cockpit.server" + (f".{config.INSTANCE}" if config.INSTANCE else "")
+# The setup's `attach`: a named instance's `cockpit attach` has to reach that instance.
+ATTACH = (f"COCKPIT_INSTANCE={config.INSTANCE} " if config.INSTANCE else "") + "cockpit attach {session}"
 # The Linux systemd user unit `cockpit deploy` restarts (TECH.md section 13).
 SYSTEMD_UNIT = f"cockpit{config.SUFFIX}"
 
@@ -46,7 +48,7 @@ def codex_command() -> str:
     return "codex"
 
 
-def initialize(repo: Path, provider: str, name: str, timezone: str, port: int = config.DEFAULT_PORT) -> Path:
+def initialize(repo: Path, provider: str, name: str, timezone: str, port: int) -> Path:
     if config.SETUP_PATH.exists():
         raise ValueError(f"{config.SETUP_PATH} already exists; edit it to change your setup")
     repo = repo.resolve()
@@ -59,7 +61,7 @@ def initialize(repo: Path, provider: str, name: str, timezone: str, port: int = 
         "origin": config.loopback_base(port), "providers": [provider], "default_provider": provider,
         "codex_command": codex_command(), "checkouts": str(repo.parent), "spec_repo": str(repo),
         "skills_repo": str(repo), "skills_folder": "src/cockpit/skills", "skills_branch": branch,
-        "deploy_branch": branch, "attach": "cockpit attach {session}", "timezone": timezone,
+        "deploy_branch": branch, "attach": ATTACH, "timezone": timezone,
         **({"port": port} if port != config.DEFAULT_PORT else {}),
     }
     # Validate before writing a durable setup or any credentials.
@@ -121,8 +123,8 @@ RESTART_DELAY_SECONDS = 3
 # $1 the delay, $2 the service, $3 the launchd domain, $4 the plist: load the service if it is not, then restart it.
 RESTART_SCRIPT = ('sleep "$1"; launchctl print "$2" >/dev/null 2>&1 || launchctl bootstrap "$3" "$4";'
                   ' exec launchctl kickstart -k "$2"')
-# $1 the delay, $2 the unit: restart the systemd user unit of TECH.md section 13.
-SYSTEMD_RESTART_SCRIPT = 'sleep "$1"; exec systemctl --user restart "$2"'
+# $1 the delay: restart the systemd user unit of TECH.md section 13.
+SYSTEMD_RESTART_SCRIPT = f'sleep "$1"; exec systemctl --user restart {SYSTEMD_UNIT}'
 
 
 def _plist() -> Path:
@@ -179,8 +181,7 @@ def deploy() -> str:
     installed into a scratch venv and imported there first; if that fails the running Cockpit is left alone.
     The restart changes the page's build version, so open pages offer Reload (SPEC UI-13).
     """
-    config.DATA_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
-    with open(config.DATA_DIR / "deploy.lock", "a") as lock:
+    with open(config.deploy_lock(config.DATA_DIR), "a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         return _deploy(lock)
 
@@ -259,7 +260,7 @@ def _deploy(lock: IO) -> str:
                  str(_plist())], lock)
         restart = f"Cockpit restarts in {RESTART_DELAY_SECONDS} s; open pages then offer Reload."
     elif sys.platform.startswith("linux") and _systemd_unit().is_file():
-        _detach(["/bin/sh", "-c", SYSTEMD_RESTART_SCRIPT, "sh", str(RESTART_DELAY_SECONDS), SYSTEMD_UNIT], lock)
+        _detach(["/bin/sh", "-c", SYSTEMD_RESTART_SCRIPT, "sh", str(RESTART_DELAY_SECONDS)], lock)
         restart = f"Cockpit restarts in {RESTART_DELAY_SECONDS} s; open pages then offer Reload."
     else:
         restart = f"Restart cockpit-server (systemctl --user restart {SYSTEMD_UNIT} on Linux) to run it."

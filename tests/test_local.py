@@ -295,7 +295,7 @@ def test_local_setup_preserves_unicode_in_toml(tmp_path, monkeypatch):
     monkeypatch.setattr(local.auth, "read_or_create_secret", lambda path: LOGIN_TOKEN)
     config.setup.cache_clear()
     try:
-        local.initialize(repo, "codex", "Sam", "UTC")
+        local.initialize(repo, "codex", "Sam", "UTC", config.DEFAULT_PORT)
         setup = config.setup()
         assert setup.spec_repo == repo and setup.checkouts == repo.parent
         assert setup.name == "Sam"
@@ -369,8 +369,7 @@ def test_deploy_on_linux_restarts_the_systemd_service_apart(tmp_path, monkeypatc
     finally:
         config.setup.cache_clear()
     assert "restarts in" in said and "Reload" in said
-    assert calls[-1] == ("restart", ["/bin/sh", "-c", local.SYSTEMD_RESTART_SCRIPT, "sh", str(local.RESTART_DELAY_SECONDS),
-                                     "cockpit"])
+    assert calls[-1] == ("restart", ["/bin/sh", "-c", local.SYSTEMD_RESTART_SCRIPT, "sh", str(local.RESTART_DELAY_SECONDS)])
     assert [call[0] for call in calls].count("restart") == 1
 
 

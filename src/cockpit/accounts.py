@@ -3,7 +3,7 @@
 Each account (config.ACCOUNTS) has a config folder of its own: its sign-in, background daemon, jobs folder and
 `claude agents` list. Every `claude` Cockpit runs names its account: Claude's own default folder, ~/.claude, with
 CLAUDE_CONFIG_DIR unset, any other with CLAUDE_CONFIG_DIR set to its folder (claude_env). A named instance (SPEC
-SCOPE-6) has folders of its own, so all of its accounts set it. A session stays on the account it started
+SCOPE-7) has folders of its own, so all of its accounts set it. A session stays on the account it started
 on, so its resumes, messages, stops and limit wakes run there; only a new session, or a one-shot `claude -p`,
 picks one (pick).
 

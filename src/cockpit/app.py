@@ -1381,7 +1381,7 @@ def create_app(
     read_view: views.Reader,
 ) -> FastAPI:
     if settings.auth_mode == "local":
-        config.validate_local_origin(settings.origin)
+        config.validate_local_origin(settings.origin, config.setup().port)
         if len(settings.local_login_token) < 32:
             raise ValueError("local mode requires a private local-login-token")
     elif settings.auth_mode != "google" or settings.google is None:

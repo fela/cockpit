@@ -1,6 +1,5 @@
 #!/bin/sh
-# Set up the second Claude account's config folder, ~/.claude-work (SPEC SESSION-17). With COCKPIT_INSTANCE set
-# to a named instance (SPEC SCOPE-6), it sets up that instance's ~/.claude-<name>-2 against ~/.claude-<name> instead.
+# Set up the second Claude account's config folder, ~/.claude-work (SPEC SESSION-17).
 #
 # The folder gets one symlink per entry the two accounts share, each pointing at the same entry in
 # ~/.claude, and nothing else: Claude Code creates the rest (sign-in, .claude.json, daemon, jobs) on
@@ -20,13 +19,8 @@
 set -eu
 [ "$(uname -s)" = Linux ] || { echo "second-account.sh sets up a bind mount in /etc/fstab and runs on Linux only." >&2; exit 1; }
 
-instance="${COCKPIT_INSTANCE:-}"
-case "$instance" in
-  "") home_folder="$HOME/.claude"; work_folder="$HOME/.claude-work"; folder_name=.claude; work_name=.claude-work ;;
-  work|*[!a-z0-9]*|[!a-z]*) echo "COCKPIT_INSTANCE must be a lowercase letter, then lowercase letters or digits, and not work" >&2; exit 1 ;;
-  *) home_folder="$HOME/.claude-$instance"; work_folder="$HOME/.claude-$instance-2"
-     folder_name=".claude-$instance"; work_name=".claude-$instance-2" ;;
-esac
+home_folder="$HOME/.claude"
+work_folder="$HOME/.claude-work"
 linked="settings.json skills plugins agents statusline-command.sh"
 mounted="projects"
 # nofail keeps a failed mount from stopping the boot; x-systemd.before keeps nofail from also dropping the
@@ -145,8 +139,8 @@ for name in $mounted; do
   # keeps writing to the moved one. This runs on every run, so a rerun finishes a move that stopped.
   peek=$(mktemp -d)
   sudo mount --bind "$HOME" "$peek"
-  under="$peek/$work_name/$name"
-  shared="$peek/$folder_name/$name"
+  under="$peek/.claude-work/$name"
+  shared="$peek/.claude/$name"
   # Both paths on the bind itself, or a link would lead out of it and mv would copy instead of renaming.
   if [ "$under" -ef "$target" ] || [ ! "$shared" -ef "$target" ] ||
     [ "$(findmnt -n -o TARGET -T "$under")" != "$peek" ] || [ "$(findmnt -n -o TARGET -T "$shared")" != "$peek" ]; then
@@ -159,4 +153,4 @@ for name in $mounted; do
   sudo umount "$peek"
   rmdir "$peek"
 done
-printf '%s\n' "done; sign the second account in: CLAUDE_CONFIG_DIR=$work_folder claude, then /login"
+printf '%s\n' "done; sign the work account in: CLAUDE_CONFIG_DIR=$work_folder claude, then /login"
