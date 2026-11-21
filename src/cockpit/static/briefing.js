@@ -1,10 +1,10 @@
 "use strict";
 
 // The Briefing page (SPEC VIEW-8): the morning briefing on the user's team, which a session writes each
-// morning on that day's task, links to earlier days, and the team itself, which the user changes here. Sunday's
-// weekly digest (SPEC VIEW-36) shows here too, beside that day's briefing. Opening a briefing marks it read, which
-// takes the mark off the Briefing tab. While today's briefing or digest is still being written, the page says so
-// and checks again every minute.
+// morning on that day's task, links to earlier days, and the team itself, which the user changes here. Opening
+// a briefing marks it read, which takes the mark off the Briefing tab. While today's briefing is still
+// being written, the page says so and checks again every minute. With the weekly digest on (SPEC VIEW-37), the
+// digests are listed among the briefings and read the same way.
 
 const POLL_MS = 60e3;
 const icon = (name) => Icons.icon(name);
@@ -88,27 +88,20 @@ function showError(text) {
   document.getElementById("banner").replaceChildren(h("div", { class: "banner fail", text }));
 }
 
-// Whether the user has not opened `each`: the listing says so per briefing, by kind (SPEC VIEW-36); an older
-// listing only names the newest briefing read.
-function unread(each, listing) {
-  return each.unread ?? each.id > listing.read_id;
-}
-
-// What a briefing is called: the weekly digest (SPEC VIEW-36) or the morning briefing.
-function kindWords(each) {
-  return each && each.kind === "weekly" ? "weekly digest" : "briefing";
-}
-
-// What happened to the last request for a briefing or digest, when that day's one is not written yet.
-function launchNote(launch, what = "briefing") {
+// What happened to the last request for the briefing or the weekly digest (`what`), when it is not written yet. It
+// says Cockpit asks again only when the request has a retry, with the day when that is not today.
+function launchNote(launch, what) {
   if (!launch || launch.written) return null;
   const day = dayWords(launch.day, "long");
   if (launch.state === "failed") {
+    const retry = launch.retry_at && new Date(launch.retry_at);
+    const when = retry && (retry.toDateString() === new Date().toDateString() ? clock(launch.retry_at) : at(launch.retry_at));
+    const again = retry ? ` Cockpit asks again at ${when}.` : "";
     return h("p", { class: "briefing-status fail" }, icon("alert"),
-      h("span", { text: `The ${what} for ${day} did not start: ${launch.detail || "the message did not reach a session"}. Cockpit asks again at ${clock(launch.retry_at)}.` }));
+      h("span", { text: `The ${what} for ${day} did not start: ${launch.detail || "the message did not reach a session"}.${again}` }));
   }
   return h("p", { class: "briefing-status" }, icon("clock"),
-    h("span", { text: `Cockpit asked for the ${what} for ${day} at ${clock(launch.asked_at)}; a session is writing it. It shows here when it is stored.` }));
+    h("span", { text: `Cockpit asked for the ${what} for ${day} at ${clock(launch.asked_at)}; the ${what} session is writing it. It shows here when it is stored.` }));
 }
 
 // The people the briefing follows, in the user's words. The editor is drawn once; a read shows a newer
@@ -208,17 +201,16 @@ async function load() {
   const key = JSON.stringify([listing, wanted]);
   // The listing counts as shown once its briefing is on the page, so a briefing that failed to load is asked again.
   if (key === shownListing) return;
-  const newest = listing.briefings[0];
-  const shownId = wanted || (newest && newest.id);
+  const shownId = wanted || pick(listing);
   const article = document.getElementById("briefing");
-  const status = wanted ? [] : [launchNote(listing.launch), launchNote(listing.digest, "weekly digest")].filter(Boolean);
+  const notes = wanted ? [] : [launchNote(listing.launch, "briefing"), launchNote(listing.digest, "weekly digest")].filter(Boolean);
   if (!shownId) {
     const hour = `${String(listing.hour).padStart(2, "0")}:00`;
     Loading.settle(article);
-    article.replaceChildren(h("h1", { text: "Morning briefing" }), ...(status.length ? status : [h("p", { class: "note",
+    article.replaceChildren(h("h1", { text: "Morning briefing" }), ...notes.length ? notes : [h("p", { class: "note",
       text: listing.team
         ? `Your first briefing is due at ${hour} your time`
-        : "Name your team below to start daily briefings" })]));
+        : "Name your team below to start daily briefings" })]);
     renderDays(listing, null);
     overlayReady();
     shownListing = key;
@@ -229,23 +221,39 @@ async function load() {
   if (number !== loadNumber) return;
   Icons.setProjects(projects);
   const weekly = shown.kind === "weekly";
-  document.title = `Cockpit ${kindWords(shown)} ${dayWords(shown.day, "short")}`;
+  document.title = `Cockpit ${weekly ? "digest" : "briefing"} ${dayWords(shown.day, "short")}`;
   const written = shown.updated_at === shown.created_at ? `written ${at(shown.created_at)}` : `written ${at(shown.created_at)}, rewritten ${at(shown.updated_at)}`;
   Loading.settle(article);
   article.replaceChildren(
-    ...status,
+    ...notes,
     h("header", { class: "briefing-head" },
-      h("h1", { text: weekly ? `Weekly digest for the week to ${dayWords(shown.day, "long")}` : `Briefing for ${dayWords(shown.day, "long")}` }),
+      h("h1", { text: `${weekly ? "Weekly digest for the week to" : "Briefing for"} ${dayWords(shown.day, "long")}` }),
       h("p", { class: "note", text: `${at(shown.since)}–${at(shown.until)}, local time · ${written}` })),
     h("div", { class: "prose briefing-body", html: shown.body_html }),
   );
   renderDays(listing, shown.id);
   overlayReady();
+  picked = shown.id;
   // The listing counts as shown once its briefing is marked read too, so a read mark that failed goes again. An
   // older briefing whose read step is still open is marked read again, which completes that step.
   if (unread(shown, listing)) await api("POST", `/api/briefings/${shown.id}/read`);
   if (number !== loadNumber) return;
   shownListing = key;
+}
+
+// Whether the user has not opened this briefing or digest; each keeps its own read mark.
+function unread(each, listing) {
+  return each.id > (each.kind === "weekly" ? listing.digest_read_id : listing.read_id);
+}
+
+// The entry the page shows when the address names none: the newest one the user has not opened, else the newest,
+// so the Briefing tab's mark opens what it marks. An entry the page shows stays until a newer one comes, so reading
+// Sunday's digest does not swap it for that day's briefing at the next check.
+let picked = null;
+function pick(listing) {
+  const newest = listing.briefings.find((each) => unread(each, listing)) || listing.briefings[0];
+  if (!newest) return null;
+  return picked && newest.id < picked && listing.briefings.some((each) => each.id === picked) ? picked : newest.id;
 }
 
 // The page reads the state when it opens and when it comes back into view: a read of the state counts as the user
