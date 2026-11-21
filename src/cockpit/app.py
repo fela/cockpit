@@ -673,6 +673,13 @@ class FollowUp(Body):
     text: Text
 
 
+class ItemTakeUp(Body):
+    nullable = frozenset({"session_id"})
+
+    # The item's primary session as the user's page showed it; null when it showed none.
+    session_id: SessionId | None
+
+
 class ItemFinish(Body):
     nullable = frozenset({"answer", "session_id"})
 
@@ -2140,6 +2147,7 @@ def create_app(
         )
         result["projects"] = projects.listing(conn)
         result["providers"] = list(settings.providers)
+        result["features"] = list(config.setup().features)
         result["default_provider"] = settings.default_provider
         # The user's home folder, which a blocked call's folder shows as `~` (SPEC PERM-26).
         result["home"] = str(Path.home())
@@ -2951,6 +2959,18 @@ def create_app(
             conn, item_id, body.step_id, body.how, body.answer, body.note, body.images, body.reason, body.session_id,
             background,
         )
+
+    # Reopen on a finished task (SPEC CONTROL-34), with "reopen" in the setup's features: back to Busy as a message
+    # would take it, with no words to write.
+    @app.post("/api/items/{item_id}/take-up", dependencies=[Depends(user_only)])
+    def take_up_item(item_id: int, body: ItemTakeUp, background: BackgroundTasks, conn: Conn) -> dict[str, Any]:
+        if "reopen" not in config.setup().features:
+            raise store.NotFound('Reopen is off: add "reopen" to features in the setup file to turn it on')
+        reopened = store.reopen_plainly(conn, item_id, body.session_id, settings.checkouts_dir)
+        sweeper.resume(conn, "reopened a task")
+        if reopened["send"] is not None:
+            background.add_task(deliverer.send, reopened["send"]["id"])
+        return reopened
 
     @app.post("/api/items/{item_id}/reopen", dependencies=[Depends(user_only)])
     def reopen_item(item_id: int, background: BackgroundTasks, conn: Conn) -> dict[str, Any]:

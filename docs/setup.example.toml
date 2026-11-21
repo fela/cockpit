@@ -13,7 +13,9 @@ providers = ["codex"] # ["claude"] or ["claude", "codex"] also work
 default_provider = "codex"
 codex_command = "codex" # executable name or absolute path; uses existing login; models come from SESSION_OPTIONS
 
-# Optional features, all off unless listed here: "reopen", "weekly_digest", "settings_page".
+# Optional features, all off unless listed here: "reopen" (a Reopen key on a finished task),
+# "weekly_digest" (a Sunday digest of the week's briefings).
+# Cockpit reads this file when it starts, so restart it after editing.
 features = []
 
 # Optional Claude socket directory override. Empty uses the platform default.
