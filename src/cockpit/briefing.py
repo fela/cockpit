@@ -14,10 +14,12 @@ the tab marks only the tab (`mark_read`). A launch whose message did not reach a
 RETRY_MINUTES later, on the same day, unless that day's briefing was stored: a message whose delivery is
 uncertain may have reached the session, whose turn has written the briefing by then.
 
-The weekly digest (SPEC VIEW-36) comes the same way on Sunday from DIGEST_HOUR, beside that day's morning briefing:
-a task of its own and a new session, asked to pick out what matters most from the week's morning briefings, which
-Cockpit hands it, so the user catches up and readies for the week ahead. It waits for that Sunday's briefing until
-DIGEST_WAIT_HOUR. Digests are stored with the briefings, of kind "weekly", and show on the Briefing page.
+The weekly digest (SPEC VIEW-37) is on when the setup's features name DIGEST_FEATURE. On Sunday from DIGEST_HOUR,
+once that day's briefing is stored or DIGEST_WAIT_HOUR has come, Cockpit makes the digest a task of its own and starts
+a new session on it, handed the morning briefings of the week to that Sunday, to pick out what matters most. It is
+stored with the briefings, of kind 'weekly', and is read and commented on like a briefing. The week stays the current
+one until the next Sunday's DIGEST_HOUR, so a digest Cockpit could not ask for on Sunday is asked for later that week,
+and a failed request is asked again until then.
 """
 
 from __future__ import annotations
@@ -26,7 +28,7 @@ import logging
 import re
 import sqlite3
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from typing import Any
 
 from cockpit import db, error_stops, projects, render, store, sweeper
@@ -53,38 +55,38 @@ READ_REASONS = ["daily briefing"]
 # A new briefing shows this project's logo from the start; a Cockpit without it leaves the briefing to the tidy session
 # (projects.py).
 PROJECT = "team"
-# The weekly digest (SPEC VIEW-36): on Sunday (datetime.weekday) from this hour, after that day's briefing, on the
-# morning briefings of the DIGEST_DAYS days to that Sunday. Without that Sunday's briefing, it waits until
-# DIGEST_WAIT_HOUR and then goes on the days it has.
-DIGEST_WEEKDAY = 6
+DIGEST_FEATURE = "weekly_digest"
+SUNDAY = 6
 DIGEST_HOUR = 8
-DIGEST_DAYS = 7
 DIGEST_WAIT_HOUR = 12
 
 
 @dataclass(frozen=True)
 class Kind:
-    """What sets a morning briefing apart from a weekly digest: the kv record of its last request, its task's key and
-    title, and the words of its read step."""
+    """The morning briefing or the weekly digest: its rows' `kind`, the kv records of its last request and of the
+    newest one the user read, its task's key and title, what errors call it and when it comes, and its read step's
+    words."""
 
     name: str
-    words: str
     launch_key: str
     read_key: str
     item_prefix: str
     title: str
-    read_ask: str
-    read_why: str
-    read_reasons: list[str]
+    what: str
+    when: str
+    words: str
+    ask: str
+    why: str
+    reasons: list[str]
 
 
 DAILY = Kind(
-    "daily", "morning briefing", "briefing_launch", "briefing_read", ITEM_PREFIX, "Briefing", READ_ASK, READ_WHY,
-    READ_REASONS,
+    "daily", "briefing_launch", "briefing_read", ITEM_PREFIX, "Briefing", "briefing", "each morning",
+    "morning briefing", READ_ASK, READ_WHY, READ_REASONS,
 )
 WEEKLY = Kind(
-    "weekly", "weekly digest", "digest_launch", "digest_read", "note:digest-", "Weekly digest",
-    "Read the weekly digest on your team",
+    "weekly", "digest_launch", "digest_read", "note:digest-", "Weekly digest", "digest", "on Sunday morning",
+    "weekly digest", "Read the weekly digest on your team",
     "Your catch-up on the week, ahead of the next. Select any part to comment on it; Task done marks it read.",
     ["weekly digest"],
 )
@@ -180,13 +182,15 @@ def _written(conn: sqlite3.Connection, kind: Kind, day: str) -> bool:
     ).fetchone() is not None
 
 
-def _retried(conn: sqlite3.Connection, record: dict[str, Any], launched: dict[str, Any], kind: Kind = DAILY) -> bool:
-    """Whether Cockpit asks again for a briefing whose message failed: only while that day's briefing is not
-    stored, as a message whose delivery is uncertain may have reached its session after all."""
-    return launched["state"] == "failed" and not _written(conn, kind, record["day"])
+def _briefing_retry(conn: sqlite3.Connection, record: dict[str, Any], launched: dict[str, Any]) -> datetime | None:
+    """When Cockpit asks again for a briefing whose message failed: RETRY_MINUTES later, only while that day's
+    briefing is not stored, as a message whose delivery is uncertain may have reached its session after all."""
+    if launched["state"] != "failed" or _written(conn, DAILY, record["day"]):
+        return None
+    return datetime.fromisoformat(launched["created_at"]) + timedelta(minutes=RETRY_MINUTES)
 
 
-def _day_item(conn: sqlite3.Connection, day: str, summary: str, kind: Kind = DAILY) -> dict[str, Any]:
+def _day_item(conn: sqlite3.Connection, kind: Kind, day: str, summary: str) -> dict[str, Any]:
     """The task for `day`'s briefing of `kind`, made when Cockpit asks for it, so the session writing it is that
     task's session (SPEC VIEW-8); `summary` says where it stands, with "{day}" for the day in words. It shows the
     team project's logo from the start, unless the item has a project already; a Cockpit without that project leaves
@@ -207,21 +211,20 @@ def _day_item(conn: sqlite3.Connection, day: str, summary: str, kind: Kind = DAI
 
 
 def _queue(
-    conn: sqlite3.Connection, setup: Setup, kind: Kind, day: str, window: tuple[str, str], text: str, now: datetime
+    conn: sqlite3.Connection, setup: Setup, kind: Kind, day: str, since: str, until: str, text: str, now: datetime
 ) -> int:
-    """Make `day`'s task of `kind` and queue `text` to a new session on it, recording the request and its `window`
-    (since, until); returns the message."""
-    created = f"{now:%Y-%m-%dT%H:%M:%SZ}"
+    """Make `day`'s task of `kind` and queue `text` to a new session on it, recording the request and its window;
+    returns the message."""
     with db.transaction(conn):
-        item = _day_item(conn, day, f"A session is writing the {kind.words} for {{day}}", kind)
+        item = _day_item(conn, kind, day, f"A session is writing the {kind.words} for {{day}}")
         cursor = conn.execute(
             "INSERT INTO messages (author, item_id, new_cwd, new_name, text, state, created_at, as_prompt)"
             " VALUES ('cockpit', ?, ?, ?, ?, 'queued', ?, 0)",
-            (item["id"], str(setup.checkouts), item["title"][: store.NEW_SESSION_NAME_CHARS], text, created),
+            (item["id"], str(setup.checkouts), item["title"][: store.NEW_SESSION_NAME_CHARS], text,
+             f"{now:%Y-%m-%dT%H:%M:%SZ}"),
         )
         db.kv_set(
-            conn, kind.launch_key,
-            {"day": day, "since": window[0], "until": window[1], "message_id": cursor.lastrowid},
+            conn, kind.launch_key, {"day": day, "since": since, "until": until, "message_id": cursor.lastrowid}
         )
     return cursor.lastrowid
 
@@ -237,9 +240,8 @@ def launch_once(conn: sqlite3.Connection, setup: Setup, now: datetime) -> int | 
     day = local.date().isoformat()
     record = db.kv_get(conn, DAILY.launch_key)
     if record is not None and record["day"] == day:
-        launched = store.get_message(conn, record["message_id"])
-        waited = now - datetime.fromisoformat(launched["created_at"])
-        if not _retried(conn, record, launched) or waited < timedelta(minutes=RETRY_MINUTES):
+        retry = _briefing_retry(conn, record, store.get_message(conn, record["message_id"]))
+        if retry is None or now < retry:
             return None
         since = datetime.fromisoformat(record["since"])
     elif local.hour < BRIEFING_HOUR:
@@ -249,18 +251,49 @@ def launch_once(conn: sqlite3.Connection, setup: Setup, now: datetime) -> int | 
     else:
         since = now - timedelta(hours=BRIEFING_HOURS)
     text = prompt(setup, people, day, since, now, error_stops.fixed(conn, since, now))
-    return _queue(conn, setup, DAILY, day, (f"{since:%Y-%m-%dT%H:%M:%SZ}", f"{now:%Y-%m-%dT%H:%M:%SZ}"), text, now)
+    return _queue(conn, setup, DAILY, day, f"{since:%Y-%m-%dT%H:%M:%SZ}", f"{now:%Y-%m-%dT%H:%M:%SZ}", text, now)
+
+
+def digest_on(setup: Setup) -> bool:
+    """Whether this install has the weekly digest (SPEC VIEW-37)."""
+    return DIGEST_FEATURE in setup.features
+
+
+def _digest_sunday(local: datetime) -> date:
+    """The Sunday of the current week's digest: the last Sunday whose DIGEST_HOUR has come by `local`."""
+    shifted = (local - timedelta(hours=DIGEST_HOUR)).date()
+    return shifted - timedelta(days=(shifted.weekday() - SUNDAY) % 7)
+
+
+def _digest_retry(
+    conn: sqlite3.Connection, setup: Setup, record: dict[str, Any], launched: dict[str, Any]
+) -> datetime | None:
+    """When Cockpit asks again for a digest whose message failed: RETRY_MINUTES later, while the digest is not
+    stored and the user has not dismissed the message, and only when that comes before the next week's digest."""
+    if launched["state"] != "failed" or launched["dismissed_at"] or _written(conn, WEEKLY, record["day"]):
+        return None
+    retry = datetime.fromisoformat(launched["created_at"]) + timedelta(minutes=RETRY_MINUTES)
+    next_week = datetime.combine(
+        date.fromisoformat(record["day"]) + timedelta(days=7), time(DIGEST_HOUR), setup.timezone
+    )
+    return retry if retry < next_week else None
+
+
+def _quoted(body: str) -> str:
+    """A briefing's text inside the digest prompt: agent text, so defused (store.defused), and unable to close its
+    own tag early."""
+    return store.defused(body).replace("</briefing", "<\\/briefing")
 
 
 def digest_prompt(setup: Setup, day: str, week: list[dict[str, Any]]) -> str:
     """What the digest session is asked to do for Sunday `day`, from that week's morning briefings `week`, oldest
-    first (SPEC VIEW-36). The briefings are agent text, so they go in defused (store.defused)."""
+    first (SPEC VIEW-37)."""
     name = setup.name
     day_words = datetime.fromisoformat(day).strftime("%A %-d %B")
     since = datetime.fromisoformat(week[0]["since"])
     until = datetime.fromisoformat(week[-1]["until"])
     briefings = "\n\n".join(
-        f"<briefing day=\"{datetime.fromisoformat(each['day']):%A %-d %B}\">\n{store.defused(each['body'])}\n</briefing>"
+        f"<briefing day=\"{datetime.fromisoformat(each['day']):%A %-d %B}\">\n{_quoted(each['body'])}\n</briefing>"
         for each in week
     )
     return f"""Write {name}'s weekly digest for the week to {day_words}. {name} reads it on Sunday or Monday \
@@ -296,73 +329,78 @@ cockpit briefing put --weekly --day {day} --as briefing <<'EOF'
 <the digest>
 EOF
 
-A second put on the same day replaces the first. Cockpit shows the whole digest on this task's card, where {name} \
-can select any part of it and comment. Each comment comes to you as a step handed to you: answer it as the cockpit \
-skill says, and when a comment shows the digest was wrong or unclear, put the corrected digest again. Then end \
-your turn."""
+A second put replaces the first. Cockpit shows the whole digest on this task's card, where {name} can select any \
+part of it and comment. Each comment comes to you as a step handed to you: answer it as the cockpit skill says, and \
+when a comment shows the digest was wrong or unclear, put the corrected digest again. Then end your turn."""
 
 
 def launch_digest_once(conn: sqlite3.Connection, setup: Setup, now: datetime) -> int | None:
-    """Queue Sunday's weekly digest request when it is due (SPEC VIEW-36): from DIGEST_HOUR on Sunday, while a team
-    is set, once that day's morning briefing is stored or DIGEST_WAIT_HOUR has come, on the morning briefings of the
-    DIGEST_DAYS days to that Sunday; returns the message to deliver. A week without a briefing gets no digest. A
-    failed request is tried again as the briefing's is."""
-    if not team(conn):
+    """Queue the current week's digest request when the digest is on, a team is set and the request is due (SPEC
+    VIEW-37); returns the message to deliver. It is due from that Sunday's DIGEST_HOUR once that day's briefing is
+    stored or DIGEST_WAIT_HOUR has come, and asked again as `_digest_retry` says; a week without a briefing gets no
+    digest. The check and the queuing are one transaction, so a digest stored meanwhile is never asked for again."""
+    if not digest_on(setup) or not team(conn):
         return None
     local = now.astimezone(setup.timezone)
-    day = local.date().isoformat()
-    record = db.kv_get(conn, WEEKLY.launch_key)
-    if record is not None and record["day"] == day:
-        launched = store.get_message(conn, record["message_id"])
-        waited = now - datetime.fromisoformat(launched["created_at"])
-        if not _retried(conn, record, launched, WEEKLY) or waited < timedelta(minutes=RETRY_MINUTES):
+    sunday = _digest_sunday(local)
+    day = sunday.isoformat()
+    waited = local >= datetime.combine(sunday, time(DIGEST_WAIT_HOUR), setup.timezone)
+    with db.transaction(conn):
+        record = db.kv_get(conn, WEEKLY.launch_key)
+        if record is not None and record["day"] == day:
+            retry = _digest_retry(conn, setup, record, store.get_message(conn, record["message_id"]))
+            if retry is None or now < retry:
+                return None
+        elif not waited and not _written(conn, DAILY, day):
             return None
-    elif (
-        local.weekday() != DIGEST_WEEKDAY
-        or local.hour < DIGEST_HOUR
-        or (not _written(conn, DAILY, day) and local.hour < DIGEST_WAIT_HOUR)
-    ):
-        return None
-    first = (local.date() - timedelta(days=DIGEST_DAYS - 1)).isoformat()
-    week = db.rows(
-        conn.execute(
-            "SELECT day, since, until, body FROM briefings WHERE kind = 'daily' AND day BETWEEN ? AND ? ORDER BY day",
-            (first, day),
-        ).fetchall()
-    )
-    if not week:
-        return None
-    return _queue(conn, setup, WEEKLY, day, (week[0]["since"], week[-1]["until"]), digest_prompt(setup, day, week), now)
+        week = db.rows(
+            conn.execute(
+                "SELECT day, since, until, body FROM briefings WHERE kind = 'daily' AND day BETWEEN ? AND ?"
+                " ORDER BY day",
+                ((sunday - timedelta(days=6)).isoformat(), day),
+            ).fetchall()
+        )
+        if not week:
+            return None
+        text = digest_prompt(setup, day, week)
+        return _queue(conn, setup, WEEKLY, day, week[0]["since"], week[-1]["until"], text, now)
 
 
-def put(conn: sqlite3.Connection, actor: str, day: str, body: str, kind: str = "daily") -> dict[str, Any]:
-    """Store the briefing of `kind` ("daily", or "weekly" for the digest) for `day`, the day Cockpit last asked for
-    one of that kind; a second put that day replaces it. An earlier day's briefing may be corrected, as its task
-    stays open for comments after the next request, and keeps its window; a first put for an earlier day is refused,
-    as it was finished too late."""
-    asked = KINDS.get(kind)
-    if asked is None:
-        raise store.Invalid(f"a briefing is daily or weekly, not {kind!r}")
+def put(conn: sqlite3.Connection, actor: str, day: str, body: str) -> dict[str, Any]:
+    """Store the briefing for `day`, the day Cockpit last asked for one; a second put that day replaces it. An
+    earlier day's briefing may be corrected, as its task stays open for comments after the next morning's request,
+    and keeps its window; a first put for an earlier day is refused, as it was finished too late."""
+    return _put(conn, DAILY, actor, day, body)
+
+
+def put_digest(conn: sqlite3.Connection, setup: Setup, actor: str, day: str, body: str) -> dict[str, Any]:
+    """Store the weekly digest for Sunday `day`, as `put` stores a briefing; refused while the digest is off."""
+    if not digest_on(setup):
+        raise store.Invalid(f"the weekly digest is off; the setup's features turn it on with {DIGEST_FEATURE!r}")
+    return _put(conn, WEEKLY, actor, day, body)
+
+
+def _put(conn: sqlite3.Connection, kind: Kind, actor: str, day: str, body: str) -> dict[str, Any]:
     text = body.strip()
-    what = "briefing" if asked is DAILY else asked.words
     if not text:
-        raise store.Invalid(f"the {what} is empty")
+        raise store.Invalid(f"the {kind.what} is empty")
     if len(text) > BODY_LIMIT:
-        raise store.Invalid(f"the {what} has {len(text)} characters; at most {BODY_LIMIT}")
+        raise store.Invalid(f"the {kind.what} has {len(text)} characters; at most {BODY_LIMIT}")
     now = db.now_iso()
     with db.transaction(conn):
-        record = db.kv_get(conn, asked.launch_key)
+        record = db.kv_get(conn, kind.launch_key)
         if record is None:
-            when = "each morning" if asked is DAILY else "each Sunday morning"
-            raise store.Invalid(f"Cockpit has not asked for a {what} yet; it starts a {what} session {when}")
+            raise store.Invalid(
+                f"Cockpit has not asked for a {kind.what} yet; it starts a {kind.what} session {kind.when}"
+            )
         if record["day"] != day:
             updated = conn.execute(
                 "UPDATE briefings SET body = ?, created_by = ?, updated_at = ? WHERE kind = ? AND day = ?",
-                (text, actor, now, kind, day),
+                (text, actor, now, kind.name, day),
             )
             if not updated.rowcount:
                 raise store.Conflict(
-                    f"Cockpit now asks for the {what} for {record['day']}, so the one for {day} is not stored"
+                    f"Cockpit now asks for the {kind.what} for {record['day']}, so the one for {day} is not stored"
                 )
         else:
             conn.execute(
@@ -370,9 +408,9 @@ def put(conn: sqlite3.Connection, actor: str, day: str, body: str, kind: str = "
                 " VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(kind, day) DO UPDATE SET since = excluded.since,"
                 " until = excluded.until, body = excluded.body, created_by = excluded.created_by,"
                 " updated_at = excluded.updated_at",
-                (kind, day, record["since"], record["until"], text, actor, now, now),
+                (kind.name, day, record["since"], record["until"], text, actor, now, now),
             )
-    found = conn.execute("SELECT id FROM briefings WHERE kind = ? AND day = ?", (kind, day)).fetchone()
+    found = conn.execute("SELECT id FROM briefings WHERE kind = ? AND day = ?", (kind.name, day)).fetchone()
     stored = get(conn, found[0])
     try:
         ask_to_read(conn, stored)
@@ -396,15 +434,11 @@ def _without_ids(text: str) -> str:
 
 
 def step_text(found: dict[str, Any]) -> dict[str, Any]:
-    """The read step for briefing `found`: the whole briefing on the card, so the user reads it and selects any part
-    to comment on there. A step's body may hold no commit hash or session id, so these leave it; the Briefing tab
-    keeps them. It clears `details`, which a put would otherwise keep from a card made before the whole briefing
-    showed."""
-    kind = KINDS[found.get("kind", "daily")]
-    return {
-        "ask": kind.read_ask, "why": kind.read_why, "body": _without_ids(found["body"]), "details": [],
-        "size": "small", "progress": 0,
-    }
+    """The read step's text for briefing `found`: the whole briefing on the card, so the user reads it and selects
+    any part to comment on there. A step's body may hold no commit hash or session id, so these leave it; the
+    Briefing tab keeps them. It clears `details`, which a put would otherwise keep from a card made before the whole
+    briefing showed."""
+    return {"body": _without_ids(found["body"]), "details": [], "size": "small", "progress": 0}
 
 
 def ask_to_read(conn: sqlite3.Connection, found: dict[str, Any]) -> None:
@@ -421,18 +455,19 @@ def ask_to_read(conn: sqlite3.Connection, found: dict[str, Any]) -> None:
         ).fetchone()
         if closed:
             return
-        item = _day_item(conn, found["day"], f"The {kind.words} for {{day}} is ready to read", kind)
+        item = _day_item(conn, kind, found["day"], f"The {kind.words} for {{day}} is ready to read")
         first_put = conn.execute(
             "SELECT 1 FROM steps WHERE item_id = ? AND need = ?", (item["id"], READ_NEED)
         ).fetchone() is None
-        score = {"score": READ_SCORE, "reasons": kind.read_reasons} if first_put else {}
-        store.upsert_step(conn, {"item_id": item["id"], "need": READ_NEED} | step_text(found) | score, "cockpit")
+        score = {"score": READ_SCORE, "reasons": kind.reasons} if first_put else {}
+        step = {"item_id": item["id"], "need": READ_NEED, "ask": kind.ask, "why": kind.why} | step_text(found)
+        store.upsert_step(conn, step | score, "cockpit")
         if first_put:
             sweeper.reorder_soon(conn, f"the {kind.words} just came in")
 
 
 def read_on_finish(conn: sqlite3.Connection, item: dict[str, Any]) -> None:
-    """The user pressed Task done on a briefing's or digest's item: it counts as read on its page too."""
+    """The user pressed Task done on a briefing's item: that briefing counts as read on its page too."""
     if item["stage"] != "done":
         return
     for kind in KINDS.values():
@@ -441,25 +476,18 @@ def read_on_finish(conn: sqlite3.Connection, item: dict[str, Any]) -> None:
             found = conn.execute("SELECT id FROM briefings WHERE kind = ? AND day = ?", (kind.name, day)).fetchone()
             if found is not None:
                 mark_read(conn, found[0])
-            return
-
-
-def _read_ids(conn: sqlite3.Connection) -> dict[str, int]:
-    """The newest briefing of each kind the user has read; every older one of that kind counts as read too."""
-    return {name: db.kv_get(conn, kind.read_key) or 0 for name, kind in KINDS.items()}
-
-
-def _with_read(found: dict[str, Any], read: dict[str, int]) -> dict[str, Any]:
-    return found | {"unread": found["id"] > read[found["kind"]]}
 
 
 def get(conn: sqlite3.Connection, briefing_id: int) -> dict[str, Any]:
-    """The briefing with its HTML, and whether the user has opened it."""
+    """The briefing with its HTML."""
     found = db.row(conn.execute("SELECT * FROM briefings WHERE id = ?", (briefing_id,)).fetchone())
     if found is None:
         raise store.NotFound(f"briefing {briefing_id} does not exist")
-    html = render.markdown_html(found["body"], store.mention_refs(conn))
-    return _with_read(found, _read_ids(conn)) | {"body_html": html}
+    return found | {"body_html": render.markdown_html(found["body"], store.mention_refs(conn))}
+
+
+def _read_id(conn: sqlite3.Connection, kind: Kind) -> int:
+    return db.kv_get(conn, kind.read_key) or 0
 
 
 def mark_read(conn: sqlite3.Connection, briefing_id: int) -> None:
@@ -468,57 +496,61 @@ def mark_read(conn: sqlite3.Connection, briefing_id: int) -> None:
     closes it."""
     kind = KINDS[get(conn, briefing_id)["kind"]]
     with db.transaction(conn):
-        db.kv_set(conn, kind.read_key, max(db.kv_get(conn, kind.read_key) or 0, briefing_id))
+        db.kv_set(conn, kind.read_key, max(_read_id(conn, kind), briefing_id))
 
 
-def launch_status(conn: sqlite3.Connection, kind: Kind = DAILY) -> dict[str, Any] | None:
-    """The last request for a briefing of `kind`: its day and window, and whether its message reached a session."""
+def launch_status(conn: sqlite3.Connection, setup: Setup, kind: Kind) -> dict[str, Any] | None:
+    """The last request for a briefing of `kind`: its day and window, whether its message reached a session, and
+    when Cockpit asks again, if it will."""
     record = db.kv_get(conn, kind.launch_key)
     if record is None:
         return None
     launched = store.get_message(conn, record["message_id"])
-    retry_at = None
-    if _retried(conn, record, launched, kind):
-        retry = datetime.fromisoformat(launched["created_at"]) + timedelta(minutes=RETRY_MINUTES)
-        retry_at = f"{retry:%Y-%m-%dT%H:%M:%SZ}"
+    if kind is WEEKLY:
+        retry = _digest_retry(conn, setup, record, launched)
+    else:
+        retry = _briefing_retry(conn, record, launched)
     return {
         "day": record["day"], "since": record["since"], "until": record["until"], "asked_at": launched["created_at"],
         "state": launched["state"], "detail": launched["detail"], "session_id": launched["session_id"],
-        "written": _written(conn, kind, record["day"]), "retry_at": retry_at,
+        "written": _written(conn, kind, record["day"]),
+        "retry_at": None if retry is None else f"{retry:%Y-%m-%dT%H:%M:%SZ}",
     }
 
 
-def listing(conn: sqlite3.Connection) -> dict[str, Any]:
-    """The page's data: the newest briefings and digests without their text, newest first, each saying whether the
-    user has opened it; the newest morning briefing read, the last request of each kind, and the team."""
-    read = _read_ids(conn)
+def listing(conn: sqlite3.Connection, setup: Setup) -> dict[str, Any]:
+    """The page's data: the newest briefings without their text, which one is read, the last request and the
+    team; with the digest on, the digests among them, the newest digest read and the last digest request."""
+    kinds = [DAILY.name, WEEKLY.name] if digest_on(setup) else [DAILY.name]
     briefings = db.rows(
         conn.execute(
-            "SELECT id, kind, day, since, until, created_at, updated_at FROM briefings ORDER BY day DESC, id DESC"
-            " LIMIT ?",
-            (LISTED,),
+            "SELECT id, kind, day, since, until, created_at, updated_at FROM briefings"
+            f" WHERE kind IN ({', '.join('?' for _ in kinds)}) ORDER BY day DESC, id DESC LIMIT ?",
+            (*kinds, LISTED),
         ).fetchall()
     )
-    return {
-        "briefings": [_with_read(each, read) for each in briefings], "read_id": read["daily"],
-        "launch": launch_status(conn),
-        "digest": launch_status(conn, WEEKLY), "hour": BRIEFING_HOUR, "team": team(conn),
+    found = {
+        "briefings": briefings, "read_id": _read_id(conn, DAILY), "launch": launch_status(conn, setup, DAILY),
+        "hour": BRIEFING_HOUR, "team": team(conn),
     }
+    if digest_on(setup):
+        found |= {"digest_read_id": _read_id(conn, WEEKLY), "digest": launch_status(conn, setup, WEEKLY)}
+    return found
 
 
-def status(conn: sqlite3.Connection) -> dict[str, Any] | None:
-    """For the tab's mark: the newest briefing, and whether the newest of either kind is one the user has not
-    opened."""
-    read = _read_ids(conn)
-    newest = db.rows(
-        conn.execute(
-            "SELECT id, kind, day FROM briefings WHERE id IN (SELECT MAX(id) FROM briefings GROUP BY kind)"
-            " ORDER BY day DESC, id DESC"
-        ).fetchall()
-    )
-    if not newest:
+def _newest(conn: sqlite3.Connection, kind: Kind) -> tuple[int, str, bool] | None:
+    """The newest briefing of `kind`: its id, its day and whether it is unread."""
+    found = conn.execute(
+        "SELECT id, day FROM briefings WHERE kind = ? ORDER BY day DESC LIMIT 1", (kind.name,)
+    ).fetchone()
+    return None if found is None else (found[0], found[1], found[0] > _read_id(conn, kind))
+
+
+def status(conn: sqlite3.Connection, setup: Setup) -> dict[str, Any] | None:
+    """For the tab's mark: the newest briefing, and whether the user has opened it; with the digest on, it is also
+    unread while the newest digest is."""
+    newest = _newest(conn, DAILY)
+    if newest is None:
         return None
-    return {
-        "id": newest[0]["id"], "day": newest[0]["day"],
-        "unread": any(each["id"] > read[each["kind"]] for each in newest),
-    }
+    digest = _newest(conn, WEEKLY) if digest_on(setup) else None
+    return {"id": newest[0], "day": newest[1], "unread": newest[2] or (digest is not None and digest[2])}

@@ -174,7 +174,7 @@ def launch_briefing_once(deliverer: delivery.Deliverer) -> None:
 
 
 def launch_digest_once(deliverer: delivery.Deliverer) -> None:
-    """Start a session on Sunday's weekly digest task when the digest is due (briefing.py, SPEC VIEW-36)."""
+    """Start a session on the week's digest task when the weekly digest is on and due (briefing.py)."""
     conn = db.connect(config.DB_PATH)
     try:
         message_id = briefing.launch_digest_once(conn, config.setup(), datetime.now(UTC))
@@ -213,8 +213,8 @@ def cut_short(what: str, exc: Exception) -> bool:
 def wake_sweeper_forever(
     deliverer: delivery.Deliverer, session_cache: sessions.SessionCache, spend_index: spend.SpendIndex
 ) -> None:
-    """Every poll: close held permission withdrawals; ask for the morning briefing and the weekly digest when
-    they are due (briefing.py); put each session's question to
+    """Every poll: close held permission withdrawals; ask for the morning briefing, and the weekly digest when it
+    is on, when due (briefing.py); put each session's question to
     the user as a step and close the ones answered (questions.py); tell the sessions Claude's usage limit
     stopped to continue once usage is back (limits.py), and the ones a sign-out stopped once their account is
     signed in again, the sweeper with a full sweep (logins.py); send the

@@ -295,7 +295,6 @@ check("P9", async () => {
     w.run('let shownListing = ""; let loadNumber = 0;');
     // Not in the layer (no `overlay=1` in the search), so overlayReady sends nothing.
     w.run(part("briefing.js", "const overlay =", "// The task a link names"));
-    w.run(part("briefing.js", "// Whether the user has not opened", "// What happened to the last request"));
     w.run(part("briefing.js", "async function load()", "// The page reads the state when it opens"));
     const old = w.run("load()");
     await tick();
