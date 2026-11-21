@@ -9,7 +9,7 @@
 //
 // The helper pages by path, each with the layer's heading. app.js adds the ones the install's parts serve, from the
 // state's `helper_pages`.
-const CENTER_HELPERS = { "/briefing": "Briefing", "/pages": "Pages", "/usage": "Usage", "/server": "Server", "/spec": "Spec", "/skills": "Skills" };
+const CENTER_HELPERS = { "/briefing": "Briefing", "/pages": "Pages", "/usage": "Usage", "/server": "Server", "/spec": "Spec", "/skills": "Skills", "/settings": "Settings" };
 // Same-origin helper frames use this registry when following a link to another helper.
 window.cockpitHelperPage = (path) => Object.hasOwn(CENTER_HELPERS, path);
 // The views scripts register, by name. Each has its `title`, the layer's heading, and `draw(tools, body)`, which fills

@@ -5,7 +5,7 @@
 // rest of Cockpit opens in the whole window. Loaded without defer, so the header is gone before the page first paints.
 if (new URLSearchParams(location.search).get("center") === "1" && window.parent !== window) {
   document.documentElement.classList.add("center-frame");
-  const helper = /^\/(briefing|pages|usage|spec|skills|writing)(\/|$)/;
+  const helper = /^\/(briefing|pages|usage|spec|skills|writing|settings)(\/|$)/;
   addEventListener("keydown", (event) => {
     if (event.key !== "Escape" || event.defaultPrevented) return;
     if (event.target.closest?.("input, textarea, select, [contenteditable]")) return;

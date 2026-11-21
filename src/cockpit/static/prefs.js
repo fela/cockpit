@@ -1,5 +1,6 @@
 // This browser's preference in the brand menu, above Sign out, on every page: Vim editing for session
-// prompts and replies. Loads deferred; on the Cockpit page after prompt-editor.js.
+// prompts and replies. Above it, when the page carries Cockpit's mark for it, the Settings page's entry (SPEC
+// CONTROL-35). Loads deferred; on the Cockpit page after prompt-editor.js.
 "use strict";
 
 (() => {
@@ -41,4 +42,14 @@
 
   show();
   list.querySelector("form").before(vim);
+
+  if (document.querySelector('meta[name="cockpit-settings"]')) {
+    const settings = document.createElement("a");
+    settings.href = "/settings";
+    if (location.pathname === "/settings") settings.setAttribute("aria-current", "page");
+    const label = span("menu-label", "Settings");
+    label.prepend(Icons.icon("tune"));
+    settings.append(label);
+    vim.before(settings);
+  }
 })();

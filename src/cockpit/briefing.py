@@ -15,11 +15,14 @@ RETRY_MINUTES later, on the same day, unless that day's briefing was stored: a m
 uncertain may have reached the session, whose turn has written the briefing by then.
 
 The weekly digest (SPEC VIEW-37) is on when the setup's features name DIGEST_FEATURE. On Sunday from DIGEST_HOUR,
-once that day's briefing is stored or DIGEST_WAIT_HOUR has come, Cockpit makes the digest a task of its own and starts
-a new session on it, handed the morning briefings of the week to that Sunday, to pick out what matters most. It is
-stored with the briefings, of kind 'weekly', and is read and commented on like a briefing. The week stays the current
-one until the next Sunday's DIGEST_HOUR, so a digest Cockpit could not ask for on Sunday is asked for later that week,
-and a failed request is asked again until then.
+once that day's briefing is stored or DIGEST_WAIT_HOURS have passed, Cockpit makes the digest a task of its own and
+starts a new session on it, handed the morning briefings of the week to that Sunday, to pick out what matters most. It
+is stored with the briefings, of kind 'weekly', and is read and commented on like a briefing. The week stays the
+current one until the next Sunday's DIGEST_HOUR, so a digest Cockpit could not ask for on Sunday is asked for later
+that week, and a failed request is asked again until then.
+
+With the setup's features naming SETTINGS_FEATURE, the Settings page (SPEC CONTROL-35) changes the briefing's hour and
+the digest's day and hour, or turns the digest off (`schedule`); the times above are then the user's.
 """
 
 from __future__ import annotations
@@ -58,7 +61,12 @@ PROJECT = "team"
 DIGEST_FEATURE = "weekly_digest"
 SUNDAY = 6
 DIGEST_HOUR = 8
-DIGEST_WAIT_HOUR = 12
+# How long after the digest's hour it waits for that day's briefing.
+DIGEST_WAIT_HOURS = 4
+SETTINGS_FEATURE = "settings_page"
+# What the Settings page changes, and its values when the user has not; the kv record `schedule` holds only the ones
+# the user changed. A digest day of None is no digest; days count from Monday, 0.
+SCHEDULE = {"briefing_hour": BRIEFING_HOUR, "digest_day": SUNDAY, "digest_hour": DIGEST_HOUR}
 
 
 @dataclass(frozen=True)
@@ -85,7 +93,7 @@ DAILY = Kind(
     "morning briefing", READ_ASK, READ_WHY, READ_REASONS,
 )
 WEEKLY = Kind(
-    "weekly", "digest_launch", "digest_read", "note:digest-", "Weekly digest", "digest", "on Sunday morning",
+    "weekly", "digest_launch", "digest_read", "note:digest-", "Weekly digest", "digest", "once a week",
     "weekly digest", "Read the weekly digest on your team",
     "Your catch-up on the week, ahead of the next. Select any part to comment on it; Task done marks it read.",
     ["weekly digest"],
@@ -115,6 +123,28 @@ def put_team(conn: sqlite3.Connection, text: str) -> str:
     with db.transaction(conn):
         db.kv_set(conn, "team", words)
     return words
+
+
+def settings_on(setup: Setup) -> bool:
+    """Whether this install has the Settings page (SPEC CONTROL-35)."""
+    return SETTINGS_FEATURE in setup.features
+
+
+def schedule(conn: sqlite3.Connection, setup: Setup) -> dict[str, int | None]:
+    """When the briefing and the digest come: SCHEDULE with the user's changes, while the Settings page is on."""
+    if not settings_on(setup):
+        return dict(SCHEDULE)
+    return SCHEDULE | (db.kv_get(conn, "schedule") or {})
+
+
+def put_schedule(
+    conn: sqlite3.Connection, briefing_hour: int, digest_day: int | None, digest_hour: int
+) -> dict[str, int | None]:
+    """Set the whole schedule; the kv record keeps only the values that differ from SCHEDULE."""
+    wanted = {"briefing_hour": briefing_hour, "digest_day": digest_day, "digest_hour": digest_hour}
+    with db.transaction(conn):
+        db.kv_set(conn, "schedule", {name: value for name, value in wanted.items() if value != SCHEDULE[name]})
+    return wanted
 
 
 def prompt(setup: Setup, people: str, day: str, since: datetime, until: datetime, fixed_stops: list[str]) -> str:
@@ -244,7 +274,7 @@ def launch_once(conn: sqlite3.Connection, setup: Setup, now: datetime) -> int | 
         if retry is None or now < retry:
             return None
         since = datetime.fromisoformat(record["since"])
-    elif local.hour < BRIEFING_HOUR:
+    elif local.hour < schedule(conn, setup)["briefing_hour"]:
         return None
     elif record is not None:
         since = datetime.fromisoformat(record["until"] if _written(conn, DAILY, record["day"]) else record["since"])
@@ -259,29 +289,31 @@ def digest_on(setup: Setup) -> bool:
     return DIGEST_FEATURE in setup.features
 
 
-def _digest_sunday(local: datetime) -> date:
-    """The Sunday of the current week's digest: the last Sunday whose DIGEST_HOUR has come by `local`."""
-    shifted = (local - timedelta(hours=DIGEST_HOUR)).date()
-    return shifted - timedelta(days=(shifted.weekday() - SUNDAY) % 7)
+def _digest_week(conn: sqlite3.Connection, setup: Setup, moment: datetime) -> date | None:
+    """The day of the digest whose week is current at `moment`: the last digest day whose digest hour has come, in
+    the user's time zone; None with no digest. The scheduler, its retry and the retry's limit all ask this, so they
+    agree on where each week ends."""
+    when = schedule(conn, setup)
+    if when["digest_day"] is None:
+        return None
+    shifted = (moment.astimezone(setup.timezone) - timedelta(hours=when["digest_hour"])).date()
+    return shifted - timedelta(days=(shifted.weekday() - when["digest_day"]) % 7)
 
 
 def _digest_retry(
     conn: sqlite3.Connection, setup: Setup, record: dict[str, Any], launched: dict[str, Any], now: datetime
 ) -> datetime | None:
     """When Cockpit asks again for a digest whose message failed: RETRY_MINUTES later, while a team is set, the
-    request's week is the current one at `now` and the digest is not stored, as for a briefing, and only when that
-    comes before the next week's digest. The scheduler and the page both ask this, so the page promises only the
+    request's week is the current one at `now` and the digest is not stored, as for a briefing, and only when the
+    week is still the current one then. The scheduler and the page both ask this, so the page promises only the
     retry the scheduler runs."""
-    current = _digest_sunday(now.astimezone(setup.timezone)).isoformat()
-    if launched["state"] != "failed" or not team(conn) or record["day"] != current:
+    current = _digest_week(conn, setup, now)
+    if launched["state"] != "failed" or not team(conn) or current is None or record["day"] != current.isoformat():
         return None
     if _written(conn, WEEKLY, record["day"]):
         return None
     retry = datetime.fromisoformat(launched["created_at"]) + timedelta(minutes=RETRY_MINUTES)
-    next_week = datetime.combine(
-        date.fromisoformat(record["day"]) + timedelta(days=7), time(DIGEST_HOUR), setup.timezone
-    )
-    return retry if retry < next_week else None
+    return retry if _digest_week(conn, setup, retry) == current else None
 
 
 def _quoted(body: str) -> str:
@@ -291,17 +323,19 @@ def _quoted(body: str) -> str:
 
 
 def digest_prompt(setup: Setup, day: str, week: list[dict[str, Any]]) -> str:
-    """What the digest session is asked to do for Sunday `day`, from that week's morning briefings `week`, oldest
-    first (SPEC VIEW-37)."""
+    """What the digest session is asked to do for digest day `day`, from that week's morning briefings `week`,
+    oldest first (SPEC VIEW-37)."""
     name = setup.name
-    day_words = datetime.fromisoformat(day).strftime("%A %-d %B")
+    end = date.fromisoformat(day)
+    day_words = end.strftime("%A %-d %B")
+    read_days = f"{end:%A} or {end + timedelta(days=1):%A}"
     since = datetime.fromisoformat(week[0]["since"])
     until = datetime.fromisoformat(week[-1]["until"])
     briefings = "\n\n".join(
         f"<briefing day=\"{datetime.fromisoformat(each['day']):%A %-d %B}\">\n{_quoted(each['body'])}\n</briefing>"
         for each in week
     )
-    return f"""Write {name}'s weekly digest for the week to {day_words}. {name} reads it on Sunday or Monday \
+    return f"""Write {name}'s weekly digest for the week to {day_words}. {name} reads it on {read_days} \
 morning to catch up on the week at a high level and get ready for the week ahead. It draws on the week's morning \
 briefings, which covered {_local_words(since, setup)} to {_local_words(until, setup)}, {name}'s time \
 ({setup.timezone.key}):
@@ -341,15 +375,17 @@ when a comment shows the digest was wrong or unclear, put the corrected digest a
 
 def launch_digest_once(conn: sqlite3.Connection, setup: Setup, now: datetime) -> int | None:
     """Queue the current week's digest request when the digest is on, a team is set and the request is due (SPEC
-    VIEW-37); returns the message to deliver. It is due from that Sunday's DIGEST_HOUR once that day's briefing is
-    stored or DIGEST_WAIT_HOUR has come, and asked again as `_digest_retry` says; a week without a briefing gets no
-    digest. The check and the queuing are one transaction, so a digest stored meanwhile is never asked for again."""
+    VIEW-37); returns the message to deliver. It is due from the digest day's hour once that day's briefing is
+    stored or DIGEST_WAIT_HOURS have passed, and asked again as `_digest_retry` says; a week without a briefing gets
+    no digest. The check and the queuing are one transaction, so a digest stored meanwhile is never asked for again."""
     if not digest_on(setup) or not team(conn):
         return None
-    local = now.astimezone(setup.timezone)
-    sunday = _digest_sunday(local)
-    day = sunday.isoformat()
-    waited = local >= datetime.combine(sunday, time(DIGEST_WAIT_HOUR), setup.timezone)
+    end = _digest_week(conn, setup, now)
+    if end is None:
+        return None
+    day = end.isoformat()
+    due = datetime.combine(end, time(schedule(conn, setup)["digest_hour"]), setup.timezone)
+    waited = now >= due + timedelta(hours=DIGEST_WAIT_HOURS)
     with db.transaction(conn):
         record = db.kv_get(conn, WEEKLY.launch_key)
         if record is not None and record["day"] > day:
@@ -370,7 +406,7 @@ def launch_digest_once(conn: sqlite3.Connection, setup: Setup, now: datetime) ->
             conn.execute(
                 "SELECT day, since, until, body FROM briefings WHERE kind = 'daily' AND day BETWEEN ? AND ?"
                 " ORDER BY day",
-                ((sunday - timedelta(days=6)).isoformat(), day),
+                ((end - timedelta(days=6)).isoformat(), day),
             ).fetchall()
         )
         if not week:
@@ -387,7 +423,7 @@ def put(conn: sqlite3.Connection, actor: str, day: str, body: str) -> dict[str, 
 
 
 def put_digest(conn: sqlite3.Connection, setup: Setup, actor: str, day: str, body: str) -> dict[str, Any]:
-    """Store the weekly digest for Sunday `day`, as `put` stores a briefing; refused while the digest is off."""
+    """Store the weekly digest for digest day `day`, as `put` stores a briefing; refused while the digest is off."""
     if not digest_on(setup):
         raise store.Invalid(f"the weekly digest is off; the setup's features turn it on with {DIGEST_FEATURE!r}")
     return _put(conn, WEEKLY, actor, day, body)
@@ -544,7 +580,7 @@ def listing(conn: sqlite3.Connection, setup: Setup, now: datetime) -> dict[str, 
     )
     found = {
         "briefings": briefings, "read_id": _read_id(conn, DAILY), "launch": launch_status(conn, setup, DAILY, now),
-        "hour": BRIEFING_HOUR, "team": team(conn),
+        "hour": schedule(conn, setup)["briefing_hour"], "team": team(conn),
     }
     if digest_on(setup):
         found |= {"digest_read_id": _read_id(conn, WEEKLY), "digest": launch_status(conn, setup, WEEKLY, now)}
