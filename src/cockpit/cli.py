@@ -918,13 +918,12 @@ def image_command(args: argparse.Namespace) -> str:
     content_type = store.image_type(content)
     if content_type is None:
         raise CockpitError(f"{args.file} is not a PNG, JPEG, GIF or WebP file, the image types Cockpit keeps")
-    response, _ = fetch("POST", f"/api/items/{_item_id(args.item)}/images", (content, content_type), args.agent)
+    item_id = (
+        int(args.item) if args.item.isdigit()
+        else call("GET", "/api/items?" + urllib.parse.urlencode({"key": args.item}), None, None)["id"]
+    )
+    response, _ = fetch("POST", f"/api/items/{item_id}/images", (content, content_type), args.agent)
     return str(json.loads(response)["id"])
-
-
-def _item_id(item: str) -> int:
-    """An item's id from its id or key, as the CLI takes either."""
-    return int(item) if item.isdigit() else call("GET", "/api/items?" + urllib.parse.urlencode({"key": item}), None, None)["id"]
 
 
 def page_command(args: argparse.Namespace) -> str:
@@ -947,7 +946,11 @@ def page_command(args: argparse.Namespace) -> str:
     if args.action == "update":
         page = call("PUT", f"/api/item-pages/{args.page_id}", body, args.agent)
         return f"updated page {page['id']}: {page['url']}"
-    page = call("POST", f"/api/items/{_item_id(args.item)}/pages", body, args.agent)
+    item_id = (
+        int(args.item) if args.item.isdigit()
+        else call("GET", "/api/items?" + urllib.parse.urlencode({"key": args.item}), None, None)["id"]
+    )
+    page = call("POST", f"/api/items/{item_id}/pages", body, args.agent)
     return f"page {page['id']}: {page['url']}"
 
 
@@ -1243,12 +1246,6 @@ def main(argv: list[str] | None = None) -> int:
     )
     item_get = item_commands.add_parser("get", help=f"one item with all its steps, open and closed, and {help_user}'s messages on it, as JSON")
     item_get.add_argument("key")
-    item_reopen = item_commands.add_parser(
-        "reopen", parents=[agent],
-        help=f"take a task {help_user} completed back to Busy, for work you must still post on it (SPEC CONTROL-33)",
-    )
-    item_reopen.add_argument("item", metavar="ITEM", help="the item's key or id")
-    item_reopen.add_argument("--note", required=True, help=f"why it reopens, up to {store.DOING_CHARS} characters; Busy shows it on hover")
     item_merge = item_commands.add_parser(
         "merge", parents=[agent],
         help=f"make two items that are one task into one: SIDE's steps, messages and sessions move to MAIN, SIDE's open"
@@ -1770,9 +1767,6 @@ def run(args: argparse.Namespace) -> Any:
     if args.command == "item":
         if args.action == "get":
             return call("GET", "/api/items?" + urllib.parse.urlencode({"key": args.key}), None, None)
-        if args.action == "reopen":
-            item = call("POST", f"/api/items/{_item_id(args.item)}/agent-reopen", {"why": args.note}, args.agent)
-            return f"reopened item {item['id']} ({item['title']}): Busy, stage {item['stage']}"
         if args.action == "merge":
             return _merged(call("POST", "/api/items/merge", {"side": args.side, "into": args.into, "note": args.note}, args.agent))
         return _held(call("PUT", "/api/items", _stdin_json(), args.agent))
