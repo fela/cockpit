@@ -196,6 +196,8 @@ class Setup:
     parts: dict[str, Any]
     auth_mode: str = "google"
     providers: tuple[str, ...] = ("claude",)
+    # The optional features this install turns on, by name from FEATURES (SPEC SCOPE-6); none by default.
+    features: tuple[str, ...] = ()
     default_provider: str = "claude"
     codex_command: str = "codex"
     claude_sockets_dir: str = ""
@@ -212,6 +214,8 @@ class Setup:
 
 
 PATH_KEYS = {"checkouts", "spec_repo", "skills_repo"}
+# Optional features an install can turn on in its setup's `features` list (SPEC SCOPE-6).
+FEATURES = ("reopen", "weekly_digest", "settings_page")
 
 
 def validate_public_origin(path: Path, public_origin: str, origin: str, auth_mode: str) -> None:
@@ -249,7 +253,7 @@ def read_setup(path: Path, tables: dict[str, TableReader]) -> Setup:
         )
     optional = {
         "auth_mode", "providers", "default_provider", "codex_command", "claude_sockets_dir", "deploy_branch",
-        "public_origin", "last_use", "retired_accounts", "offload",
+        "public_origin", "last_use", "retired_accounts", "offload", "features",
     }
     missing = [key for key in keys if key not in values and key not in optional]
     unknown = sorted(set(values) - set(keys) - set(tables))
@@ -259,9 +263,9 @@ def read_setup(path: Path, tables: dict[str, TableReader]) -> Setup:
     part_tables = {name: read(path, values.pop(name, None)) for name, read in tables.items()}
     values = {"auth_mode": "google", "providers": ["claude"], "default_provider": "claude",
               "codex_command": "codex", "claude_sockets_dir": "", "deploy_branch": "", "public_origin": "",
-              "last_use": {}, "retired_accounts": [], "offload": None, **values}
+              "last_use": {}, "retired_accounts": [], "offload": None, "features": [], **values}
     may_be_empty = {"claude_sockets_dir", "deploy_branch", "public_origin"}
-    wrong = [key for key in keys if key not in {"providers", "last_use", "retired_accounts", "offload"}
+    wrong = [key for key in keys if key not in {"providers", "last_use", "retired_accounts", "offload", "features"}
              and (not isinstance(values[key], str) or (not values[key].strip() and key not in may_be_empty))]
     if wrong:
         raise SetupError(f"{path}: {', '.join(wrong)} must be text that is not empty")
@@ -292,6 +296,10 @@ def read_setup(path: Path, tables: dict[str, TableReader]) -> Setup:
         raise SetupError(f"{path}: providers must be a non-empty list of claude and/or codex")
     if values["default_provider"] not in providers:
         raise SetupError(f"{path}: default_provider must be enabled in providers")
+    features = values["features"]
+    if (not isinstance(features, list) or any(name not in FEATURES for name in features)
+            or len(set(features)) != len(features)):
+        raise SetupError(f"{path}: features must list optional features from {list(FEATURES)}, each once")
     last_use = values["last_use"]
     if (not isinstance(last_use, dict)
             or any("@" not in address or not isinstance(end, datetime) or end.tzinfo is None for address, end in last_use.items())):
@@ -303,6 +311,7 @@ def read_setup(path: Path, tables: dict[str, TableReader]) -> Setup:
         raise SetupError(f"{path}: retired_accounts must list Claude accounts other than the default one, such as"
                          f" {sorted(others)}")
     checked: dict[str, Any] = {**values, **paths, "timezone": timezone, "parts": part_tables, "providers": tuple(providers),
+                               "features": tuple(features),
                                "offload": _read_offload(path, values["offload"]),
                                "retired_accounts": tuple(retired_accounts),
                                "last_use": {address: end.timestamp() for address, end in last_use.items()}}

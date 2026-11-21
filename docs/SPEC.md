@@ -36,6 +36,7 @@ record revisions in git, and update status and reasoning when behaviour changes.
 | SCOPE-3 | Cockpit includes Slack messages the user should answer, Linear comments, and similar items. This includes Notion comments and mentions, and documents a teammate asks the user to review wherever the ask is made. Slack, Linear and Notion are checked at least every 3 hours while the user is on Cockpit, however many light sweeps run in between. | User | Should | Live |  |  |  |
 | SCOPE-4 | Cockpit gets better by fixing what is broken, making things simpler, and making the page smoother to use. Ideas that add new parts, settings or moving pieces are turned down. | User | Should | Live |  |  |  |
 | SCOPE-5 | Cockpit works for anyone, not only the person it was built for. Everything that names or identifies its user comes from one setup per install, not from code. That covers the repository itself and its docs, which read generically and name no user, the name the page and the messages to sessions use, the Google account that may sign in, the folder of checkouts, and the Claude, GitHub and Linear identities. | User | Should | Live |  |  |  |
+| SCOPE-6 | Features beyond what SCOPE-4 keeps are welcome when they are off by default and out of the way. An install turns each one on by name in its setup's `features` list; with it off, none of it shows on the page or runs. | User | Should | Live |  |  | "I don't mind adding many of those features as long as they are by default disabled and quite out of the way." |
 
 ### State
 
