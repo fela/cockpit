@@ -223,7 +223,8 @@ Claude Code passes subscription limits to its
 [status-line command](https://code.claude.com/docs/en/statusline#rate-limit-usage).
 The small [capture script](docs/claude-statusline.py) saves them for Cockpit in
 `~/.claude/rate-limits.json`. It reads the status-line JSON, uses an email you supply,
-and prints the five-hour and weekly percentages. It needs Python 3.12 on macOS or Linux.
+and prints the five-hour and weekly percentages. A session of a named instance writes
+to that instance's own file ([separate instances](docs/LOCAL.md#separate-instances)). It needs Python 3.12 on macOS or Linux.
 From the checkout, install it with:
 
 ```bash

@@ -62,11 +62,11 @@ platform socket directory, and `claude_sockets_dir` overrides that directory if 
 ## Separate instances
 
 One user can run separate Cockpits side by side, for example one for work and one
-for personal projects. Each instance has its own setup, database, inbox,
-priorities, sweeper, port and service, and its own Claude and Codex sign-ins, so
-nothing one does shows in the other. Choose an instance with `COCKPIT_INSTANCE`,
-a lowercase name such as `personal`. Leaving it unset is the instance a single
-Cockpit has always been, with the folders below in the first column.
+for personal projects (SPEC SCOPE-7). Each instance has its own setup, database,
+inbox, port, service, cookies, and Claude and Codex sign-ins, so nothing one does
+shows in the other. `COCKPIT_INSTANCE`, a lowercase name such as `personal`, picks
+the instance, and nothing else does. Leaving it unset is the instance a single
+Cockpit has always been, with the names in the first column.
 
 | | Unnamed | `COCKPIT_INSTANCE=personal` |
 | --- | --- | --- |
@@ -76,7 +76,7 @@ Cockpit has always been, with the folders below in the first column.
 | Codex accounts | `~/.codex`, `~/.codex-2` | `~/.codex-personal`, `~/.codex-personal-2` |
 | macOS LaunchAgent | `cockpit.server` | `cockpit.server.personal` |
 | Linux systemd unit | `cockpit` | `cockpit-personal` |
-| Local sign-in cookie | `cockpit_local_session` | `cockpit_local_session-personal` |
+| Browser cookies | `cockpit_local_session`, `__Host-cockpit_session`, ... | the same names ending in `-personal` |
 
 Set a second instance up with its own port:
 
@@ -88,18 +88,27 @@ cockpit service install                        # or run cockpit-server in this s
 cockpit login
 ```
 
-Commands that manage an instance (`setup`, `service`, `deploy`, `login`,
-`cockpit-server`) need `COCKPIT_INSTANCE` in their environment; `cockpit service install`
-writes it into the LaunchAgent, and a Linux unit `cockpit-personal.service` needs
-`Environment=COCKPIT_INSTANCE=personal`. Sessions don't:
-the server puts it in the environment of everything it starts, and a session that
-runs on one of an instance's Claude or Codex folders reaches that instance even
-when something else started it. Give the instance's Claude folder the same hooks
-and status line as `~/.claude/settings.json`; for the status line, pass
-`--file ~/.claude-personal/rate-limits.json` to the capture script. On Linux,
-`COCKPIT_INSTANCE=personal scripts/second-account.sh` sets up the instance's second
-Claude folder. Give each instance its own `checkouts` folder, and use a different
-browser profile or the separate cookie keeps both signed in in one browser.
+Every `cockpit` command for the instance needs `COCKPIT_INSTANCE` in its
+environment, and so does a `claude` you start by hand for it. `cockpit service
+install` writes it into the LaunchAgent; a Linux unit `cockpit-personal.service`
+needs `Environment=COCKPIT_INSTANCE=personal`. The server puts it in the
+environment of every session and program it starts, with `CODEX_HOME` set to the
+instance's first Codex folder in place of any the shell set. `setup --local` writes
+an `attach` command that carries the name.
+
+Give the instance's Claude folder the same hooks and status line as
+`~/.claude/settings.json` (`cockpit-standing-rules` run with `COCKPIT_INSTANCE`
+installs its rules there); the capture script writes to the instance's own
+`rate-limits.json` because its sessions carry `COCKPIT_INSTANCE`. A second Claude
+folder, `~/.claude-personal-2`, needs the shared entries `scripts/second-account.sh`
+makes for `~/.claude-work`, linked to `~/.claude-personal`. Give each instance its own
+`checkouts` folder. Instances may share one virtualenv: `cockpit deploy` takes one
+lock for all of them. A credential file of any instance stays closed on every
+instance's permission card. The connector gateway (`/api/connectors/mcp`)
+answers only on port 8790, so an instance on another port has none. In Google
+mode, give each instance its own hostname: a browser sends a host's cookies to
+every port, so the cookie names keep the sign-ins apart, but each server would
+still receive the other's cookies.
 
 ## Updating the service
 

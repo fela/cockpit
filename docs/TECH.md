@@ -33,7 +33,7 @@ The configuration directory is private (0700). Authentication files use 0600:
 `token` for agents, `cookie-key` for browser session signatures, `local-login-token`
 for local browser sign-in, and `google-oauth-client.json` for Google mode.
 The database is `~/.local/share/cockpit/cockpit.db`. A named instance
-(`COCKPIT_INSTANCE`, SPEC SCOPE-6) uses `~/.config/cockpit-<name>` and
+(`COCKPIT_INSTANCE`, SPEC SCOPE-7) uses `~/.config/cockpit-<name>` and
 `~/.local/share/cockpit-<name>` instead, with Claude and Codex folders of its own;
 [LOCAL.md](LOCAL.md#separate-instances) lists them.
 
