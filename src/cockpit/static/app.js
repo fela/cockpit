@@ -1629,9 +1629,10 @@ function closeItemRow(item, pressed) {
 // Reopen on a finished task (SPEC CONTROL-34), with "reopen" in the setup's features: the task is taken up again as
 // the user's message would take it (CONTROL-28), with no words to write, and the server tells its session. A task
 // closed as not needed has Unarchive in its row instead.
-// `close`: the item's Close key, which Reopen keeps beside it at the row's end.
+// `close`: the item's Close key, which Reopen keeps beside it at the row's end. A board saved before the server sent
+// `features` has none, so it shows no Reopen.
 function closeKeys(item, state, close) {
-  if (item.stage !== "done" || item.archived || !state.features.includes("reopen")) return close;
+  if (item.stage !== "done" || item.archived || !(state.features ?? []).includes("reopen")) return close;
   return h("span", { class: "end-keys" }, h("button", {
     class: "button reopen-task", type: "button", title: "Take this task up again; its session can post here again",
     onclick: () => takeUpTask(item),
