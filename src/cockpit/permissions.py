@@ -418,6 +418,13 @@ SECRET_PLACES = (
     )),
     *(f"{account.folder.name}/.credentials.json" for account in config.ACCOUNTS),
 )
+# Where every instance (SPEC SCOPE-7) keeps its credentials, under home: SECRET_PLACES names this instance's own, and
+# `secret_places` adds the ones these find, so a session in one instance cannot show another instance's sign-in.
+INSTANCE_SECRETS = (
+    ".config/cockpit*/token", ".config/cockpit*/local-login-token", ".config/cockpit*/cookie-key",
+    ".config/cockpit*/google-oauth-client.json", ".config/cockpit*/secrets", ".config/cockpit*/signins",
+    ".claude*/.credentials.json", ".codex*/auth.json",
+)
 # Auto mode judges a call with the session's earlier calls: a block in the hour before can explain a stopped read.
 EARLIER_BLOCK_MINUTES = 60
 # Tools whose calls change nothing outside the session: they read, search or keep the session's own task list.
@@ -863,7 +870,7 @@ def credentials_in(tool_input: dict[str, Any], home: Path) -> list[str]:
         if folder.is_absolute() and not any(mark in path for mark in "$*?[] \t\n") and not path.startswith("-"):
             text += " " + json.dumps(os.path.normpath(folder / path))
     homes = "|".join(re.escape(prefix) for prefix in ("~", "$HOME", "${HOME}", str(home)))
-    places = "|".join(re.escape(place) for place in SECRET_PLACES)
+    places = "|".join(re.escape(place) for place in secret_places(home))
     found = [f"~/{match[1]}" for match in re.finditer(rf"(?:{homes})/((?:{places})(?:/[\w.@-]+)*)(?![\w.@-])", text)]
     if not found:
         names = "|".join(re.escape(name) for name in SECRET_NAMES)
@@ -1543,6 +1550,12 @@ def _script_words(head: str) -> str:
     return "\n".join(comments).strip()
 
 
+def secret_places(home: Path) -> tuple[str, ...]:
+    """SECRET_PLACES, and every other credential place of an instance found under home (INSTANCE_SECRETS)."""
+    found = {str(path.relative_to(home)) for pattern in INSTANCE_SECRETS for path in home.glob(pattern)}
+    return (*SECRET_PLACES, *sorted(found - set(SECRET_PLACES)))
+
+
 def showable(path: Path, home: Path) -> Path | None:
     """`path` resolved, when Cockpit may show the file and hand it to Claude: a file under home or Claude Code's
     /tmp/claude-<uid>, never one in a credential place, a .env file or a key; else None. Both the path as named and
@@ -1554,7 +1567,7 @@ def showable(path: Path, home: Path) -> Path | None:
         resolved = path.resolve()
         if not (resolved.is_relative_to(home) or resolved.is_relative_to(CLAUDE_TMP)):
             return None
-        places = [home / place for place in SECRET_PLACES]
+        places = [home / place for place in secret_places(home)]
         contents = [place_contents(place, home) for place in places]
         places += [place.resolve() for place in places] + [target for targets, _ in contents for target in targets]
         for named in (Path(os.path.abspath(path)), resolved):

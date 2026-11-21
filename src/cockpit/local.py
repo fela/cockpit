@@ -1,5 +1,6 @@
 """Bootstrap a local install, manage the macOS LaunchAgent, and deploy to it or to the Linux systemd user service
-`cockpit`. No Google account required."""
+`cockpit`. No Google account required. A named instance (SPEC SCOPE-7) has a LaunchAgent and a systemd unit of its
+own, `cockpit.server.<name>` and `cockpit-<name>`."""
 
 from __future__ import annotations
 
@@ -24,7 +25,11 @@ from typing import IO
 
 from cockpit import auth, cli, config, parts
 
-LABEL = "cockpit.server"
+LABEL = "cockpit.server" + (f".{config.INSTANCE}" if config.INSTANCE else "")
+# The setup's `attach`: a named instance's `cockpit attach` has to reach that instance.
+ATTACH = (f"COCKPIT_INSTANCE={config.INSTANCE} " if config.INSTANCE else "") + "cockpit attach {session}"
+# The Linux systemd user unit `cockpit deploy` restarts (TECH.md section 13).
+SYSTEMD_UNIT = f"cockpit{config.SUFFIX}"
 
 
 def codex_command() -> str:
@@ -43,7 +48,7 @@ def codex_command() -> str:
     return "codex"
 
 
-def initialize(repo: Path, provider: str, name: str, timezone: str) -> Path:
+def initialize(repo: Path, provider: str, name: str, timezone: str, port: int) -> Path:
     if config.SETUP_PATH.exists():
         raise ValueError(f"{config.SETUP_PATH} already exists; edit it to change your setup")
     repo = repo.resolve()
@@ -53,10 +58,11 @@ def initialize(repo: Path, provider: str, name: str, timezone: str) -> Path:
                             capture_output=True, text=True, check=True).stdout.strip()
     values = {
         "name": name, "email": f"{getpass.getuser()}@localhost", "auth_mode": "local",
-        "origin": config.API_BASE, "providers": [provider], "default_provider": provider,
+        "origin": config.loopback_base(port), "providers": [provider], "default_provider": provider,
         "codex_command": codex_command(), "checkouts": str(repo.parent), "spec_repo": str(repo),
         "skills_repo": str(repo), "skills_folder": "src/cockpit/skills", "skills_branch": branch,
-        "deploy_branch": branch, "attach": "cockpit attach {session}", "timezone": timezone,
+        "deploy_branch": branch, "attach": ATTACH, "timezone": timezone,
+        **({"port": port} if port != config.DEFAULT_PORT else {}),
     }
     # Validate before writing a durable setup or any credentials.
     text = "".join(f"{key} = {json.dumps(value, ensure_ascii=False)}\n" for key, value in values.items())
@@ -76,7 +82,8 @@ def launch_agent(python: Path, log_dir: Path, path: str) -> bytes:
     return plistlib.dumps({
         "Label": LABEL, "ProgramArguments": [str(python), "-m", "cockpit.server"],
         "RunAtLoad": True, "KeepAlive": True, "ThrottleInterval": 10,
-        "EnvironmentVariables": {"PATH": path, "PYTHONUNBUFFERED": "1"},
+        "EnvironmentVariables": {"PATH": path, "PYTHONUNBUFFERED": "1",
+                                 **({"COCKPIT_INSTANCE": config.INSTANCE} if config.INSTANCE else {})},
         "StandardOutPath": str(log_dir / "server.log"), "StandardErrorPath": str(log_dir / "server.log"),
     })
 
@@ -117,7 +124,7 @@ RESTART_DELAY_SECONDS = 3
 RESTART_SCRIPT = ('sleep "$1"; launchctl print "$2" >/dev/null 2>&1 || launchctl bootstrap "$3" "$4";'
                   ' exec launchctl kickstart -k "$2"')
 # $1 the delay: restart the systemd user unit of TECH.md section 13.
-SYSTEMD_RESTART_SCRIPT = 'sleep "$1"; exec systemctl --user restart cockpit'
+SYSTEMD_RESTART_SCRIPT = f'sleep "$1"; exec systemctl --user restart {SYSTEMD_UNIT}'
 
 
 def _plist() -> Path:
@@ -125,7 +132,7 @@ def _plist() -> Path:
 
 
 def _systemd_unit() -> Path:
-    return Path.home() / ".config" / "systemd" / "user" / "cockpit.service"
+    return Path.home() / ".config" / "systemd" / "user" / f"{SYSTEMD_UNIT}.service"
 
 
 def service_python() -> Path:
@@ -174,8 +181,7 @@ def deploy() -> str:
     installed into a scratch venv and imported there first; if that fails the running Cockpit is left alone.
     The restart changes the page's build version, so open pages offer Reload (SPEC UI-13).
     """
-    config.DATA_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
-    with open(config.DATA_DIR / "deploy.lock", "a") as lock:
+    with open(config.deploy_lock(config.DATA_DIR), "a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         return _deploy(lock)
 
@@ -257,7 +263,7 @@ def _deploy(lock: IO) -> str:
         _detach(["/bin/sh", "-c", SYSTEMD_RESTART_SCRIPT, "sh", str(RESTART_DELAY_SECONDS)], lock)
         restart = f"Cockpit restarts in {RESTART_DELAY_SECONDS} s; open pages then offer Reload."
     else:
-        restart = "Restart cockpit-server (systemctl --user restart cockpit on Linux) to run it."
+        restart = f"Restart cockpit-server (systemctl --user restart {SYSTEMD_UNIT} on Linux) to run it."
     return " ".join([f"Deployed {branch} at {commit[:12]}.", restart, *notes])
 
 
@@ -269,6 +275,8 @@ def main(argv: list[str]) -> int:
         parser.add_argument("--provider", choices=("claude", "codex"), default="codex")
         parser.add_argument("--name", default=getpass.getuser())
         parser.add_argument("--timezone", default="UTC")
+        parser.add_argument("--port", type=int, default=config.DEFAULT_PORT,
+                            help="loopback port; a second instance (COCKPIT_INSTANCE) needs one of its own")
     elif argv[0] == "service":
         parser.add_argument("action", choices=("install", "start", "stop", "status"))
     elif argv[0] == "deploy":
@@ -279,7 +287,7 @@ def main(argv: list[str]) -> int:
     args = parser.parse_args(argv[1:])
     try:
         if argv[0] == "setup":
-            print(f"Created {initialize(args.repo, args.provider, args.name, args.timezone)}. "
+            print(f"Created {initialize(args.repo, args.provider, args.name, args.timezone, args.port)}. "
                   "Run cockpit-server, or cockpit service install on macOS.")
         elif argv[0] == "service":
             print(service(args.action))
@@ -292,7 +300,7 @@ def main(argv: list[str]) -> int:
             else:
                 token = auth.read_or_create_secret(config.LOCAL_LOGIN_PATH)
                 request = urllib.request.Request(
-                    config.API_BASE + auth.LOCAL_SIGN_IN_PATH + "/code", method="POST",
+                    config.loopback_base(setup.port) + auth.LOCAL_SIGN_IN_PATH + "/code", method="POST",
                     headers={"Authorization": f"Bearer {token}", "Origin": setup.origin,
                              "Host": setup.origin.removeprefix("http://")},
                 )
@@ -315,7 +323,7 @@ def main(argv: list[str]) -> int:
                     print(f"Open this one-time address within two minutes:\n{address}")
                     return 0
             print("Opened Cockpit in your browser.")
-    except (ValueError, OSError, subprocess.SubprocessError) as exc:
+    except (ValueError, OSError, subprocess.SubprocessError, config.SetupError) as exc:
         print(f"cockpit: {exc}", file=sys.stderr)
         return 1
     return 0

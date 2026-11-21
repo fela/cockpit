@@ -34,12 +34,12 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from cockpit import accounts
+from cockpit import accounts, config
 from cockpit.config import Account, user_name
 
 log = logging.getLogger(__name__)
 
-PROJECTS_DIR = Path.home() / ".claude" / "projects"
+PROJECTS_DIR = config.CLAUDE_HOME / "projects"
 # How long one `claude agents` listing is reused before the next one starts in the background; the page polls
 # more often. A listing can take seconds on a busy machine (SPEC UI-39), so no page request waits for one.
 CACHE_SECONDS = 10

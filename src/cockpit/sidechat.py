@@ -40,11 +40,11 @@ EARLIER_CHARS = 20_000
 # Files that hold secrets in a session's folder stay closed to the copy, whose answer the page stores and shows;
 # the home folder's own (named too) are outside it, since a session in the home folder has no side chat (`ask`).
 # The copy gets no shell: a command allowed by its prefix can still run other programs (`rg --pre`) or write
-# (`git log --output`). Every credential place the card keeps closed (permissions.SECRET_PLACES, a file or a folder),
+# (`git log --output`). Every credential place the card keeps closed (permissions.secret_places, a file or a folder),
 # and more besides.
 SECRET_FILES = [
     *(path for place in permissions.SECRET_PLACES for path in (f"~/{place}", f"~/{place}/**")),
-    "~/.claude*/.credentials.json", "~/.config/**",
+    "~/.claude*/.credentials.json", "~/.codex*/auth.json", "~/.config/**",
     "**/.env", "**/.env.*", "**/*.pem", "**/*.key", "**/*credentials*", "**/*secret*",
     *(f"**/{name}" for name in permissions.SECRET_NAMES),
 ]
@@ -53,7 +53,7 @@ SECRET_FILES = [
 def denied_reads(home: Path) -> list[str]:
     """SECRET_FILES, and where the credential places lead, as absolute paths (`//`): each place as it resolves and
     every link target inside one, so a credential linked into the session's folder stays closed too."""
-    places = [home / place for place in permissions.SECRET_PLACES]
+    places = [home / place for place in permissions.secret_places(home)]
     targets = {place.resolve() for place in places}
     targets |= {target for place in places for target in permissions.place_contents(place, home)[0]}
     return [*SECRET_FILES, *(path for target in sorted(targets) for path in (f"/{target}", f"/{target}/**"))]
