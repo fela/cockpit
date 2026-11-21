@@ -104,7 +104,10 @@ installs its rules there); the capture script writes to the instance's own
 folder, `~/.claude-personal-2`, needs the shared entries `scripts/second-account.sh`
 makes for `~/.claude-work`, linked to `~/.claude-personal`. Give each instance its own
 `checkouts` folder. Instances may share one virtualenv: `cockpit deploy` takes one
-lock for all of them. A credential file of any instance stays closed on every
+lock for all of them. Instances that share a virtualenv share code, though:
+deploying one changes what the other runs at its next restart and in its next
+Codex worker, so give each instance its own virtualenv when they should deploy
+independently. A credential file of any instance stays closed on every
 instance's permission card. The connector gateway (`/api/connectors/mcp`)
 answers only on port 8790, so an instance on another port has none. In Google
 mode, give each instance its own hostname: a browser sends a host's cookies to
