@@ -1,7 +1,6 @@
-// A page opened from a step's card sits beside the card. It checks, on `/` at 1440 px in
-// light and on `/classic` at 1280 px in dark:
+// A page opened from a step's card sits beside the card. It checks, at 1440 px in light and at 1280 px in dark:
 // - the page slides in from the right, and the card slides to a column at the left;
-// - only the card shows at the left (no rail, list, queue or header), with its reply box on screen, and the page
+// - only the card shows at the left (no list on the left or header), with its reply box on screen, and the page
 //   takes the rest of the window, not modal: the card takes clicks and typing;
 // - the Pages view in the layer leaves out its own reply box and the step's ask;
 // - a comment left on the page shows at once, open, above the card's reply box, while the page stays;
@@ -79,7 +78,8 @@ async function main() {
     browser = await chromium.launch({ executablePath: CHROMIUM });
     const run = Date.now();
 
-    // A step whose text links two pages on its item; returns the ids.
+    // A step whose text links two pages on its item; returns the ids. A long one adds three long details, so its card
+    // scrolls once they are open.
     const makeStep = async (label, long) => {
       const key = `note:beside-${run}-${label}`;
       const item = await agent("PUT", "/api/items", { key, title: `Beside test ${label}`, priority: "urgent", sessions: [SESSION_B] });
@@ -87,17 +87,19 @@ async function main() {
       const other = await agent("POST", `/api/items/${item.id}/pages`, { title: "Reminders report", html: REPORT("Reminders in January") });
       // A third page, for three quick clicks.
       const third = await agent("POST", `/api/items/${item.id}/pages`, { title: "Sharing report", html: REPORT("Sharing in January") });
-      const notes = long ? Array.from({ length: 40 }, (_, n) => `\n\nNote ${n + 1} on the reports.`).join("") : "";
+      const notes = Array.from({ length: 12 }, (_, n) => `Note ${n + 1} on the reports.`).join("\n\n");
+      const details = long ? [1, 2, 3].map((n) => ({ title: `Notes ${n} on the reports`, body: notes })) : [];
       const answer = await agent("POST", "/api/steps", {
         item_key: key, need: `beside-${label}`, ask: "Ship the exports report?", score: 100, session_id: SESSION_B,
-        body: `Read [the exports report](${report.url}), [the reminder report](${other.url}) and [the sharing report](${third.url}).${notes}`,
+        body: `Read [the exports report](${report.url}), [the reminder report](${other.url}) and [the sharing report](${third.url}).`,
+        details,
       });
       return { item: item.id, report: report.id, revision: report.revision, other: other.id, third: third.id, step: answer.step.id };
     };
 
-    const sizes = [["wide", 1440, 900, "light", "/"], ["classic", 1280, 800, "dark", "/classic"]];
-    for (const [label, width, height, scheme, home] of sizes) {
-      const at = `${label} (${width} px ${scheme}, ${home})`;
+    const sizes = [["wide", 1440, 900, "light"], ["laptop", 1280, 800, "dark"]];
+    for (const [label, width, height, scheme] of sizes) {
+      const at = `${label} (${width} px ${scheme})`;
       await clearQueue();
       const { page, errors, shot } = await newPage(browser, info, { width, height }, scheme, label);
       const first = await makeStep(`${label}-1`);
@@ -105,7 +107,7 @@ async function main() {
       const goTo = async (ids) => {
         // A change of hash alone would keep the page drawn as it was.
         await page.goto("about:blank");
-        await page.goto(`${info.origin}${home}${home === "/" ? `#home/item/${ids.item}` : ""}`);
+        await page.goto(`${info.origin}/#home/item/${ids.item}`);
         const card = page.locator(`#next [data-step="${ids.step}"]`).first();
         await card.waitFor().catch(async (error) => {
           await page.screenshot({ path: path.join(SHOTS, `${label}-missing-${ids.step}.png`) });
@@ -113,7 +115,6 @@ async function main() {
           const where = ["queue", "ready_next", "with_agents"].map((name) => `${name}: ${(state[name] || []).map((step) => step.id).join(",")}`).join("; ");
           throw new Error(`step ${ids.step} not shown (${where}): ${error.message}`);
         });
-        if (await card.evaluate((el) => el.classList.contains("step-row") && !el.classList.contains("open"))) await card.locator(".row-head").click();
         return card;
       };
       const layerShown = page.locator("dialog.page-overlay[open]:not(.page-overlay-loading-page)");
@@ -137,7 +138,7 @@ async function main() {
           card: card.getBoundingClientRect().toJSON(),
           frame: frame.toJSON(),
           replyOnScreen: Boolean(replyBox) && replyBox.bottom <= innerHeight && replyBox.top >= 0,
-          shownElsewhere: ["#sidebar", ".rail", "#queue", "#work", "#overview", "#header", ".side"]
+          shownElsewhere: ["#sidebar", ".rail", "#work", "#header", ".side"]
             .filter((selector) => [...document.querySelectorAll(selector)].some((el) => visible(el) && el.getBoundingClientRect().width > 0)),
           modal: document.querySelector("dialog.page-overlay[open]").matches(":modal"),
           tipShown: [...document.querySelectorAll("body > div.tip")].some((el) => !el.hidden),
@@ -318,7 +319,7 @@ async function main() {
       const closed = await page.evaluate((stepId) => ({
         beside: document.documentElement.classList.contains("page-beside"),
         card: Boolean(document.querySelector(`#next [data-step="${stepId}"]`)),
-        rail: [...document.querySelectorAll("#sidebar, #queue")].some((el) => el.getClientRects().length > 0),
+        rail: [...document.querySelectorAll("#sidebar")].some((el) => el.getClientRects().length > 0),
         animations: window.__animations, scrolled: scrollY,
       }), second.step);
       check(`${at}: the X closes the page and lays Cockpit's page out as before`, !closed.beside && closed.card && closed.rail, JSON.stringify(closed));
@@ -346,11 +347,11 @@ async function main() {
 
     // Narrower windows: the page slides over the whole window, from the right at 1000 px, from the bottom on a phone.
     for (const [label, width, height, scheme, from] of [["narrow", 1000, 800, "light", "translateX(100%)"], ["phone", 390, 844, "dark", "translateY(100%)"]]) {
-      const at = `${label} (${width} px ${scheme}, /classic)`;
+      const at = `${label} (${width} px ${scheme})`;
       await clearQueue();
       const { page, errors, shot } = await newPage(browser, info, { width, height }, scheme, label);
       const ids = await makeStep(label);
-      await page.goto(`${info.origin}/classic#home/item/${ids.item}`);
+      await page.goto(`${info.origin}/#home/item/${ids.item}`);
       const card = page.locator(`#next [data-step="${ids.step}"]`).first();
       await card.waitFor().catch(async (error) => {
         await page.screenshot({ path: path.join(SHOTS, `${label}-missing-${ids.step}.png`) });
@@ -358,7 +359,6 @@ async function main() {
         const where = ["queue", "ready_next", "with_agents"].map((name) => `${name}: ${(state[name] || []).map((step) => step.id).join(",")}`).join("; ");
         throw new Error(`step ${ids.step} not shown (${where}): ${error.message}`);
       });
-      if (await card.evaluate((el) => el.classList.contains("step-row") && !el.classList.contains("open"))) await card.locator(".row-head").click();
       await page.evaluate(() => { window.__animations.length = 0; });
       await card.locator(`a[href*="/pages?id=${ids.report}&step=${ids.step}"]:visible`).first().click();
       await page.locator("dialog.page-overlay[open]:not(.page-overlay-loading-page)").waitFor();
@@ -392,6 +392,7 @@ async function main() {
 async function swapsAndRedraws({ page, at, makeStep, goTo, layerShown, check }) {
   const ids = await makeStep("swaps", true);
   const card = await goTo(ids);
+  for (const fold of await card.locator(".details details.detail > summary").all()) await fold.click();
   const linkTo = (id) => page.locator(`#next [data-step="${ids.step}"] a[href*="/pages?id=${id}&step=${ids.step}"]:visible`).first();
   const shownId = () => page.evaluate(() => {
     const frame = document.querySelector("dialog.page-overlay[open]:not(.page-overlay-loading-page) iframe.page-overlay-frame:not(.page-overlay-next)");

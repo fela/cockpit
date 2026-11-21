@@ -1,6 +1,6 @@
 // Queue order (SPEC RANK-18): the user's takes first, then the sweeper's score, with no rules of the code's own.
 // On a synthetic database, puts a step at score 5 on a new high-priority item and a finish step on a new
-// normal one, then checks that the page's queue lists the steps the user took, then the rest by score, and that
+// normal one, then checks that Inbox, in the list on the left, lists the steps the user took, then the rest by score, and that
 // the high-priority step gets no place of its own. Then puts the sweep's score of 100 on it and checks that it
 // leads the steps the user did not take.
 //
@@ -63,11 +63,11 @@ async function main() {
     const errors = [];
     page.on("pageerror", (error) => errors.push(error.message));
     const shown = async () => {
-      await page.goto(`${info.origin}/classic`);
-      await page.locator("#queue [data-step]").first().waitFor();
+      await page.goto(`${info.origin}/`);
+      await page.locator("#sidebar details.sidebar-group.queue li.side-item[data-step]").first().waitFor({ state: "attached" });
       return page.evaluate(() => {
-        const ids = [...document.querySelectorAll("#next [data-step], #queue [data-step]")]
-          .filter((el) => !el.parentElement.closest("[data-step]"))
+        // Inbox's rows, in the order the list shows them; the queue's steps among them are checked.
+        const ids = [...document.querySelectorAll("#sidebar details.sidebar-group.queue li.side-item[data-step]")]
           .map((el) => Number(el.dataset.step));
         const byId = new Map(ui.state.queue.map((step) => [step.id, step]));
         return [...new Set(ids)].filter((id) => byId.has(id)).map((id) => {

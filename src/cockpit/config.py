@@ -71,8 +71,8 @@ SESSION_OPTIONS: dict[str, dict[str, Any]] = {
         "effort": "high",
     },
     "codex": {
-        "models": [("gpt-6.1-sol", "GPT-6.1 Sol"), ("gpt-6.1-terra", "GPT-6.1 Terra"), ("gpt-6-luna", "GPT-6 Luna"),
-                   ("gpt-6-astra", "GPT-6 Astra")],
+        "models": [("gpt-6.2-sol", "GPT-6.2 Sol"), ("gpt-6.1-terra", "GPT-6.1 Terra"), ("gpt-6-luna", "GPT-6 Luna"),
+                   ("gpt-6.2-astra", "GPT-6.2 Astra")],
         "efforts": ["low", "medium", "high", "xhigh"],
         "effort": "high",
         "speeds": [
@@ -81,7 +81,7 @@ SESSION_OPTIONS: dict[str, dict[str, Any]] = {
             {"name": "ultrafast", "label": "Ultrafast", "hint": "8× included usage · Pro $500"},
         ],
     },
-    # The ACP agents (acp_agent.py, SPEC SESSION-26) pick no effort. Gemini's models are the CLI's own aliases, which it
+    # The ACP agents (acp_agent.py, SPEC SESSION-30) pick no effort. Gemini's models are the CLI's own aliases, which it
     # points at its current models, "auto" letting it choose per request; Grok's "default" is the CLI's own default.
     "gemini": {
         "models": [("auto", "Auto"), ("pro", "Pro"), ("flash", "Flash"), ("flash-lite", "Flash-Lite")],
@@ -104,7 +104,7 @@ ACP_PROVIDERS = ("gemini", "grok")
 def session_speeds(provider: str, model: str) -> list[dict[str, str]]:
     """The speeds supported by this model; Ultrafast also needs an eligible provider account."""
     return [speed for speed in SESSION_OPTIONS[provider].get("speeds", [])
-            if speed["name"] != "ultrafast" or model in ("gpt-6.1-sol", "gpt-6-astra")]
+            if speed["name"] != "ultrafast" or model in ("gpt-6.2-sol", "gpt-6.2-astra")]
 
 
 def validate_speed(provider: str, model: str, speed: str | None) -> None:
@@ -215,7 +215,7 @@ class Setup:
     providers: tuple[str, ...] = ("claude",)
     default_provider: str = "claude"
     codex_command: str = "codex"
-    # The Gemini CLI and Grok Build commands (SPEC SESSION-26): an executable name or absolute path, using its own login.
+    # The Gemini CLI and Grok Build commands (SPEC SESSION-30): an executable name or absolute path, using its own login.
     gemini_command: str = "gemini"
     grok_command: str = "grok"
     claude_sockets_dir: str = ""

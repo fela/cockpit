@@ -255,7 +255,6 @@ def test_the_top_two_steps_are_checked_while_user_looks_and_their_last_check_is_
     assert state["checking"]["step_ids"] == [steps[0]["id"], steps[1]["id"]]
     assert (state["sweep_launch"]["message_id"], state["sweep_launch"]["state"]) == (message["id"], "running")
     assert world.client.post("/api/update", headers=world.user()).status_code == 409
-    assert world.client.post("/api/sweeps/run", headers=world.user()).status_code == 409
 
     run_sql(world, "UPDATE messages SET created_at = ?", (iso(datetime.now(UTC) - timedelta(minutes=1)),))
     verdict =agent.post(f"/api/steps/{steps[0]['id']}/checked", json={"note": "PR 10 still open"}, headers=world.agent())
@@ -1163,7 +1162,7 @@ def test_a_restart_lists_the_changes_the_sweeper_has_not_seen_without_waiting_fo
 def test_a_sweep_that_finishes_while_cockpit_looks_up_its_session_gets_no_restart(world: World, monkeypatch) -> None:
     sweep, _, _ = stop_sweep(world, 60, 50)
 
-    def finishes(conn, exists) -> None:
+    def finishes(conn, exists, provider) -> None:
         finish = {"sweep_id": sweep["id"], "summary": "Sweep: nothing moved", "error": ""}
         assert agent_of(world).post("/api/sweeps/finish", json=finish, headers=world.agent("sweep")).status_code == 200
 

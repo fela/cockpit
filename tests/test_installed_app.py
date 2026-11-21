@@ -119,11 +119,13 @@ def test_every_page_says_which_cockpit_sent_it_and_cannot_be_kept_by_a_304(world
         assert "etag" not in response.headers, place
 
 
-def test_a_service_worker_does_not_exist() -> None:
-    # Updates reach the page by normal HTTP caching and the Reload key alone (UI-13), so nothing may keep old files.
-    assert not list(STATIC_DIR.rglob("*worker*"))
-    for script in STATIC_DIR.rglob("*.js"):
-        assert "serviceWorker.register" not in script.read_text(), script.name
+def test_offline_shell_worker_is_public_and_explicitly_scoped(anonymous: TestClient) -> None:
+    worker = anonymous.get("/offline-worker.js")
+    assert worker.status_code == 200
+    assert worker.headers["service-worker-allowed"] == "/"
+    assert worker.headers["cache-control"] == "no-store"
+    assert "javascript" in worker.headers["content-type"]
+    assert "X-Cockpit-Offline-User" not in worker.headers
 
 
 def test_the_phone_launch_screen_is_graphite_like_the_page_that_follows_it() -> None:

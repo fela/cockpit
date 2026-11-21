@@ -73,11 +73,10 @@ async function main() {
       page.setDefaultNavigationTimeout(60000);
       const errors = [];
       page.on("pageerror", (error) => errors.push(error.message));
-      await page.goto(`${info.origin}/classic`);
-      const card = page.locator(`[data-step="${STEP}"]:visible`).first();
+      await page.goto(`${info.origin}/`);
+      // The step takes Next up, whose card shows its body.
+      const card = page.locator(`#next .next-card[data-step="${STEP}"]`);
       await card.waitFor();
-      // Next up shows the body; a queue row opens on its title.
-      if (!(await card.locator(".prose.body").count())) await card.locator(".row-title").first().click();
       const body = card.locator(".prose.body").first();
       await body.locator(`a[href="${DEV_LINK}"]`).waitFor();
       const links = await body.evaluate((el) => [...el.querySelectorAll("a[href^='http']")].map((a) => ({

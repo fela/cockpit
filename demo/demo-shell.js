@@ -25,7 +25,7 @@
   const SAVED = "Demo: Cockpit would save this; the demo only shows it";
   const ASK_ANSWER = "Demo answer: no AI runs here. In Cockpit, a read-only copy of this session would answer your "
     + "question from what the session knows, while the session keeps working.";
-  const QUIET = /^\/api\/(page-errors|presence(\/seen)?|control-uses|flashes|sweeps\/run)$/;
+  const QUIET = /^\/api\/(page-errors|presence(\/seen)?|control-uses|flashes)$/;
   const DAYS = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"];
   const MESSAGE_KEYS = [
     "as_prompt", "author", "behind_dialog", "completes", "created_at", "detail", "dismiss_reason", "dismissed_at",
@@ -1236,7 +1236,6 @@
         return { j: own({ ...clone(next), joined: false, reopened: false }) };
       }
       case "release":
-      case "send-now":
         if (waiting) {
           if (run.deadline) {
             clearTimeout(run.deadline.handle);
@@ -1250,7 +1249,6 @@
         return { j: own(clone(message || { id })) };
       case "retry":
       case "dismiss":
-      case "restore":
         return { j: {} };
       default:
         return genericWrite(source);
@@ -1678,7 +1676,6 @@
     let m;
     if (path === "/next") path = "/";
     if (path === "/") return { name: "index-sidebar", path, search, hash };
-    if (path === "/classic") return { name: "index-classic", path, search, hash };
     if (path === "/spec" || /^\/(skills|writing)(\/|$)/.test(path)) return { name: "spec", path, search, hash };
     if (["/briefing", "/usage", "/pages", "/emergency"].includes(path)) return { name: path.slice(1), path, search, hash };
     if ((m = /^\/pages\/(\d+)$/.exec(path))) return { name: "pages", path: "/pages", search: `?id=${m[1]}`, hash };

@@ -20,6 +20,7 @@
 //   the dot on the key, also after a reload; the view reopens on it; Discard drops it and the dot goes; after a
 //   refused save it opens on a newer edit, and Discard drops the refused words too;
 // - one Save sends both a priorities edit and an inbox edit;
+// - a Save of an inbox edit alone leaves priorities changed elsewhere while the view was open;
 // - G P opens the view;
 // - at phone width the box shows without sideways scroll;
 // - no page errors.
@@ -476,6 +477,25 @@ async function main() {
       bothBack && JSON.stringify(bothGoals) === JSON.stringify(["Saved with the inbox"]) && bothInbox.sources.text === bothSources
       && puts.includes("/api/goals") && puts.includes("/api/inbox-settings") && (await marked()) === 0 && (await inboxDots()) === 0,
       JSON.stringify({ bothGoals, sources: bothInbox.sources.text, puts }));
+
+    // Priorities changed elsewhere while the view is open, then picked up by the page's poll, stay when the view saves
+    // an edit of the inbox alone.
+    await openInbox();
+    await putGoals(["Changed in another tab"]);
+    const polled = await waitFor(() => page.evaluate(() => drawn(ui.state).goals.map((goal) => goal.text)),
+      (texts) => texts[0] === "Changed in another tab");
+    const aloneSources = `${storedInbox.sources.text}\n- Saved alone.`;
+    await sources.fill(aloneSources);
+    puts.length = 0;
+    const aloneBack = await save();
+    const aloneInbox = await waitFor(() => call("GET", "/api/inbox-settings"), (got) => got.sources.text === aloneSources);
+    await sleep(500);
+    const aloneGoals = await goals();
+    check("a Save of an inbox edit alone leaves priorities changed elsewhere while the view was open",
+      aloneBack && polled[0] === "Changed in another tab" && aloneInbox.sources.text === aloneSources
+      && JSON.stringify(aloneGoals) === JSON.stringify(["Changed in another tab"]) && !puts.includes("/api/goals")
+      && (await marked()) === 0,
+      JSON.stringify({ polled, aloneGoals, puts }));
     await call("PUT", "/api/inbox-settings", { rules: storedInbox.rules.points, sources: storedInbox.sources.text });
     await putGoals(savedTexts);
     await waitFor(boxText, (text) => text.includes("Ship A"));

@@ -1,6 +1,5 @@
-// A session that Claude Code lists with no state shows on the classic page's All work with a dot that says its state is
-// not known, and no error. A Next up menu that a redraw takes off the page before its toggle event arrives throws
-// nothing.
+// A session that Claude Code lists with no state shows among Search's matches with a dot that says its state is not
+// known, and no error. A Next up menu that a redraw takes off the page before its toggle event arrives throws nothing.
 //
 // Starts serve_preview.py (this checkout's Cockpit on a synthetic database; README.md says what it needs) and
 // drives a headless Chromium. Prints one line per check and exits 1 when one failed.
@@ -39,7 +38,7 @@ async function main() {
     const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
     await context.setExtraHTTPHeaders({ cookie: `${info.name}=${info.value}` });
 
-    // Every session reads as Claude Code listing it with no state, so the loose ones in All work have none.
+    // Every session reads as Claude Code listing it with no state, so the loose ones Search finds have none.
     const page = await context.newPage();
     const errors = [];
     page.on("pageerror", (error) => errors.push(error.message));
@@ -47,23 +46,20 @@ async function main() {
       const full = await fullState(route);
       const state = await full.response.json();
       for (const session of state.sessions) session.state = "";
-      // One session on no task, so All work has a loose session to show whatever the synthetic database holds.
+      // One session on no task, so Search has a loose session to find whatever the synthetic database holds.
       state.sessions.push({ ...state.sessions[0], session_id: "33333333-3333-4333-8333-333333333333", id: "33333333",
         name: "Loose session fixture", state: "" });
       await route.fulfill({ ...full, json: state });
     });
-    await page.goto(`${info.origin}/classic`);
+    await page.goto(`${info.origin}/#find/${encodeURIComponent("Loose session fixture")}`);
     await page.waitForLoadState("networkidle");
     await sleep(1500);
-    const rows = await page.locator(".session-row .dots .dot").evaluateAll((dots) => dots.map((dot) => [dot.className, dot.dataset.tip || dot.title]));
-    check("the classic page shows sessions with no state", rows.length > 0 && errors.length === 0,
+    const rows = await page.locator("#work .session-row .dots .dot").evaluateAll((dots) => dots.map((dot) => [dot.className, dot.dataset.tip || dot.title]));
+    check("Search shows the session with no state", rows.length > 0 && errors.length === 0,
       JSON.stringify({ rows: rows.length, errors }));
     check("a session with no state has a dot that says its state is not known",
       rows.length > 0 && rows.every(([name, title]) => /\bunknown\b/.test(name) && title === "State not known"),
       JSON.stringify(rows.slice(0, 5)));
-    // Grouped by state, they sit under a named group rather than one with no name.
-    const groups = await page.evaluate(() => (typeof SESSION_STATE_GROUPS === "object" ? SESSION_STATE_GROUPS[""] : null));
-    check("the state grouping names sessions with no state", groups === "State not known", JSON.stringify(groups));
     await page.close();
 
     // A redraw replaces Next up's card between the menu opening and its toggle event.
@@ -74,14 +70,14 @@ async function main() {
     await next.waitForLoadState("networkidle");
     await sleep(1500);
     const found = await next.evaluate(() => {
-      const menu = document.querySelector(".next-card .step-context details.step-menu");
+      const menu = document.querySelector(".next-card .context-marks details.step-menu");
       if (!menu) return false;
       menu.open = true;
       menu.closest(".next-card").remove();
       return true;
     });
     await sleep(500);
-    check("Next up has a menu to open", found, "no ⋯ menu in Next up's card (.step-context, VIEW-29)");
+    check("Next up has a menu to open", found, "no ⋯ menu on Next up's heading line (VIEW-29)");
     check("a menu taken off the page before its toggle throws nothing", found && nextErrors.length === 0, JSON.stringify(nextErrors));
   } finally {
     if (browser) await browser.close();

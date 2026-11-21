@@ -1,6 +1,6 @@
-// The host's rack in the header (SPEC UI-69, UI-73): three slots after the weekly-limit lanes, centred on them, in
-// one colour on the smooth green-to-orange scale; its hover card names the three readings, each in its own colour. Checked in both themes on the main page, the classic page and a phone, with
-// screenshots of the header and the card.
+// The host's rack in the rail's foot (SPEC UI-69, UI-73): three slots after the weekly-limit lanes, centred on them, in
+// one colour on the smooth green-to-orange scale; its hover card names the three readings, each in its own colour.
+// Checked in both themes at desktop width and on a phone's list screen, with screenshots of the lanes and the card.
 // Fixed machine readings keep these layout checks independent of the host's load readers.
 //
 // Starts serve_preview.py (this checkout's Cockpit on a synthetic database; README.md says what it needs)
@@ -50,6 +50,7 @@ async function main() {
     { type: "event_msg", timestamp: new Date(now - 50000).toISOString(), payload: {
       type: "token_count", info: {
         total_token_usage: { input_tokens: 1000, cached_input_tokens: 100, output_tokens: 100, total_tokens: 1100 },
+        last_token_usage: { input_tokens: 1000, cached_input_tokens: 100, output_tokens: 100, total_tokens: 1100 },
       },
       rate_limits: { limit_id: "codex", plan_type: "pro", primary: {
         used_percent: 20, window_minutes: 10080, resets_at: Math.round(now / 1000 + 4 * 86400),
@@ -68,9 +69,8 @@ async function main() {
     browser = await chromium.launch({ executablePath: CHROMIUM });
     const pageErrors = [];
     for (const scheme of ["light", "dark"]) {
-      // The main page keeps the lanes in its rail's foot, which a phone hides; the classic page has them in its top bar.
-      const desktop = { width: 1440, height: 900 };
-      for (const [size, viewport, pagePath] of [["desktop", desktop, "/"], ["classic", desktop, "/classic"], ["phone", { width: 390, height: 844 }, "/classic"]]) {
+      // The lanes sit in the rail's foot; a phone shows the rail as its list screen.
+      for (const [size, viewport] of [["desktop", { width: 1440, height: 900 }], ["phone", { width: 390, height: 844 }]]) {
         const where = `${scheme}, ${size}`;
         const context = await browser.newContext({ viewport, colorScheme: scheme, deviceScaleFactor: 2 });
         await context.setExtraHTTPHeaders({ cookie: `${info.name}=${info.value}` });
@@ -82,7 +82,8 @@ async function main() {
           await page.mouse.move(20, 20);
         }, { noWaitAfter: true });
         page.on("pageerror", (error) => pageErrors.push(error.message));
-        await page.goto(`${info.origin}${pagePath}`);
+        await page.goto(`${info.origin}/`);
+        if (size === "phone") await page.locator(".phone-bar .phone-back").click({ timeout: 20e3 });
         await page.waitForSelector("#usage .machine-lamp", { state: "attached", timeout: 20e3 });
         await page.evaluate(() => document.fonts.ready);
         const machine = await page.evaluate(async () => (await (await fetch("/api/state")).json()).usage.machine);

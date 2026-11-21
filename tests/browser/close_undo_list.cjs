@@ -186,9 +186,31 @@ async function main() {
     const box = page.locator(`#next [data-step="${step.id}"] textarea`).first();
     await box.waitFor();
     await box.fill("Thanks, all good");
+    // Typing after focus leaves a reply must keep the unfinished message and task open. In particular, the E in
+    // "help" used to complete the last step and send that draft as a final message.
+    await page.locator("#next").click({ position: { x: 2, y: 2 } });
+    await page.keyboard.type("help");
+    const afterKeys = await itemNow();
+    check("E with an unsent reply keeps the task and its step open", reopened(afterKeys),
+      JSON.stringify({ stage: afterKeys.stage, steps: afterKeys.steps.map((one) => one.status) }));
+    check("E with an unsent reply preserves the words", await box.inputValue().catch(() => "") === "Thanks, all good",
+      "the reply changed or disappeared");
+    if (!reopened(afterKeys)) throw new Error("The reply shortcut completed an unfinished task");
+    await page.evaluate(() => {
+      window.__replyClose = { animation: false, ring: false };
+      const observer = new MutationObserver(() => {
+        window.__replyClose.animation ||= Boolean(document.querySelector("body > [data-close]"));
+        window.__replyClose.ring ||= Boolean(document.querySelector("body > .press-ring"));
+      });
+      observer.observe(document.body, { childList: true });
+      window.__replyCloseObserver = observer;
+    });
     const pressedAt = Date.now();
     await page.locator(`#next [data-step="${step.id}"] .button.task-done`).first().click();
     await headingUndo.waitFor();
+    const closeSeen = await page.evaluate(() => { window.__replyCloseObserver.disconnect(); return window.__replyClose; });
+    check("Task done with a reply plays its close animation and key ring", closeSeen.animation && closeSeen.ring,
+      JSON.stringify(closeSeen));
     // The pictures of the lit heading and the page are taken here, once the count has rolled after 1.8 s, as no press
     // has to land inside this Undo time. A redraw can replace the heading while it is shot: retry a replaced one.
     await sleep(1800);

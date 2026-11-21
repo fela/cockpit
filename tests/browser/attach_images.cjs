@@ -1,12 +1,15 @@
 // Images sent with any message (SPEC MSG-18). Puts its own item, whose step asks for the harness's working fake session,
-// into the user's queue, then checks at desktop width in the light scheme (the step's card) and at phone width in the
-// dark one (the item's row, once the first width's Send handed the step to the session):
+// into the user's queue, then checks, on the card of the item picked in the list at the left, at desktop width in the
+// light scheme (the queued step) and at phone width in the dark one (the step the first width's Send handed to the
+// session):
 // - the menu of the arrow beside Send shows Attach images;
 // - two images picked through it wait above the box as thumbnails, and Remove takes one away;
 // - Send uploads the one left to the item and the message carries its id, so the session is told about it;
 // - the box is empty of images after Send;
-// - on the step's card, Take back puts the image back above the box, and sending again carries it without a copy;
-// - on another item's last step, Task done + send carries a staged image with the last message, and Undo puts it back;
+// - on the step's card, the hand-off's Undo in Busy puts the image back above the box, and sending again carries it
+//   without a copy;
+// - on another item's last step, Task done + send carries a staged image with the last message, and the close's Undo
+//   in Finished this week puts it back;
 // - no sideways scroll and no page errors.
 // Saves screenshots of the open menu and of the box with its images, per width, in the work dir.
 //
@@ -86,24 +89,13 @@ async function main() {
       page.setDefaultTimeout(90000);
       const errors = [];
       page.on("pageerror", (error) => errors.push(error.message));
-      await page.goto(`${info.origin}/classic`);
-      let row;
-      let key;
-      if (queued) {
-        await page.locator(`#next [data-step], #queue .row[data-step]`).first().waitFor({ state: "attached" });
-        await page.evaluate((id) => window.openItemStep(id), itemId);
-        row = page.locator(`#next [data-step="${own.id}"], #queue .row.open[data-step="${own.id}"]`).first();
-        await row.waitFor();
-        key = `msg:step:${own.id}`;
-      } else {
-        row = page.locator(`#work .row[data-item="${itemId}"]`).first();
-        await row.waitFor({ state: "attached" });
-        const group = page.locator("#work details.group", { has: page.locator(`.row[data-item="${itemId}"]`) }).first();
-        if (!(await group.evaluate((el) => el.open))) await group.locator(":scope > summary").click();
-        await row.scrollIntoViewIfNeeded();
-        await row.locator(".row-head").click();
-        key = `msg:item:${itemId}`;
-      }
+      await page.goto(`${info.origin}/`);
+      await page.locator("#sidebar li[data-item]").first().waitFor({ state: "attached" });
+      await page.evaluate((id) => showInSidebar(id), itemId);
+      // The queued step's card, or the handed step's card, which ends in what the agent is doing.
+      const row = page.locator(`#next .next-card[data-step="${own.id}"]`).first();
+      await row.waitFor();
+      const key = `msg:step:${own.id}`;
       const composer = row.locator(".composer").first();
       const words = `Like this one (${width})`;
       await row.locator(`textarea[data-key="${key}"]`).fill(words);
@@ -128,13 +120,16 @@ async function main() {
       await strip.locator(".thumb img").nth(1).waitFor();
       check(`${width}: the picked images wait above the box`, await strip.isVisible() && await strip.locator(".thumb").count() === 2,
         `${await strip.locator(".thumb").count()} thumbnails`);
-      await composer.screenshot({ path: path.join(work, `staged-${width}-${scheme}.png`) });
+      // Staging redraws Next up once or twice, which can replace the box while it is shot; retry a replaced box.
+      for (let tries = 0; ; tries += 1) {
+        try { await composer.screenshot({ path: path.join(work, `staged-${width}-${scheme}.png`), timeout: 5000 }); break; } catch (error) { if (tries >= 3) throw error; }
+      }
       await strip.locator(".thumb-remove").nth(1).click();
       check(`${width}: Remove takes an image away`, await strip.locator(".thumb").count() === 1, `${await strip.locator(".thumb").count()} left`);
 
       const imagesOf = async () => (await getState()).items.find((one) => one.id === itemId).images;
       const before = new Set((await imagesOf()).map((one) => one.id));
-      // A step card's Send hands the step off; an item row's sends a message. Both answer with the message.
+      // A queued step's Send hands the step off; a handed step's sends a message. Both answer with the message.
       const answered = page.waitForResponse((response) => response.request().method() === "POST"
         && (/\/api\/messages$/.test(response.url()) || /\/api\/steps\/\d+\/hand-off$/.test(response.url())));
       await composer.locator("button.send").first().click();
@@ -148,9 +143,10 @@ async function main() {
         `${await strip.locator(".thumb").count()} left`);
 
       if (queued) {
-        // Take back on the hand-off's notice puts the image back above the box; sending again carries the same image.
+        // The hand-off's Undo in Busy, at its heading or as the step's row, puts the image back above the box; sending
+        // again carries the same image.
         const taken = page.waitForResponse((one) => one.request().method() === "POST" && /\/api\/steps\/\d+\/return$/.test(one.url()));
-        await page.locator("#toast button.toast-action", { hasText: "Take back" }).click();
+        await page.locator('#sidebar button[aria-label^="Take back your message"]').first().click();
         await taken;
         const back = page.locator(`[data-staged="${key}"] .thumb img`).first();
         await back.waitFor();
@@ -183,10 +179,10 @@ async function main() {
       page.setDefaultTimeout(90000);
       const errors = [];
       page.on("pageerror", (error) => errors.push(error.message));
-      await page.goto(`${info.origin}/classic`);
-      await page.locator(`#next [data-step], #queue .row[data-step]`).first().waitFor({ state: "attached" });
-      await page.evaluate((id) => window.openItemStep(id), last.item_id);
-      const row = page.locator(`#next [data-step="${last.id}"], #queue .row.open[data-step="${last.id}"]`).first();
+      await page.goto(`${info.origin}/`);
+      await page.locator("#sidebar li[data-item]").first().waitFor({ state: "attached" });
+      await page.evaluate((id) => showInSidebar(id), last.item_id);
+      const row = page.locator(`#next .next-card[data-step="${last.id}"]`).first();
       await row.waitFor();
       const key = `msg:step:${last.id}`;
       const composer = row.locator(".composer").first();
@@ -203,7 +199,8 @@ async function main() {
         && JSON.stringify(message && message.images) === JSON.stringify(body.images),
         JSON.stringify({ status: response.status(), sent: body.images, message: message && { id: message.id, images: message.images } }));
       const undone = page.waitForResponse((one) => one.request().method() === "POST" && /\/api\/items\/\d+\/reopen$/.test(one.url()));
-      await page.locator("#toast button", { hasText: "Undo" }).click();
+      // The close's Undo sits in Finished this week, at its heading or as the task's row.
+      await page.locator('#sidebar button[aria-label^="Undo closing"]').first().click();
       await undone;
       const back = page.locator(`[data-staged="${key}"] .thumb`);
       await back.first().waitFor();

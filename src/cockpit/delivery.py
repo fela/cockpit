@@ -12,17 +12,16 @@ A message the user wrote reaches a live session as the user's own prompt (SPEC M
 Claude Code treats a socket message as another session's words, so Cockpit
 waits until the session's turn is over, stops it and resumes it with the text.
 While the turn runs the message waits, queued with `waits_since` set; the
-server's wake loop sends it once the turn is over, and the user's Send now stops
-the session at once. All of the user's messages that wait for one session go
-together, oldest first, in one prompt (SPEC MSG-7), so each new message adds
-no turn and no wait of its own. A session whose turn ended while a background
-command or a scheduled prompt it started runs on gets them at once as well:
-the stop ends that work, and the message says so. Only a turn under way, or a
-background subagent, which would lose its work, makes them wait, and they go
-as Send now does once the oldest has waited WAIT_LIMIT. Agents' messages and
-Cockpit's own go over the socket, except Cockpit's archive message (SPEC
-SESSION-4), which waits like the user's, so the session reads it before Cockpit
-stops it.
+server's wake loop sends it once the turn is over. All of the user's messages
+that wait for one session go together, oldest first, in one prompt (SPEC
+MSG-7), so each new message adds no turn and no wait of its own. A session
+whose turn ended while a background command or a scheduled prompt it started
+runs on gets them at once as well: the stop ends that work, and the message
+says so. Only a turn under way, or a background subagent, which would lose its
+work, makes them wait, and once the oldest has waited WAIT_LIMIT Cockpit stops
+the session and they go. Agents' messages and Cockpit's own go over the socket,
+except Cockpit's archive message (SPEC SESSION-4), which waits like the user's,
+so the session reads it before Cockpit stops it.
 
 Every `claude` Cockpit runs for a session runs on the Claude account the session started on
 (Session.account, SPEC SESSION-17): its resume, its stop, its effort change. A new session goes to
@@ -35,7 +34,7 @@ page's notice with Take back is gone, so Take back stops it for certain.
 Cockpit never sends a message twice on its own. A failure before anything reached
 Claude is recorded as failed with the reason. A failure after Claude may have
 the text (a socket write that broke off, a `claude --bg` that timed out, a
-resume whose process never showed) is recorded as failed with "Delivery
+resume whose process or prompt never showed) is recorded as failed with "Delivery
 uncertain", so the user checks the session before pressing Retry. Errors after the
 text certainly arrived (looking up a new session's UUID) leave the message sent
 and say what is missing; the item left unlinked shows as a warning on the page
@@ -57,13 +56,14 @@ import subprocess
 import tempfile
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from cockpit import accounts, config, db, limits, moves, parts, patterns, rank, removals
+from cockpit import accounts, config, db, handovers, limits, moves, parts, patterns, rank, removals, store
 from cockpit.acp_agent import Agents
 from cockpit.codex_agent import CodexAgent, CodexError
 from cockpit.codex_worker import WorkerClient
@@ -74,7 +74,9 @@ from cockpit.sessions import (
     Session,
     claude_command,
     last_model,
+    local_command_ran_since,
     prefixed,
+    received,
     turn_ended,
 )
 from cockpit.store import (
@@ -98,11 +100,14 @@ log = logging.getLogger(__name__)
 
 SOCKET_TIMEOUT_SECONDS = 5
 COMMAND_TIMEOUT_SECONDS = 60
-# After a resume the session's process shows up in the listing; the lock is held
-# until then so a quick second message is written to the socket instead of
-# resuming again (which would start a copy). On a loaded host a `claude agents`
-# listing can run to its timeout and a resumed session shows late, so the wait
-# covers several listings.
+# After a resume the session's process shows up in the listing, and then its
+# prompt in its transcript. The lock is held until both have, so a second message
+# finds the new turn under way: before the process shows, it would resume again
+# (which starts a copy), and before the prompt shows, the transcript still ends
+# with the last turn's end, so it would stop the session before Claude wrote the
+# first prompt, which is then lost. On a loaded host a `claude agents` listing can
+# run to its timeout and a resumed session shows late, so the wait covers several
+# listings; a prompt has shown up to 95 s after its resume.
 RESUME_SETTLE_SECONDS = 180
 # A stopped process leaves the listing's pid empty within seconds; a restart
 # resumes the session only after that, or Claude would start a copy.
@@ -112,7 +117,7 @@ STOP_SETTLE_SECONDS = 30
 STOP_GRACE_SECONDS = 5
 # When Cockpit stops, such as for a deploy's restart, it waits this long at most for the deliveries under way, so a
 # Run's result or an agent's message is not cut off mid-send (SPEC MSG-5). Below systemd's 90 s stop timeout. A
-# resume's wait for its process can outlast it on a loaded host; Claude has the message by then, the restart marks
+# resume's wait for its prompt can outlast it on a loaded host; Claude has the message by then, the restart marks
 # it uncertain (mark_interrupted), and store.confirm_uncertain finds it in the session's transcript.
 DRAIN_SECONDS = 75
 RESUME_POLL_SECONDS = 1.0
@@ -128,8 +133,17 @@ NEW_SESSION_MODEL = config.MAIN_MODEL
 NEW_SESSION_EFFORT = "high"
 # A background session keeps the options it started with. A resume cannot pass --effort (Claude then starts a copy), so
 # Cockpit resumes the session with the command `/effort NEW_SESSION_EFFORT`, which Claude Code runs without calling the
-# model and saves in the session's options. Change the two together.
+# model and keeps in the session's options. Change the two together.
 RETIRED_EFFORT = "xhigh"
+# A typed `/effort` or `/model` also saves its value as the user's default for new sessions, in the account's
+# settings.json; Claude Code has no typed form that changes only the session. Cockpit puts that default back after each
+# command it types (kept_defaults), so the user's defaults change only when the user changes them.
+# A command that has not run when Cockpit stops waiting, for example behind a startup dialog, saves later; Cockpit
+# watches the session's transcript this long for it and puts the default back once it has run.
+LATE_COMMAND_LIMIT = timedelta(hours=24)
+LATE_COMMAND_POLL_SECONDS = 10.0
+# How long after `/model`'s output Cockpit waits for Claude's save of it to land (_model_saved).
+MODEL_SAVE_SECONDS = 30.0
 WAIT_LIMIT = timedelta(minutes=15)
 # How long Cockpit waits for a session's turn on its archive message to end before it leaves the
 # session running (SPEC SESSION-4).
@@ -222,6 +236,8 @@ def compose(conn: Any, message: dict[str, Any]) -> str:
     it that looks like a sender header is marked (`defused`): it cannot pass for the user's or Cockpit's.
     """
     text = prefixed(message["author"], message["text"])
+    if message.get("handover_context"):
+        text += "\n\n---\nCockpit context: agent transfer\n" + message["handover_context"]
     if message["images"]:
         # The images the user sent with the words (SPEC MSG-18), on the message's task.
         ids = ", ".join(map(str, message["images"]))
@@ -402,17 +418,166 @@ def trust_checkout(checkouts_dir: Path, claude_state: Path, cwd: Path) -> None:
             return
         else:
             project["hasTrustDialogAccepted"] = True
-        # Claude Code rewrites this file often; replacing it whole keeps any reader from seeing half of it.
-        descriptor, name = tempfile.mkstemp(prefix=".claude.json.cockpit-", dir=claude_state.parent)
-        temporary = Path(name)
-        try:
-            with os.fdopen(descriptor, "w") as handle:
-                handle.write(json.dumps(state, indent=2))
-                os.fchmod(handle.fileno(), claude_state.stat().st_mode & 0o777)
-            temporary.replace(claude_state)
-        finally:
-            temporary.unlink(missing_ok=True)
+        _replace_json(claude_state, state)
     log.warning("marked %s trusted in %s so claude --bg can start there", checkout, claude_state)
+
+
+def _replace_json(path: Path, data: dict[str, Any]) -> None:
+    """Write `data` to the existing file `path`, keeping its mode. Claude Code rewrites its files often; replacing the
+    file whole keeps any reader from seeing half of it."""
+    descriptor, name = tempfile.mkstemp(prefix=f"{path.name}.cockpit-", dir=path.parent)
+    temporary = Path(name)
+    try:
+        with os.fdopen(descriptor, "w") as handle:
+            handle.write(json.dumps(data, indent=2))
+            os.fchmod(handle.fileno(), path.stat().st_mode & 0o777)
+        temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+# Cockpit's commands for different sessions run at once, and the accounts share one settings.json.
+SETTINGS_LOCK = threading.Lock()
+
+
+def _settings(path: Path) -> dict[str, Any]:
+    try:
+        return json.loads(path.read_text())
+    except FileNotFoundError:
+        return {}
+
+
+Leaf = tuple[str, ...]
+
+
+def _default_leaves(settings: dict[str, Any], key: str) -> dict[Leaf, Any]:
+    """The settings a typed `/model` or `/effort` (`key`) saves, by their path in settings.json; an absent one is None."""
+    if key == "model":
+        return {("model",): settings.get("model")}
+    leaves: dict[Leaf, Any] = {("effortLevel",): settings.get("effortLevel")}
+    models = settings.get("modelSettings")
+    for model, options in (models if isinstance(models, dict) else {}).items():
+        if isinstance(options, dict):
+            leaves[("modelSettings", model, "effortLevel")] = options.get("effortLevel")
+    return leaves
+
+
+def _node(settings: dict[str, Any], path: Leaf) -> Any:
+    for part in path:
+        settings = settings.get(part) if isinstance(settings, dict) else None
+    return settings
+
+
+def _set_leaf(settings: dict[str, Any], before: dict[str, Any], leaf: Leaf, value: Any) -> None:
+    """Set `leaf` to `value`, or remove it for None along with the objects holding it that `before` did not have."""
+    parent = _node(settings, leaf[:-1])
+    if value is not None:
+        parent[leaf[-1]] = value
+        return
+    del parent[leaf[-1]]
+    for depth in range(len(leaf) - 1, 0, -1):
+        if _node(settings, leaf[:depth]) == {} and _node(before, leaf[:depth]) is None:
+            del _node(settings, leaf[: depth - 1])[leaf[depth - 1]]
+
+
+@dataclass(frozen=True)
+class SavedDefaults:
+    """The account settings as they were before Cockpit typed `/{key} {value}`."""
+
+    key: str
+    value: str
+    before: dict[Path, dict[str, Any]]
+
+    @property
+    def command(self) -> str:
+        return f"/{self.key} {self.value}"
+
+
+def _put_back(saved: SavedDefaults) -> None:
+    """Put back each default that now holds the value of Cockpit's command and held another before it. A default
+    that changed to some other value meanwhile was changed by someone else, so it stays, with an error to look at.
+    The caller holds SETTINGS_LOCK."""
+    for path, before in saved.before.items():
+        current = _settings(path)
+        old = _default_leaves(before, saved.key)
+        changed = {leaf: value for leaf, value in _default_leaves(current, saved.key).items() if value != old.get(leaf)}
+        put_back = [leaf for leaf, value in changed.items() if value == saved.value]
+        for leaf in changed.keys() - put_back:
+            log.error(
+                "left %s in %s at %r: it changed from %r while Cockpit ran %s, to a value other than Cockpit's",
+                ".".join(leaf), path, changed[leaf], old.get(leaf), saved.command,
+            )
+        if not put_back:
+            continue
+        for leaf in put_back:
+            _set_leaf(current, before, leaf, old.get(leaf))
+        _replace_json(path, current)
+        log.info(
+            "put back the user's default %s in %s after Cockpit's %s",
+            ", ".join(".".join(leaf) for leaf in put_back), path, saved.command,
+        )
+
+
+@contextmanager
+def kept_defaults(key: str, value: str) -> Iterator[SavedDefaults]:
+    """Run the body, which types `/{key} {value}` into a session and waits until Claude has run it, then put back the
+    user's default that the command saved in each account's settings.json (_put_back)."""
+    paths = list(dict.fromkeys((account.folder / "settings.json").resolve() for account in config.ACCOUNTS))
+    with SETTINGS_LOCK:
+        saved = SavedDefaults(key, value, {path: _settings(path) for path in paths})
+        try:
+            yield saved
+        finally:
+            _put_back(saved)
+
+
+def _model_saved(saved: SavedDefaults) -> bool:
+    """Whether Claude has saved the value of Cockpit's command as the default. Claude saves `/effort` before it shows
+    the command's output; it shows `/model`'s output after waiting at most 3 s for the save (Claude Code 2.1.325),
+    which can land later. An account whose default already held the value has nothing to save."""
+    if saved.key != "model":
+        return True
+    waiting = [path for path, before in saved.before.items() if before.get("model") != saved.value]
+    return not waiting or any(_settings(path).get("model") == saved.value for path in waiting)
+
+
+def _wait_for_save(saved: SavedDefaults) -> None:
+    """Wait up to MODEL_SAVE_SECONDS after the command's output for Claude to save its value (_model_saved)."""
+    deadline = time.monotonic() + MODEL_SAVE_SECONDS
+    while not _model_saved(saved):
+        if time.monotonic() >= deadline:
+            log.error(
+                "Claude did not save %s as the user's default within %s s of showing its output; if it saves it"
+                " later, the user's default changes",
+                saved.command, MODEL_SAVE_SECONDS,
+            )
+            return
+        time.sleep(RESUME_POLL_SECONDS)
+
+
+def _put_back_when_ran(session_id: str, started_ms: int, saved: SavedDefaults) -> None:
+    """Wait up to LATE_COMMAND_LIMIT for the session to run Cockpit's command, then put back what it saved."""
+    deadline = time.monotonic() + LATE_COMMAND_LIMIT.total_seconds()
+    while time.monotonic() < deadline:
+        if local_command_ran_since(session_id, started_ms):
+            _wait_for_save(saved)
+            with SETTINGS_LOCK:
+                _put_back(saved)
+            return
+        time.sleep(LATE_COMMAND_POLL_SECONDS)
+    log.error(
+        "session %s did not run Cockpit's %s within %s; if it runs it later, it saves its value as the user's default",
+        session_id, saved.command, LATE_COMMAND_LIMIT,
+    )
+
+
+def _watch_late(session_id: str, started_ms: int, saved: SavedDefaults, why: str) -> None:
+    """Hand the user's default to a thread that puts it back once the session runs Cockpit's command
+    (_put_back_when_ran), for a command still pending when Cockpit stops waiting for it."""
+    log.warning("session %s %s; Cockpit puts the user's default back once the session runs %s", session_id, why, saved.command)
+    threading.Thread(
+        target=_put_back_when_ran, args=(session_id, started_ms, saved), daemon=True, name=f"put-back-defaults-{session_id}",
+    ).start()
 
 
 def _run_claude(run: Runner, account: Account, args: list[str], cwd: Path, what: str) -> str:
@@ -469,7 +634,7 @@ class Deliverer:
     short_id_to_uuid: ShortIdLookup
     pick: Pick
     listed: Listed
-    # Codex, or acp_agent.Agents holding Codex and the ACP agents (SPEC SESSION-26).
+    # Codex, or acp_agent.Agents holding Codex and the ACP agents (SPEC SESSION-30).
     codex: CodexAgent | WorkerClient | Agents | None = None
     default_provider: str = "claude"
     enabled_providers: tuple[str, ...] = ("claude",)
@@ -501,6 +666,51 @@ class Deliverer:
     def send(self, message_id: int) -> None:
         """Deliver one queued message and record the outcome; safe to run in a thread."""
         self._send(message_id, restart=False, past_limit=False)
+
+    def handover(self, source: str, item_id: int) -> dict[str, Any]:
+        """Stop one idle Claude writer and start its one Codex successor, preserving retries and history."""
+        if "codex" not in self.enabled_providers or self.codex is None:
+            raise store.Conflict("Enable Codex before handing work to it.")
+        if parts.is_standing(source):
+            raise store.Conflict(parts.standing().keeps)
+        with self._lock(source):
+            conn = db.connect(self.db_path)
+            try:
+                handovers.validate_item(conn, source, item_id)
+                previous = handovers.status(conn, source)
+                if previous is not None and previous["session_id"] is None and conn.execute(
+                    "SELECT 1 FROM messages WHERE id = ? AND handover_context IS NOT NULL", (previous["message_id"],),
+                ).fetchone():
+                    raise store.Conflict("Retry the message that requested this agent change so its draft is kept.")
+                if previous is None or (previous["state"] == "failed" and previous["session_id"] is None):
+                    session = self.lookup(source)
+                    if session is None:
+                        raise store.NotFound("The Claude session is no longer available on this machine.")
+                    if session.provider != "claude":
+                        raise store.Conflict("This session already runs on Codex.")
+                    if session.name in store.SWEEP_SESSION_NAMES:
+                        raise store.Conflict("The sweeper keeps its own session; choose a task's Claude session.")
+                    if not session.cwd or not Path(session.cwd).is_dir():
+                        raise store.Conflict("The Claude session's working directory is no longer available.")
+                    if session.pid is not None:
+                        if not session.turn_over:
+                            raise store.Conflict("Claude is still working or waiting on a dialog. Hand it to Codex once its turn and background work finish.")
+                        try:
+                            session = self._stop(session)
+                        except DeliveryError as exc:
+                            raise store.Conflict(str(exc)) from exc
+                    previous = handovers.prepare(conn, session, item_id, self.db_path, None)
+                elif previous["state"] == "failed":
+                    store.retry_message(conn, previous["message_id"], "user")
+                self.send(previous["message_id"])
+                result = handovers.status(conn, source)
+                assert result is not None
+                result["item_ids"] = [row[0] for row in conn.execute(
+                    "SELECT item_id FROM session_handover_items WHERE source_session_id = ? ORDER BY item_id", (source,),
+                )]
+                return result
+            finally:
+                conn.close()
 
     def start(self, name: str, target: Callable[..., None], *args: Any) -> None:
         """Run `target(*args)` on a thread of its own that `drain` waits for: a send, or work that ends in one, such
@@ -535,11 +745,6 @@ class Deliverer:
         """Stop the live session the message goes to, then deliver the message, which resumes it. For a
         session held at a dialog in its terminal that Cockpit cannot answer (SPEC PERM-8)."""
         self._send(message_id, restart=True, past_limit=True)
-
-    def send_past_limit(self, message_id: int) -> None:
-        """Deliver a message that waits for a place among the working sessions without one: the user's Send now on
-        it (SPEC SESSION-23)."""
-        self._send(message_id, restart=False, past_limit=True)
 
     def places_due(self, conn) -> list[int]:
         """The messages that waited for a place and go now (SPEC SESSION-23), longest wait first: one for each free
@@ -820,6 +1025,10 @@ class Deliverer:
                 with db.transaction(conn):
                     # Read in the move's transaction, so a continue limits.sync queued meanwhile is the only one.
                     stopped_on_limit = bool(limits.waiting(conn, [session], datetime.now(UTC)))
+                    pending = conn.execute(
+                        "SELECT id FROM messages WHERE session_id = ? AND state = 'queued'"
+                        " AND quota_recovery_stop IS NOT NULL ORDER BY id LIMIT 1", (session_id,),
+                    ).fetchone()
                     moves.record(conn, session_id, account.name)
                     moves.end_wait(conn, session_id, None)
                     patterns.record(
@@ -827,9 +1036,14 @@ class Deliverer:
                         {"session_id": session_id, "from": session.account, "to": account.name},
                     )
                     message_id = None
-                    if stopped_on_limit:
+                    if stopped_on_limit or pending is not None:
                         text = limits.CONTINUE.format(why=f"{user_name()} moved you to the {account.name} account")
-                        message_id = create_message(conn, "cockpit", text, {"session_id": session_id}, checkouts_dir)["id"]
+                        if pending is not None:
+                            message_id = pending["id"]
+                            conn.execute("UPDATE messages SET quota_recovery_stop = NULL, text = ? WHERE id = ?",
+                                         (text, message_id))
+                        else:
+                            message_id = create_message(conn, "cockpit", text, {"session_id": session_id}, checkouts_dir)["id"]
                 moves.close_steps(conn, session_id)
                 log.info("%s moved session %s from %s to %s", actor, session.id, session.account, account.name)
                 return {"session_id": session_id, "moved": True, "waits": False, "message_id": message_id,
@@ -856,12 +1070,33 @@ class Deliverer:
             message = db.row(conn.execute("SELECT * FROM messages WHERE id = ?", (message_id,)).fetchone())
             if message is None:
                 raise LookupError(f"message {message_id} does not exist")
+            if message["quota_recovery_stop"] and limits.cancel_stale(conn, message, self._session(message["session_id"]), datetime.now(UTC)):
+                return
+            if message["session_id"] is not None:
+                handover = handovers.status(conn, message["session_id"])
+                if handover is not None and handover["session_id"] is not None:
+                    transferred = message["item_id"] is None or conn.execute(
+                        "SELECT 1 FROM session_handover_items WHERE source_session_id = ? AND item_id = ?",
+                        (message["session_id"], message["item_id"]),
+                    ).fetchone()
+                    if transferred:
+                        conn.execute("UPDATE messages SET session_id = ? WHERE id = ?", (handover["session_id"], message_id))
+                        message["session_id"] = handover["session_id"]
             key = message["session_id"] or f"new:{message['new_cwd']}"
             with self._lock(key):
-                claimed = conn.execute(
-                    "UPDATE messages SET state = 'sending' WHERE id = ? AND state = 'queued' AND take_back_until IS NULL",
-                    (message_id,),
-                )
+                # A handover may have rerouted this row while its delivery waited for the source's lock.
+                current = conn.execute("SELECT session_id FROM messages WHERE id = ?", (message_id,)).fetchone()
+                if current is not None and current["session_id"] != message["session_id"]:
+                    self._send_counted(message_id, restart, past_limit)
+                    return
+                current_session = self._session(message["session_id"]) if message["quota_recovery_stop"] else None
+                with db.transaction(conn):
+                    if limits.cancel_stale(conn, store.get_message(conn, message_id), current_session, datetime.now(UTC)):
+                        return
+                    claimed = conn.execute(
+                        "UPDATE messages SET state = 'sending' WHERE id = ? AND state = 'queued' AND take_back_until IS NULL",
+                        (message_id,),
+                    )
                 if claimed.rowcount == 0:
                     log.warning("message %s is no longer queued, or still waits for Take back; not sent", message_id)
                     return
@@ -871,6 +1106,12 @@ class Deliverer:
                     # Read again once claimed: a follow-up (MSG-10) may have joined its text since the read above.
                     message = db.row(conn.execute("SELECT * FROM messages WHERE id = ?", (message_id,)).fetchone())
                     assert message is not None  # the claim above just updated its row
+                    if message["session_id"] is not None and handovers.held(conn, message["session_id"]):
+                        if handovers.status(conn, message["session_id"])["session_id"] is not None:
+                            raise DeliveryError("This task was closed or reassigned before the agent transfer; its old message was left undelivered.")
+                        raise Waiting("this session is changing agent")
+                    if message["session_id"] is not None and handovers.awaits_context(conn, message["session_id"], message_id):
+                        raise Waiting("the new agent must receive its original context before later messages")
                     # Before the claim: an answer that comes in after this check already waits, so the claim takes
                     # it along.
                     if message["author"] == "user" and not restart and _ask_answering(conn, message["session_id"]):
@@ -930,6 +1171,7 @@ class Deliverer:
             conn.close()
 
     def _deliver(self, message: dict, text: str, restart: bool, waited: bool) -> Sent:
+        message, text = self._next_turn(message, text)
         if message["fork_of"] is not None and message["session_id"] is None:
             return self._fork(message["id"], message["fork_of"], message["new_name"], text)
         if message["session_id"] is None:
@@ -937,7 +1179,7 @@ class Deliverer:
             if provider not in self.enabled_providers:
                 raise DeliveryError(f"{provider} is not enabled in setup.toml")
             if provider != "claude":
-                # Codex, or an ACP agent (SPEC SESSION-26): self.codex holds them all (acp_agent.Agents).
+                # Codex, or an ACP agent (SPEC SESSION-30): self.codex holds them all (acp_agent.Agents).
                 name = config.PROVIDER_NAMES[provider]
                 if self.codex is None:
                     raise DeliveryError(f"{name} is not enabled in setup.toml")
@@ -965,6 +1207,29 @@ class Deliverer:
                             conn.close()
                     raise DeliveryError(str(exc)) from exc
                 return Sent("new", sid, "started a Codex thread" if provider == "codex" else f"started a {name} session")
+            if message.get("handover_context"):
+                # A command-only first resume obtains Claude's UUID without calling a model. Ownership must be
+                # attached before the real prompt can run, just as the independent Codex worker already does.
+                effort = (message["new_options"] or {}).get("effort") or NEW_SESSION_EFFORT
+                with kept_defaults("effort", effort) as saved:
+                    started_ms = int(time.time() * 1000)
+                    sent = self._start_new(message["id"], Path(message["new_cwd"]), message["new_name"],
+                                           saved.command, message["new_options"] or {})
+                    if sent.session_id is None:
+                        raise uncertain(
+                            f"Claude started for this transfer, but its UUID could not be found; if the session runs"
+                            f" {saved.command} after now, it saves {effort} as the user's default effort"
+                        )
+                    self._command_ran(sent.session_id, started_ms, saved)
+                conn = db.connect(self.db_path)
+                try:
+                    with db.transaction(conn):
+                        conn.execute("UPDATE messages SET session_id = ? WHERE id = ?", (sent.session_id, message["id"]))
+                    resumed = store.get_message(conn, message["id"])
+                finally:
+                    conn.close()
+                result = self._deliver(resumed, text, False, False)
+                return Sent("new", sent.session_id, result.detail)
             return self._start_new(message["id"], Path(message["new_cwd"]), message["new_name"], text, message["new_options"] or {})
         conn = db.connect(self.db_path)
         try:
@@ -989,6 +1254,20 @@ class Deliverer:
             if session is not None and session.waits_on_dialog and not restart:
                 raise Waiting(f"answer the pending {name} request before sending another message")
             try:
+                if message["new_cwd"] is None and message["new_options"]:
+                    conn = db.connect(self.db_path)
+                    try:
+                        current = dict(conn.execute("SELECT model, effort, speed FROM codex_threads WHERE session_id = ?",
+                                                    (message["session_id"],)).fetchone())
+                        chosen = {key: message["new_options"].get(key) or current[key] for key in current}
+                        if chosen != current:
+                            # stop is part of the old worker protocol: it unsubscribes this thread and clears its
+                            # loaded cache, so its next send resumes with the registry's new options.
+                            self.codex.stop(message["session_id"])
+                            conn.execute("UPDATE codex_threads SET model = ?, effort = ?, speed = ? WHERE session_id = ?",
+                                         (chosen["model"], chosen["effort"], chosen["speed"], message["session_id"]))
+                    finally:
+                        conn.close()
                 self.codex.send(message["session_id"], text, restart=restart or waited)
             except CodexError as exc:
                 raise DeliveryError(str(exc)) from exc
@@ -998,6 +1277,8 @@ class Deliverer:
         session = self.lookup(message["session_id"])
         if session is None:
             raise DeliveryError(f"No Claude session {message['session_id']} on this machine")
+        if message.get("handover_context") and message["new_cwd"] is not None:
+            session = self._handover_ready(message["id"], session)
         if parts.is_standing(session.session_id):
             return self._to_standing(session, text, parts.standing())
         resumed = "resumed the stopped session in the background"
@@ -1050,7 +1331,7 @@ class Deliverer:
             lowered = LOWERED
         if session.pid is not None:
             try:
-                write_to_socket(self.sockets_dir / f"{session.pid}.sock", text)
+                write_to_socket(self._socket(session), text)
             except SocketUnreachable as exc:
                 raise DeliveryError(f"Could not reach the live session's socket (pid {session.pid}): {exc}") from exc
             except OSError as exc:
@@ -1066,7 +1347,12 @@ class Deliverer:
             conn.close()
         if not session.cwd or not Path(session.cwd).is_dir():
             raise DeliveryError(f"The session's directory {session.cwd!r} no longer exists, so it cannot be resumed")
-        if self._retired_effort(session):
+        if message["new_cwd"] is None and message["new_options"]:
+            for key in ("model", "effort"):
+                value = message["new_options"].get(key)
+                if value:
+                    session = self._change_option(session, key, value)
+        if self._retired_effort(session) and not (message["new_options"] or {}).get("effort"):
             session = self._stop(self._lower_effort(session))
             lowered = LOWERED
         account = config.account(session.account)
@@ -1074,20 +1360,133 @@ class Deliverer:
         # No other flags for a listed session: it keeps the options it started with, and a resume that passes any
         # makes Claude start a copy instead of continuing it. A session Cockpit removed has no job file left, so its
         # resume passes the options it had and continues under its own id (_resume).
+        since = db.now_iso()
         output = _run_claude(self.run, account, self._resume(session, text), Path(session.cwd), "claude --bg --resume")
         _refuse_copy(output, session, "this message")
-        if not self._wait_for_process(session.session_id):
-            raise uncertain(
-                f"Claude accepted the resume, but the session's process did not show within {RESUME_SETTLE_SECONDS} s"
-            )
+        self._wait_for_prompt(session.session_id, prefixed(message["author"], message["text"]), since)
         return Sent("resume", session.session_id, resumed + lowered)
+
+    def _next_turn(self, message: dict, text: str) -> tuple[dict, str]:
+        """Turn a provider change into the same durable draft's initial context prompt."""
+        if message.get("provider") is None:
+            return message, text
+        conn = db.connect(self.db_path)
+        source_lock = None
+        try:
+            pending = conn.execute(
+                "SELECT source_session_id FROM session_handovers WHERE message_id = ? AND target_session_id IS NULL",
+                (message["id"],),
+            ).fetchone() if message.get("handover_context") else None
+            source = pending[0] if pending else message["session_id"]
+            if source is None:
+                return message, text
+            if pending:
+                # A failed thread creation leaves the draft without a target UUID. Its retry is serialized on
+                # the new-session folder; also wait for any recovery already running under the source's lock.
+                source_lock = self._lock(source)
+                source_lock.acquire()
+            session = self.codex.lookup(source) if self.codex is not None and self.codex.owns(source) else self.lookup(source)
+            if session is None:
+                raise DeliveryError("The source session is no longer available on this machine.")
+            if session.provider == message["provider"] and pending is None:
+                return message, text
+            if message["provider"] not in self.enabled_providers:
+                raise DeliveryError(f"{message['provider']} is not enabled")
+            if parts.is_standing(source) or session.name in store.SWEEP_SESSION_NAMES:
+                raise DeliveryError("Choose a task session to change its agent.")
+            if (session.alive and not session.turn_over) or session.working_now or session.runs_subagent:
+                raise Waiting("the source agent's turn and background work must finish before changing agent")
+            item_id = message["item_id"]
+            if item_id is None:
+                associated = handovers.items(conn, source)
+                if not associated:
+                    raise DeliveryError("Choose an open task owned by this session to change its agent.")
+                item_id = associated[0]["id"]
+                conn.execute("UPDATE messages SET item_id = ? WHERE id = ?", (item_id, message["id"]))
+            if session.provider == "codex" or session.pid is not None:
+                session = self._stop(session)
+            handovers.prepare(conn, session, item_id, self.db_path, message)
+            prepared = store.get_message(conn, message["id"])
+            return prepared, compose(conn, prepared)
+        finally:
+            if source_lock is not None:
+                source_lock.release()
+            conn.close()
+
+    def _handover_ready(self, message_id: int, session: Session) -> Session:
+        """Wait for bootstrap readiness; persist its UUID so a retry recognizes a subsequently stopped target."""
+        conn = db.connect(self.db_path)
+        key = f"handover_bootstrap:{message_id}"
+        try:
+            ready = db.kv_get(conn, key) == session.session_id
+            deadline = time.monotonic() + RESUME_SETTLE_SECONDS
+            current = None
+            while time.monotonic() < deadline:
+                current = self.lookup(session.session_id)
+                if current is not None:
+                    if current.waits_on_dialog:
+                        raise Waiting("answer the new Claude session's startup dialog before transferring the work")
+                    if ready and current.pid is None:
+                        return current
+                    if current.turn_over:
+                        db.kv_set(conn, key, current.session_id)
+                        return current
+                time.sleep(RESUME_POLL_SECONDS)
+            if current is not None and current.pid is None and not ready:
+                raise DeliveryError(
+                    f"Claude session {session.id} has no running process, and Cockpit could not confirm its startup"
+                    " command finished."
+                    " The transferred message was not sent."
+                )
+            raise Waiting("the new Claude session must finish its startup command before receiving the transferred work")
+        finally:
+            conn.close()
+
+    def _change_option(self, session: Session, key: str, value: str) -> Session:
+        """Apply a Claude command without a model call, then stop before the user's real prompt."""
+        if key == "effort" and session.effort == value:
+            return session
+        account = config.account(session.account)
+        command = f"/{key} {value}"
+        self.trust(account, Path(session.cwd))
+        with kept_defaults(key, value) as saved:
+            started_ms = int(time.time() * 1000)
+            output = _run_claude(self.run, account, self._resume(session, command), Path(session.cwd), command)
+            _refuse_copy(output, session, command)
+            deadline = time.monotonic() + RESUME_SETTLE_SECONDS
+            while time.monotonic() < deadline:
+                resumed = self.lookup(session.session_id)
+                applied = key == "effort" and resumed is not None and resumed.pid is not None and resumed.effort == value
+                if key == "model" and resumed is not None and resumed.pid is not None:
+                    flags = removals.job_flags(account, session.id)
+                    applied = "--model" in flags[:-1] and flags[flags.index("--model") + 1] == value
+                if applied:
+                    assert resumed is not None
+                    self._command_ran(session.session_id, started_ms, saved)
+                    break
+                time.sleep(RESUME_POLL_SECONDS)
+            else:
+                _watch_late(session.session_id, started_ms, saved, f"did not confirm {command} within {RESUME_SETTLE_SECONDS} s")
+                raise DeliveryError(f"Claude did not confirm {command}; the message was not sent.")
+        return self._stop(resumed)
+
+    def _socket(self, session: Session) -> Path:
+        """Where the live session's process listens: the path Claude records in the account's sessions/<pid>.json,
+        under XDG_RUNTIME_DIR or, for a process started without that variable, under /tmp. A release that records
+        none listens in `sockets_dir`."""
+        record = config.account(session.account).folder / "sessions" / f"{session.pid}.json"
+        try:
+            recorded = json.loads(record.read_text()).get("messagingSocketPath")
+        except FileNotFoundError:
+            recorded = None
+        return Path(recorded) if recorded else self.sockets_dir / f"{session.pid}.sock"
 
     def _to_standing(self, session: Session, text: str, standing: parts.Standing) -> Sent:
         """Write every message over the standing session's socket at once; its supervisor brings it back if down."""
         if session.pid is None:
             raise Waiting(standing.not_running.format(name=session.name or standing.unnamed))
         try:
-            write_to_socket(self.sockets_dir / f"{session.pid}.sock", text)
+            write_to_socket(self._socket(session), text)
         except SocketUnreachable as exc:
             raise Waiting(standing.socket_unreachable.format(error=exc)) from exc
         except OSError as exc:
@@ -1107,28 +1506,47 @@ class Deliverer:
 
     def _lower_effort(self, session: Session) -> Session:
         """Resume the stopped session with the command `/effort NEW_SESSION_EFFORT` and return it running at that
-        effort. Claude Code runs the command without calling the model and saves the effort in the session's
-        options, so every later turn and resume keeps it. The session then shows as working, with no turn under
-        way, until its next message."""
+        effort. Claude Code runs the command without calling the model and keeps the effort in the session's
+        options, so every later turn and resume keeps it; the user's default effort stays as it was
+        (kept_defaults). The session then shows as working, with no turn under way, until its next message."""
         command = f"/effort {NEW_SESSION_EFFORT}"
         account = config.account(session.account)
         self.trust(account, Path(session.cwd))
-        output = _run_claude(
-            self.run, account, self._resume(session, command), Path(session.cwd), f"claude --bg --resume with {command}"
-        )
-        _refuse_copy(output, session, command)
-        deadline = time.monotonic() + RESUME_SETTLE_SECONDS
-        while time.monotonic() < deadline:
-            resumed = self.lookup(session.session_id)
-            if resumed is not None and resumed.pid is not None and resumed.effort == NEW_SESSION_EFFORT:
-                log.info("moved session %s from %s to %s effort", session.id, session.effort, NEW_SESSION_EFFORT)
-                return resumed
-            time.sleep(RESUME_POLL_SECONDS)
+        with kept_defaults("effort", NEW_SESSION_EFFORT) as saved:
+            started_ms = int(time.time() * 1000)
+            output = _run_claude(
+                self.run, account, self._resume(session, command), Path(session.cwd), f"claude --bg --resume with {command}"
+            )
+            _refuse_copy(output, session, command)
+            deadline = time.monotonic() + RESUME_SETTLE_SECONDS
+            while time.monotonic() < deadline:
+                resumed = self.lookup(session.session_id)
+                if resumed is not None and resumed.pid is not None and resumed.effort == NEW_SESSION_EFFORT:
+                    self._command_ran(session.session_id, started_ms, saved)
+                    log.info("moved session %s from %s to %s effort", session.id, session.effort, NEW_SESSION_EFFORT)
+                    return resumed
+                time.sleep(RESUME_POLL_SECONDS)
+            _watch_late(session.session_id, started_ms, saved, f"did not confirm {command} within {RESUME_SETTLE_SECONDS} s")
         raise DeliveryError(
             f"Cockpit resumed the session with {command} to move it from {session.effort} to {NEW_SESSION_EFFORT}"
             f" effort. After {RESUME_SETTLE_SECONDS} s its process still did not show the new effort. The message"
             " was not sent."
         )
+
+    def _command_ran(self, session_id: str, started_ms: int, saved: SavedDefaults) -> None:
+        """Wait until the session's transcript shows the output of the command Cockpit typed at `started_ms`, and then
+        for Claude's save of it (_wait_for_save), so kept_defaults puts the user's default back for good. When the command waits on a
+        startup dialog, or shows nothing within RESUME_SETTLE_SECONDS, a thread puts the default back once it runs."""
+        deadline = time.monotonic() + RESUME_SETTLE_SECONDS
+        while not local_command_ran_since(session_id, started_ms):
+            current = self.lookup(session_id)
+            dialog = current is not None and current.waits_on_dialog
+            if dialog or time.monotonic() >= deadline:
+                why = "waits on a startup dialog" if dialog else f"showed no output within {RESUME_SETTLE_SECONDS} s"
+                _watch_late(session_id, started_ms, saved, why)
+                return
+            time.sleep(RESUME_POLL_SECONDS)
+        _wait_for_save(saved)
 
     def _resume(self, session: Session, prompt: str) -> list[str]:
         """The command that resumes the stopped `session` with `prompt`. One Cockpit removed from `claude agents` gets
@@ -1176,21 +1594,34 @@ class Deliverer:
             f" {STOP_SETTLE_SECONDS} s. Cockpit did not resume the session."
         )
 
-    def _wait_for_process(self, session_id: str) -> bool:
+    def _wait_for_prompt(self, session_id: str, sent: str, since: str) -> None:
+        """Return once the resumed session's process shows in the listing and its transcript holds the message
+        `sent` (as `prefixed` writes it) in a prompt from `since` on (sessions.received); see RESUME_SETTLE_SECONDS.
+        Raises `uncertain` when either has not shown within RESUME_SETTLE_SECONDS."""
         deadline = time.monotonic() + RESUME_SETTLE_SECONDS
+        shown = False
         while time.monotonic() < deadline:
-            try:
-                session = self.lookup(session_id)
-            except LookupFailed as exc:
-                log.warning("looking up session %s after a resume failed: %s", session_id, exc)
-                session = None
-            except Exception:
-                log.exception("looking up session %s after a resume failed", session_id)
-                session = None
-            if session is not None and session.pid is not None:
-                return True
+            if not shown:
+                try:
+                    session = self.lookup(session_id)
+                except LookupFailed as exc:
+                    log.warning("looking up session %s after a resume failed: %s", session_id, exc)
+                    session = None
+                except Exception:
+                    log.exception("looking up session %s after a resume failed", session_id)
+                    session = None
+                shown = session is not None and session.pid is not None
+            if shown and received(session_id, sent, since) is not None:
+                return
             time.sleep(RESUME_POLL_SECONDS)
-        return False
+        if not shown:
+            raise uncertain(
+                f"Claude accepted the resume, but the session's process did not show within {RESUME_SETTLE_SECONDS} s"
+            )
+        raise uncertain(
+            f"Claude accepted the resume and the session's process runs, but the message was not in its transcript"
+            f" within {RESUME_SETTLE_SECONDS} s"
+        )
 
     def _fork(self, message_id: int, parent_id: str, name: str, text: str) -> Sent:
         """Start a writable background session forked from session `parent_id` (SPEC MSG-11): `claude --bg --resume
@@ -1387,6 +1818,9 @@ def _older_waits(conn, message: dict) -> bool:
     and the newer message's worker took it first). Later prompts go after it. An Ask's question and answer is no such
     prompt: it waits for the turn to end however long it runs, goes with the user's next message, and takes its place
     by when it was asked (`_in_order`)."""
+    # The handover context precedes messages transferred from Claude, including older automatic prompts.
+    if conn.execute("SELECT 1 FROM session_handovers WHERE message_id = ?", (message["id"],)).fetchone():
+        return False
     return (
         conn.execute(
             "SELECT 1 FROM messages WHERE session_id = ? AND id < ? AND state = 'queued' AND as_prompt = 1"
@@ -1430,21 +1864,23 @@ def _claim_waiting(conn, message: dict) -> list[dict]:
     also one whose own worker has not run yet: that worker then finds it claimed. Cockpit's own and the agents' prompts
     go alone, and so does a hand-off held for Take back: the claim stops at the first of them, so no message overtakes
     it (`_older_waits` then holds this one if it is later)."""
-    if message["author"] != "user" or not message["as_prompt"] or message["session_id"] is None:
+    if (message["author"] != "user" or not message["as_prompt"] or message["session_id"] is None
+            or message["provider"] is not None or message["new_options"] is not None
+            or message.get("handover_context") is not None):
         return []
     claimed: list[dict] = []
     # One transaction: a failure part way claims none of them.
     with db.transaction(conn):
         rows = [
             dict(row) for row in conn.execute(
-                "SELECT id, author, take_back_until FROM messages WHERE session_id = ? AND id != ? AND as_prompt = 1"
+                "SELECT id, author, take_back_until, provider, new_options FROM messages WHERE session_id = ? AND id != ? AND as_prompt = 1"
                 " AND state = 'queued'",
                 (message["session_id"], message["id"]),
             )
         ]
         # In the prompt's order, so an Ask's answer that came in later but was asked earlier goes too.
         for row in _in_order(conn, rows) if rows else []:
-            if row["author"] != "user" or row["take_back_until"] is not None:
+            if row["author"] != "user" or row["take_back_until"] is not None or row["provider"] is not None or row["new_options"] is not None:
                 break
             if conn.execute("UPDATE messages SET state = 'sending' WHERE id = ? AND state = 'queued'", (row["id"],)).rowcount:
                 # Read once claimed, so a follow-up (MSG-10) joined before the claim goes with it.

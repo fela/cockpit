@@ -1,7 +1,7 @@
 // A timer press goes through a connection that is not back yet.
-// Checks, on the main page:
+// Checks, at phone width:
 // - a play whose first two requests fail to connect shows at once, reaches Cockpit, and shows no failure;
-// A pause is the page's own (idle, or another step taken up; the card has no Pause since VIEW-29).
+// A pause is the page's own (idle, or another item shown; the card has no Pause since VIEW-29).
 // - presses made offline (pause one step, play another) show at once and reach Cockpit in the order made, each counted
 //   from when it was made;
 // - play, pause and play made offline leave the step running; pause, play and pause leave none running;
@@ -98,16 +98,19 @@ async function main() {
     page.on("request", (request) => {
       if (request.url().endsWith("/api/page-errors") && request.method() === "POST") reports.push(JSON.parse(request.postData()).message);
     });
-    await page.goto(`${info.origin}/classic`);
-    const card = (id) => page.locator(`[data-step="${id}"]`).first();
-    await card(steps.one).waitFor();
+    await page.goto(`${info.origin}/`);
+    // The card shows Next up's item; step one is the step on it.
+    const shownId = Number(await page.locator("#next .next-card[data-step]").getAttribute("data-step"));
+    if (shownId === steps.two) [steps.one, steps.two] = [steps.two, steps.one];
+    else if (shownId !== steps.one) throw new Error(`the card shows step ${shownId}, not one of this run's`);
+    const card = (id) => page.locator(`#next .next-card[data-step="${id}"]`);
     // The page starts Next up's timer itself on the user's first input; marked as started already, it leaves the
     // starts to this test's presses, so the press that opens the menu does not start it before Start the timer.
     await page.evaluate((id) => { ui.autoStarted = id; }, steps.one);
-    // A step below Next up is a folded row: its title opens it, and Start the timer is in the step's ⋯ menu (VIEW-29).
+    // Start the timer is in the card's ⋯ menu (VIEW-29). Step two is another item's, which the card does not show, and
+    // showing it would stop step one's timer itself (TRACK-8), so its plays go through the call the menu makes.
     const play = async (id) => {
-      const folded = card(id).locator('.row-title[aria-expanded="false"]');
-      if (await folded.count()) await folded.click();
+      if (!(await card(id).count())) return page.evaluate((stepId) => { void setTimer(stepId, true); }, id);
       await card(id).locator(".step-menu > summary").click();
       await card(id).locator('.step-menu [data-timer="start"]').click();
     };
@@ -121,7 +124,10 @@ async function main() {
       const end = Date.now() + ms;
       while (answered < count && Date.now() < end) await sleep(100);
     };
-    const runningOn = (id) => card(id).locator('.step-menu [data-timer="running"]').count().then((n) => n > 0);
+    // The card's ⋯ menu shows its step's running timer; for step two, off the card, the timer the page draws.
+    const runningOn = async (id) => (await card(id).count())
+      ? card(id).locator('.step-menu [data-timer="running"]').count().then((n) => n > 0)
+      : page.evaluate((stepId) => (drawn(ui.state).timer || {}).step_id === stepId, id);
     const toasts = () => page.evaluate(() => window.__toasts.slice());
     const failed = async () => (await toasts()).filter((text) => /Timer not/.test(text));
 
@@ -159,8 +165,8 @@ async function main() {
     check("step two still runs on the page", await runningOn(steps.two), "the page lost the running timer");
 
     // 3. Offline: play, pause and play step one; once all reached Cockpit, it runs. Opening step one's ⋯ menu for
-    // its first play is a press outside step two, which leaves step two's timer running (TRACK-6): the page sends no
-    // pause for it, and Cockpit ends step two's span itself when step one's first play arrives. Three presses in all.
+    // its first play leaves step two's timer running (TRACK-6): the page sends no pause for it, and Cockpit ends step
+    // two's span itself when step one's first play arrives. Three presses in all.
     const twoSpans = spans(work, steps.two).length;
     await context.setOffline(true);
     await play(steps.one);

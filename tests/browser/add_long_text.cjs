@@ -2,8 +2,8 @@
 // - a pasted text of about 4,800 characters is added, with no refusal toast;
 // - the new item keeps the text's start as its summary and holds the whole text as a page of its own, which shows every
 //   line;
-// - the item's open row, opened as a search result opens it, shows the cut line and the page.
-// Saves a screenshot of the open row per width in the work dir.
+// - the item's card, opened from the keys, shows the cut line and the page.
+// Saves a screenshot of the card per width in the work dir.
 //
 // Starts serve_preview.py (this checkout's Cockpit on a synthetic database, fake sessions; README.md says what
 // it needs) and drives a headless Chromium. Prints one line per check and exits 1 when one failed.
@@ -46,9 +46,10 @@ async function main() {
       page.setDefaultTimeout(60000);
       const errors = [];
       page.on("pageerror", (error) => errors.push(error.message));
-      await page.goto(`${info.origin}/classic`);
+      await page.goto(`${info.origin}/`);
       await page.locator(".layout > .primary").waitFor();
-      await page.locator("#add").click();
+      // The list's + at desktop width; the + in the phone bar on a phone.
+      await page.locator(".sidebar-add:visible, .phone-add:visible").click();
       const title = `Read this pasted log ${width}`;
       const lines = Array.from({ length: 150 }, (_, n) => `line ${String(n).padStart(3, "0")} <b>pasted</b> & logged`);
       const text = `${title}\n${lines.join("\n")}`;
@@ -80,11 +81,11 @@ async function main() {
       await page.evaluate((id) => openKeyboardItem(id), item.id);
       const cut = page.getByText(`The text continues on this item's page "Your whole text"`).first();
       const shownCut = await cut.waitFor({ state: "visible" }).then(() => true, () => false);
-      check(`${width}: the open row shows the cut line`, shownCut, "no visible cut line");
-      const row = shownCut ? cut.locator("xpath=ancestor::*[contains(@class,'row')][1]") : page.locator("body");
+      check(`${width}: the card shows the cut line`, shownCut, "no visible cut line");
+      const card = page.locator("#next");
       const wide = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
       check(`${width}: no sideways scroll`, wide <= 0, `${wide}px`);
-      await row.screenshot({ path: path.join(work, `long-text-${width}.png`) }).catch(() => {});
+      await card.screenshot({ path: path.join(work, `long-text-${width}.png`) }).catch(() => {});
       check(`${width}: no page errors`, errors.length === 0, errors.join("; "));
       await context.close();
     }

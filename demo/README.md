@@ -43,19 +43,23 @@ unlisted. Run `bun demo/check.cjs --public` to check the page under that policy 
 
 The demo contains invented work. Rebuild and check it whenever the Cockpit source changes.
 
-### On every push, with GitHub Actions
+### On Cloudflare Pages
 
-`.github/workflows/demo.yml` does this for the demo at `https://try-cockpit.pages.dev`. On each push to `main` it
-builds the page, deploys it to the Cloudflare Pages project `try-cockpit` with wrangler, and fails unless the address
-then serves that build. Pull requests do not run it, and forks skip it.
+The demo at `https://try-cockpit.pages.dev` is a Cloudflare Pages project, rebuilt and deployed after each update to
+`main`. To deploy your own copy the same way, put the page and `_headers` in a folder and send it with wrangler,
+Cloudflare's command line:
 
-It reads two repository secrets, set under Settings, Secrets and variables, Actions:
+```bash
+mkdir site
+cp demo/dist/cockpit-demo.html site/index.html
+cp demo/_headers site/_headers
+npx --yes wrangler@4.141.0 pages deploy site --project-name YOUR_PROJECT --branch main
+```
+
+Wrangler reads two values from the environment:
 
 - `CLOUDFLARE_API_TOKEN`: a Cloudflare API token with one permission: Account, Cloudflare Pages, Edit.
 - `CLOUDFLARE_ACCOUNT_ID`: the Cloudflare account that holds the Pages project.
-
-To deploy your own copy this way, make a Pages project, put its name and address in the workflow, remove the
-workflow's fork condition and set the two secrets in your repository.
 
 ## How it works
 

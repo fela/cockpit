@@ -3,11 +3,11 @@
 An install's parts live in the package `cockpit.private`, which a copy of Cockpit may lack. Its `PARTS` lists the
 part factories, its `SETUP_TABLES` the setup-file tables the parts read, its `create_tables` the database tables the
 parts keep, its `HIDDEN_ITEMS` the items they keep off the main page, its `COMMANDS` the commands the parts add to
-the CLI, and its `MODEL_ROUTES` any provider/model/speed aliases. `STANDING` supplies an externally supervised
+the CLI, and its `MODEL_ROUTES` any provider/model/speed aliases. `CODEX_WEEKS` reads the hub's Codex limits. `STANDING` supplies an externally supervised
 session, `PAGE_OPTIONS` its page additions, `PROCESS_LABELS` labels for the resource view, and `CALENDAR` the
 user's coming events, which a typed snooze time may name. `create_app` calls
-each factory with a Context, and adds what the Part it gets back brings: routes, tags on pages and fields of
-/api/state.
+each factory with a Context, and adds what the Part it gets back brings: routes, tags on pages, scripts every page
+loads first and fields of /api/state.
 """
 
 from __future__ import annotations
@@ -28,10 +28,12 @@ if TYPE_CHECKING:
     from fastapi import FastAPI, Request
     from fastapi.responses import HTMLResponse
 
+    from cockpit.codex import CodexIndex, HubReading
     from cockpit.codex_agent import ProviderSessions
     from cockpit.sessions import SessionCache
+    from cockpit.spend import SpendIndex
 
-PACKAGE = "cockpit.private"
+PACKAGE: str = "cockpit.private"
 
 
 @dataclass(frozen=True)
@@ -94,6 +96,8 @@ class Context:
     user_only: Callable[[Request], None]
     # A helper page by its file name under static/, sent so Cockpit's own pages may frame it.
     framed_page: Callable[[str], HTMLResponse]
+    # A helper page as sent to the request's caller: for the user, with the main page's offline outbox (errors.js).
+    scoped_page: Callable[[Request, HTMLResponse], HTMLResponse]
     # The sessions on this machine; `.get()` lists them.
     session_cache: SessionCache | ProviderSessions
     # The user's Claude Code settings file, which holds their permission rules (permissions.py).
@@ -107,6 +111,17 @@ class Context:
     own_key_posts: dict[str, str]
     # The address the page is served at, with no trailing slash.
     origin: str
+    # This machine's Claude and Codex use, read from the session transcripts.
+    spend_index: SpendIndex
+    codex_index: CodexIndex
+    # Cockpit's own checkout, where the sessions Cockpit starts on its own begin.
+    spec_repo: Path
+    # The folder of the checkouts sessions may start in.
+    checkouts_dir: Path
+    # The enabled providers, the default first.
+    providers: tuple[str, ...]
+    # Delivers a queued message (store.create_message) in the background.
+    deliver: Callable[[int], None]
 
 
 @dataclass(frozen=True)
@@ -119,6 +134,9 @@ class Part:
     page_tags: dict[str, Tags]
     # Fields the part adds to the answer of /api/state, from the time and whether the caller is the user.
     state: Callable[[datetime, bool], dict[str, Any]]
+    # Scripts every Cockpit page loads first, before its own, each a path under /static/: where a part sets what the
+    # shared scripts read as they start, such as `cockpitPartPages` (keyboard.js) and `cockpitPartActions` (errors.js).
+    first_scripts: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -182,6 +200,31 @@ def model_routes() -> dict[tuple[str, str, str], str]:
     if importlib.util.find_spec(PACKAGE) is None:
         return {}
     return importlib.import_module(PACKAGE).MODEL_ROUTES
+
+
+def provider_availability(conn: sqlite3.Connection, now: datetime) -> dict[str, bool] | None:
+    """The install's current provider availability: None without a hub, and missing keys when unknown."""
+    if importlib.util.find_spec(PACKAGE) is None:
+        return None
+    hook = getattr(importlib.import_module(PACKAGE), "PROVIDER_AVAILABILITY", None)
+    return None if hook is None else hook(conn, now)
+
+
+def codex_weeks(conn: sqlite3.Connection) -> list[HubReading]:
+    """Every change the install's hub kept in its Codex accounts' weekly limits, for the Codex use of a folder on the
+    hub (codex.py): none in a copy without the private package or an install without a hub."""
+    if importlib.util.find_spec(PACKAGE) is None:
+        return []
+    hook = getattr(importlib.import_module(PACKAGE), "CODEX_WEEKS", None)
+    return [] if hook is None else hook(conn)
+
+
+def model_capacity(conn: sqlite3.Connection, now: datetime) -> dict[str, dict[str, Any]] | None:
+    """An install's saved model capacity, read without starting provider requests."""
+    if importlib.util.find_spec(PACKAGE) is None:
+        return None
+    hook = getattr(importlib.import_module(PACKAGE), "MODEL_CAPACITY", None)
+    return None if hook is None else hook(conn, now)
 
 
 def standing() -> Standing | None:

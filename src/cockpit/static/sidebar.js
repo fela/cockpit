@@ -22,14 +22,6 @@ function buildRail() {
     return el;
   };
   const brand = document.querySelector(".brand-menu");
-  // Sessions joins the pages the menu lists on a phone, which the rail's menu lists at every width.
-  const sessions = document.createElement("a");
-  sessions.href = "/classic#sessions";
-  const label = document.createElement("span");
-  label.className = "menu-label";
-  label.append(Icons.icon("terminal"), "Sessions");
-  sessions.append(label);
-  brand.querySelector(".menu-list").prepend(sessions);
   // Reload while a newer Cockpit runs, then Feedback, then Add. Reload sits here so the foot's usage keeps one line
   // (UI-13). Feedback and Add both make a tracked item, Feedback with a part of the page picked first, and Feedback is
   // styled as the +. A session on no item starts from Search; while its message box is open, an x beside them closes
@@ -37,11 +29,14 @@ function buildRail() {
   const add = document.createElement("button");
   add.className = "button small ghost icon-only sidebar-add";
   add.type = "button";
+  add.disabled = true;
   add.setAttribute("aria-label", "Add to your work");
   add.setAttribute("aria-keyshortcuts", "C");
   add.title = "Add a to-do; a session starts on it";
   add.append(Icons.icon("plus"));
-  add.addEventListener("click", () => (ui.adding ? closeAddBox() : openAddBox()));
+  add.addEventListener("click", () => byId("add").click());
+  const appScript = document.querySelector('script[src="/static/app.js"], script[src^="/static/app.js?"]');
+  appScript?.addEventListener("load", () => { add.disabled = false; }, { once: true });
   const feedback = byId("feedback-mode");
   feedback.classList.add("small", "ghost");
   const resume = byId("resume-sweeps");
@@ -58,7 +53,7 @@ function buildRail() {
   rail.className = "rail";
   rail.setAttribute("aria-label", "Menu, priorities and your items");
   rail.append(
-    div("rail-top", brand, div("rail-actions", byId("reload"), feedback, add)),
+    div("rail-top", brand, div("rail-actions", byId("reload"), feedback, offlineNoteKey(), add)),
     byId("goals"),
     div("rail-search", document.querySelector(".command-trigger")),
     byId("pinned"), byId("sidebar"),
@@ -73,7 +68,7 @@ function buildRail() {
   byId("add").hidden = true;
   byId("reload").setAttribute("aria-label", "Reload");
 }
-if (document.body.dataset.layout === "sidebar") buildRail();
+buildRail();
 
 // The item the user picked in the sidebar, kept for this tab across a reload; null shows the first step in the queue.
 function selectedItem() {
@@ -97,7 +92,7 @@ function keepSelected(itemId) {
 // sidebar.css draws only at phone width, so a window widened past it shows both again.
 const ONE_COLUMN = matchMedia("(max-width: 1000px)");
 const PHONE_SCREEN_KEY = "cockpit.phone.screen";
-const onPhone = () => document.body.dataset.layout === "sidebar" && ONE_COLUMN.matches;
+const onPhone = () => ONE_COLUMN.matches;
 
 // The screen last asked for, true for the list; null until the first ask, when the page's class says which shows. A
 // slide changes the screen a frame or more after the ask, so a second ask within that time compares with this and
@@ -141,6 +136,7 @@ function pauseHiddenTimer() {
 // From the item screen to the list: back through history when the list screen is the entry before, so the phone's
 // forward gesture and the bar's key agree; otherwise the list takes the item screen's entry.
 function showPhoneList() {
+  if (window.CockpitNavigation) { window.CockpitNavigation.list(); return; }
   if (history.state?.cockpitScreen === "item") { history.back(); return; }
   history.replaceState({ ...history.state, cockpitScreen: "list" }, "");
   setPhoneScreen(true, true);
@@ -150,8 +146,12 @@ function showPhoneList() {
 // on its way keeps its entry.
 function showPhoneItem(slide) {
   if (phoneListAsked()) {
+    window.CockpitNavigation?.save();
     history.replaceState({ ...history.state, cockpitScreen: "list" }, "");
     history.pushState({ ...history.state, cockpitScreen: "item" }, "");
+    setPhoneScreen(false, slide);
+    window.CockpitNavigation?.phone();
+    return;
   } else if (!phoneListShown()) return;
   setPhoneScreen(false, slide);
 }
@@ -163,40 +163,44 @@ let phoneRestoring = false;
 // goes on to focus what it opened, which a slide would show a moment later.
 const phonePress = { pointer: -Infinity, key: -Infinity };
 
-if (document.body.dataset.layout === "sidebar") {
-  let saved = null;
-  try { saved = sessionStorage.getItem(PHONE_SCREEN_KEY); } catch { /* blocked storage: the item screen */ }
-  if ((history.state?.cockpitScreen || saved) === "list") {
-    document.body.classList.add("phone-list");
-    phoneRestoring = true;
-  } else if (!history.state?.cockpitScreen && ONE_COLUMN.matches) {
-    // A page opened on the item screen puts the list's entry before it, so the back gesture shows the list.
-    history.replaceState({ ...history.state, cockpitScreen: "list" }, "");
-    history.pushState({ ...history.state, cockpitScreen: "item" }, "");
-  }
-  window.addEventListener("popstate", (event) => {
-    const screen = event.state?.cockpitScreen;
-    if (!screen) return;
-    // Back to the list may change the address, which the page then opens again; that keeps the list too.
-    phoneRestoring = screen === "list";
-    setPhoneScreen(screen === "list", true);
-  });
-  // On the window, which hears a press before keyboard.js, on the document, takes the key for itself.
-  window.addEventListener("pointerdown", () => { phoneRestoring = false; phonePress.pointer = performance.now(); }, true);
-  window.addEventListener("keydown", () => { phoneRestoring = false; phonePress.key = performance.now(); }, true);
-  // Narrowing the window to phone width hides one screen's cards, and widening it shows them, by the user's move.
-  ONE_COLUMN.addEventListener("change", () => {
-    // Widening shows the card again, so a step the list left starts again (leaveTimedStep).
-    if (!onPhone()) ui.leftStepId = null;
-    pauseHiddenTimer();
-    document.dispatchEvent(new Event("cockpit:screen"));
-  });
+// The screen this tab showed before a reload; null shows the item screen, as does blocked storage.
+function savedPhoneScreen() {
+  try { return sessionStorage.getItem(PHONE_SCREEN_KEY); } catch { return null; }
 }
+if ((history.state?.cockpitScreen || savedPhoneScreen()) === "list") {
+  document.body.classList.add("phone-list");
+  phoneRestoring = true;
+} else if (!history.state?.cockpitScreen && ONE_COLUMN.matches) {
+  // A page opened on the item screen puts the list's entry before it, so the back gesture shows the list. A link that
+  // opens a task or a session is followed once, from the item screen's entry, and then leaves the address
+  // (keyboard.js followRoute, app.js followItem); the list's entry goes without it, so Back does not follow it again.
+  const opened = location.href;
+  const once = /^#(?:item\/\d+|(?:board|home)\/(?:item\/\d+|session\/[0-9a-f-]+))$/.test(location.hash);
+  history.replaceState({ ...history.state, cockpitScreen: "list" }, "", once ? `${location.pathname}${location.search}` : opened);
+  history.pushState({ ...history.state, cockpitScreen: "item" }, "", opened);
+}
+window.addEventListener("popstate", (event) => {
+  const screen = event.state?.cockpitScreen;
+  if (!screen) return;
+  // Back to the list may change the address, which the page then opens again; that keeps the list too.
+  phoneRestoring = screen === "list";
+  setPhoneScreen(screen === "list", true);
+});
+// On the window, which hears a press before keyboard.js, on the document, takes the key for itself.
+window.addEventListener("pointerdown", () => { phoneRestoring = false; phonePress.pointer = performance.now(); }, true);
+window.addEventListener("keydown", () => { phoneRestoring = false; phonePress.key = performance.now(); }, true);
+// Narrowing the window to phone width hides one screen's cards, and widening it shows them, by the user's move.
+ONE_COLUMN.addEventListener("change", () => {
+  // Widening shows the card again, so a step the list left starts again (leaveTimedStep).
+  if (!onPhone()) ui.leftStepId = null;
+  pauseHiddenTimer();
+  document.dispatchEvent(new Event("cockpit:screen"));
+});
 
 // Shows the item screen for what the user opened in the list. `focuses` is true where the caller then focuses
 // something on that screen, which must show at once.
 function phoneOpen(focuses) {
-  if (!onPhone() || phoneRestoring) return;
+  if (!onPhone() || phoneRestoring || window.CockpitNavigation?.restoring) return;
   showPhoneItem(!focuses && phonePress.pointer > phonePress.key && performance.now() - phonePress.pointer < 2000);
 }
 
@@ -209,13 +213,13 @@ function phoneOpen(focuses) {
 function buildPhoneBar() {
   const count = h("span", { class: "phone-count" });
   const back = h("button", { class: "button ghost phone-back", type: "button", "aria-label": "Your items", title: "Your items", onclick: showPhoneList },
-    icon("back"), h("span", { class: "label", text: "Your items" }), count);
+    icon("log"), h("span", { class: "label", text: "Your items" }), count);
   const items = h("div", { class: "phone-items" }, back);
   const reload = h("button", { class: "button small accent icon-only phone-reload", type: "button", hidden: true, title: "A newer Cockpit is running; reloading keeps your drafts",
     onclick: () => document.getElementById("reload").click() }, icon("retry"), h("span", { class: "label", text: "Reload" }));
   const add = h("button", { class: "button small ghost icon-only phone-add", type: "button", "aria-label": "Add to your work",
     title: "Add a to-do; a session starts on it", onclick: () => (ui.adding ? closeAddBox() : openAddBox()) }, icon("plus"));
-  const bar = h("div", { class: "phone-bar" }, items, reload, add);
+  const bar = h("div", { class: "phone-bar" }, items, reload, offlineNoteKey(), add);
   document.querySelector(".layout > .primary").prepend(bar);
   // The hold shown, so a redraw keeps its Undo, and the focus on it, while the same hold lasts.
   let shown = null;
@@ -242,18 +246,23 @@ function buildPhoneBar() {
   new MutationObserver(follow).observe(original, { attributes: true, attributeFilter: ["hidden"] });
   follow();
 }
-if (document.body.dataset.layout === "sidebar") document.addEventListener("DOMContentLoaded", buildPhoneBar);
+document.addEventListener("DOMContentLoaded", buildPhoneBar);
 
 function selectItem(itemId) {
   showOnCard(itemId, null);
 }
 
-// A warning's row, or the red change-order arrows, open the warning on the card (SPEC UI-52).
+// A warning's row, or the red change-order arrows, select its card (SPEC UI-52). A warning can also open its own view.
 function openWarning(key) {
+  const warning = warningList(ui.state).find((one) => one.key === key)
+    || snoozedWarnings(ui.state).find((one) => one.key === key);
   showOnCard(null, key);
+  warning?.open?.();
 }
 
 function showOnCard(itemId, warningKey) {
+  const fromList = onPhone() && phoneListAsked() && !phoneRestoring;
+  window.CockpitNavigation?.before();
   ui.navigations++;
   // Showing another item takes the timer along, however the user got there (a row, Search, the keyboard): the step
   // left stops without a notice and starts again when it shows once more (TRACK-8, leaveTimedStep). Each showing
@@ -263,6 +272,7 @@ function showOnCard(itemId, warningKey) {
   if (timer && timer.item_id !== itemId) leaveTimedStep(timer);
   leaveFeedbackHoldStep(itemId);
   phoneOpen(false);
+  window.CockpitNavigation?.task(itemId, warningKey, fromList);
   closeSessionView(false);
   closeSettings(false);
   keepSelected(itemId);
@@ -291,10 +301,24 @@ function closedEntry(state, itemId) {
 }
 
 // After the user answers, hands off, snoozes or closes the step they picked, the card shows the queue's first step
-// again, as it does without the sidebar.
+// again.
 function followQueue(step) {
-  if (!SIDEBAR || selectedItem() !== step.item_id) return;
+  if (selectedItem() !== step.item_id) return;
+  dropSelection();
+}
+
+// The card goes back to the queue's first step without a navigation of its own. The browser-history entry the card
+// is on follows, so a Back that returns to it (a page layer closing, say) shows the queue too, not the task left.
+function dropSelection() {
   keepSelected(null);
+  window.CockpitNavigation?.save();
+}
+
+// The same for a warning the card showed, once a snooze or a message takes it off Inbox.
+function dropWarning(key) {
+  if (ui.warningOpen !== key) return;
+  ui.warningOpen = null;
+  window.CockpitNavigation?.save();
 }
 
 // Resorted and Take it show the queue's first step on the card, whichever item the user picked in the list. The card
@@ -302,7 +326,8 @@ function followQueue(step) {
 // top of that order moves below the first live step, keeping its draft, so it does not take the card. Both keys sit on
 // the card, so the card is already on screen.
 function showQueueTop() {
-  if (!SIDEBAR) return;
+  window.CockpitNavigation?.before();
+  window.CockpitNavigation?.task(null, null, false);
   ui.navigations++;
   keepSelected(null);
   for (const place of ui.left.values()) if (place.list === "queue") place.index = Math.max(place.index, 1);
@@ -318,7 +343,7 @@ function stepOfItem(itemId, lists) {
 }
 
 // The card: the warning the user opened; else the picked item's step; else the step the user handed to an agent, as
-// it was, ending in what the agent is doing (`workingNote`); else the item's open row; with nothing picked, the queue's first step, as Next up shows it without the sidebar. Warnings rank above
+// it was, ending in what the agent is doing (`workingNote`); else the item's open row; with nothing picked, the queue's first step. Warnings rank above
 // every step but the one the user is on (SPEC UI-52): with nothing picked, the first warning takes Next up unless
 // the user opened, pressed or took the queue's first step, or its time runs (NEXT-60).
 function renderSelected(state, lists) {
@@ -326,7 +351,7 @@ function renderSelected(state, lists) {
   const items = new Map(state.items.map((item) => [item.id, item]));
   const found = itemId !== null ? stepOfItem(itemId, lists) : null;
   const closed = itemId !== null && !found && !items.has(itemId) ? closedEntry(state, itemId) : null;
-  if (itemId !== null && !found && !items.has(itemId) && !closed) { keepSelected(null); itemId = null; }
+  if (itemId !== null && !found && !items.has(itemId) && !closed) { dropSelection(); itemId = null; }
   const warnings = warningList(state);
   // A warning that went, fixed or closed, leaves the card to the next warning, as warnings rank above every step.
   // A snoozed warning shows when the user opened it from Waiting (SPEC UI-72).
@@ -491,7 +516,7 @@ function renderSidebar(state) {
       const hand = handHeld(step.id);
       return {
         // Held Add and hand-off rows return before sidebarRow's selection class is set.
-        selected: ui.shownItem === step.item_id && !hand && !ui.addsHeld.get(step.item_id)?.row,
+        selected: ui.shownItem === step.item_id && !hand && !ui.addsHeld.has(step.item_id),
         build: () => {
           const row = hand ? handHeldRow(items.get(step.item_id), hand) : sidebarRow(items.get(step.item_id), mark, sessions);
           row.dataset.step = step.id;
@@ -515,7 +540,7 @@ function renderSidebar(state) {
   const readyRows = stepEntries(state.ready_next, "ready");
   const mine = [["queue", "Inbox", [...(queueRows.length ? queueRows : [inboxEmptyRow()]), ...moreRows(readyRows)],
     true, queueRows.length + readyRows.length]];
-  // A handed step shows in its item's group: in Waiting once its agent stopped more than an hour ago.
+  // A handed step shows in its item's group: Busy while work runs, Waiting while its agent is idle or blocked.
   const handedIn = (group) => stepRows(state.with_agents.filter((step) => (items.get(step.item_id)?.group === "waiting") === (group === "waiting")), group);
   const handed = { busy: handedIn("busy"), waiting: handedIn("waiting") };
   // The steps each group lists as handed, for its heading's Undo after a Send (`handsHeading`).
@@ -524,16 +549,21 @@ function renderSidebar(state) {
   const snoozed = [
     ...[...state.snoozed].sort((a, b) => a.snoozed_until.localeCompare(b.snoozed_until))
       .filter((step) => !step.left && take(step.item_id))
-      .map((step) => ({ until: step.snoozed_until, row: snoozedRow(step, items.get(step.item_id), sessions) })),
+      .map((step) => {
+        const hold = snoozeHeld(step.id);
+        const row = hold ? snoozeHeldRow(items.get(step.item_id), hold) : snoozedRow(step, items.get(step.item_id), sessions);
+        row.dataset.step = step.id;
+        return { until: step.snoozed_until, row };
+      }),
     ...snoozedWarnings(state).map((warning) => ({ until: warning.snoozedUntil, row: snoozedWarningRow(warning) })),
   ].sort((a, b) => a.until.localeCompare(b.until)).map((entry) => entry.row);
   snoozed.forEach((row) => { row.dataset.wait = "snoozed"; });
   // What runs without the user. A task with a step for the user shows in Inbox, which took it above; a
   // to-do held for Add's Undo stays in Busy, where that Undo is.
   const backgroundRows = (state.background || []).filter((row) => row.item_id === null
-    || (!ui.addsHeld.get(row.item_id)?.row && take(row.item_id)))
+    || (!ui.addsHeld.has(row.item_id) && take(row.item_id)))
     .map((row) => (row.item_id === null ? backgroundSessionRow(row, sessions) : sidebarRow(items.get(row.item_id), "busy", sessions)));
-  // To-dos the user added in the last half hour that have no step for them yet, newest first, stay at the top of Busy.
+  // Busy to-dos added in the last half hour lead that group, newest first.
   // Only rows that came into Busy in the last minute pulse (leadArrivals).
   const fresh = freshTodos(state).filter((item) => take(item.id)).map((item) => sidebarRow(item, "busy", sessions));
   // The tasks Finished this week lists, for its heading's Undo.
@@ -579,12 +609,13 @@ function renderSidebar(state) {
   // to-do in, and its Undo sits at the heading's right (headingUndo).
   // Likewise, while Finished this week is folded, a close whose Undo is on offer lights up its heading, with that
   // Undo at the heading's right (closeHeld). And while the group a sent step went to is folded, the hand-off's Undo
-  // sits on that heading (handsHeading); Busy shows the newest of an Add's, a Send's and a reopened task's.
+  // sits on that heading (handsHeading), as a snooze's Undo sits on Waiting's (snoozesHeading); Busy shows the newest
+  // of an Add's, a Send's and a reopened task's, and Waiting the newer of a Send's and a snooze's.
   const newer = (a, b) => (!a || (b && b.at > a.at) ? b : a);
   const reopened = ui.reopenedHeld;
   const held = {
     busy: newer(newer(busyHeld(state), handsHeading(handedIds("busy"))), reopened),
-    waiting: handsHeading(handedIds("waiting")),
+    waiting: newer(handsHeading(handedIds("waiting")), snoozesHeading(new Set(snoozed.map((row) => Number(row.dataset.step))))),
     done: doneHeld(doneIds),
   };
   fill("sidebar", h("div", { class: "sidebar-groups" }, [emergency, ...groups].filter(([, , rows]) => rows.length).map(([key, label, rows, open, count = rows.length]) => {
@@ -639,7 +670,7 @@ function moreRows(rows) {
 
 // The parts of Waiting, by what the work waits for, in store.WAIT_KINDS's order, the user's own snoozed steps last. Each heading's hover says more.
 const WAIT_PARTS = [
-  ["stuck", "Stuck", "Nothing moves this work and you have no step for it: no one has the next move, or its agent stopped over an hour ago. The next sweep starts or wakes an agent, or puts you a step; low-priority work waits until the queue is short"],
+  ["stuck", "Stuck", "No next move is set, or the agent is idle"],
   ["blocked", "Agent blocked", "Its agent is waiting for approval, a provider limit, or recovery from an error"],
   ["person", "A person", "Another person's review, answer or work"],
   ["bot", "A bot", "A review bot such as review-bot"],
@@ -734,12 +765,12 @@ function leadArrivals(rows, items) {
   return [...lit, ...rows.filter((row) => !lit.includes(row))];
 }
 
-// The to-dos the user added with Add in the last JUST_ADDED_MS, open, newest first; the one still on its way to the
-// server shows under its local id. Those without a step for the user lead Busy after the rows that just came in.
+// Busy to-dos added in the last JUST_ADDED_MS, newest first; the one still on its way to the server shows under
+// its local id. Once work waits, its actual group takes precedence over its recent creation.
 function freshTodos(state) {
   const since = new Date(Date.now() - JUST_ADDED_MS).toISOString();
   return state.items
-    .filter((item) => /^todo-/.test(item.key) && item.created_at >= since && !item.archived && item.ball !== "done")
+    .filter((item) => /^todo-/.test(item.key) && item.created_at >= since && !item.archived && sidebarGroup(item, state) === "busy")
     .sort((a, b) => b.created_at.localeCompare(a.created_at));
 }
 
@@ -777,10 +808,9 @@ function arrivedPlace(id) {
   return folded ? folded.querySelector(":scope > summary") : row;
 }
 
-// The newest to-do held for its Undo time whose Undo is a row in Busy (`hold.row`), as Busy's heading shows it
-// (`headingUndo`); null when none is.
+// The newest to-do held for its Undo time in Busy, as Busy's heading shows it (`headingUndo`); null when none is.
 function busyHeld(state) {
-  const items = state.items.filter((item) => ui.addsHeld.get(item.id)?.row && sidebarGroup(item, state) === "busy");
+  const items = state.items.filter((item) => ui.addsHeld.has(item.id) && sidebarGroup(item, state) === "busy");
   const item = items.sort((a, b) => b.created_at.localeCompare(a.created_at))[0];
   if (!item) return null;
   const hold = ui.addsHeld.get(item.id);
@@ -809,14 +839,15 @@ function doneHeld(doneIds) {
 }
 
 
-// The newest Add, close or hand-off with its Undo on offer, as the phone bar's Your items shows it (`buildPhoneBar`);
-// null when none is. `hold` is the app.js hold it shows; `close` whether it is a close.
+// The newest Add, close, hand-off or snooze with its Undo on offer, as the phone bar's Your items shows it
+// (`buildPhoneBar`); null when none is. `hold` is the app.js hold it shows; `close` whether it is a close.
 function phoneHeld(state) {
   const closes = [...ui.closesHeld];
   const close = doneHeld(new Set(closes.flatMap((hold) => hold.itemIds)));
   const hand = handsHeading(new Set([...ui.handsHeld].map((hold) => hold.stepId)));
+  const snooze = snoozesHeading(new Set([...ui.snoozesHeld].map((hold) => hold.stepId)));
   const add = busyHeld(state);
-  const newest = [close, hand, add].reduce((a, b) => (!a || (b && b.at > a.at) ? b : a), null);
+  const newest = [close, hand, snooze, add].reduce((a, b) => (!a || (b && b.at > a.at) ? b : a), null);
   return newest && { ...newest, close: newest === close, hold: newest.undo };
 }
 
@@ -835,6 +866,24 @@ function handsHeading(stepIds) {
     title: `Undo: take back your message to ${hold.to}; it goes once this time ends`,
     label: `Take back your message to ${hold.to}`,
   };
+}
+
+// The newest snooze of this step whose Undo is on offer (app.js `snoozedNotice`); null when none is.
+function snoozeHeld(stepId) {
+  return [...ui.snoozesHeld].reverse().find((hold) => hold.stepId === stepId) || null;
+}
+
+// The newest snooze with its Undo on offer among the steps Waiting lists, as its heading shows it (`headingUndo`);
+// null when none is. The snoozed step's item leaves Inbox for Waiting, so the count rolls up by one.
+function snoozesHeading(stepIds) {
+  const hold = [...ui.snoozesHeld].reverse().find((one) => stepIds.has(one.stepId));
+  if (!hold) return null;
+  return { at: hold.at, ms: UNDO_SNOOZE_MS, added: 1, undo: hold.undo, title: `Undo: unsnooze; ${snoozeWords(hold)}`, label: "Undo the snooze" };
+}
+
+// What a held snooze waits for, as its Undo's tooltip says it.
+function snoozeWords(hold) {
+  return `snoozed until ${when(new Date(hold.until))}`;
 }
 
 // The emergency session (SESSION-21) once it has a message, first in the list: the user's last message, a link to its
@@ -933,7 +982,7 @@ function workingMark() {
 // sessions open from the menu on the step's card (`stepMenu`), not from the row.
 function sidebarRow(item, group, sessions) {
   const hold = ui.addsHeld.get(item.id);
-  if (hold && hold.row) return heldRow(item, hold);
+  if (hold) return heldRow(item, hold);
   const closing = group === "done" ? closeHeld(item.id) : null;
   if (closing) return closedHeldRow(item, closing);
   const selected = ui.shownItem === item.id;
@@ -1127,6 +1176,23 @@ function handHeldRow(item, hold) {
   return h("li", { "data-item": item.id, class: "side-item held-hand" }, button);
 }
 
+// The row of a step the user just snoozed while the snooze's Undo is on offer, under Snoozed by you: the whole row
+// is an Undo button, its bar running down over the Undo time, which unsnoozes the step.
+function snoozeHeldRow(item, hold) {
+  const left = Math.max(0, hold.at + UNDO_SNOOZE_MS - Date.now());
+  const button = h("button", { class: "side-row undo-add", type: "button", onclick: hold.undo,
+    title: `Undo: unsnooze “${item.title}”; ${snoozeWords(hold)}`, "aria-label": `Undo snoozing ${item.title}` },
+    h("span", { class: "undo-add-fill", "aria-hidden": "true" }),
+    h("span", { class: "sidebar-lead" }, icon("back")),
+    h("span", { class: "undo-add-label", text: "Undo" }),
+    h("span", { class: "sidebar-title", text: item.title }),
+    h("span", { class: "undo-add-secs", "aria-hidden": "true", "data-until": String(hold.at + UNDO_SNOOZE_MS), text: undoSeconds(left) }));
+  button.style.setProperty("--undo-ms", `${UNDO_SNOOZE_MS}ms`);
+  button.style.setProperty("--undo-delay", `-${UNDO_SNOOZE_MS - left}ms`);
+  tickUndo();
+  return h("li", { "data-item": item.id, class: "side-item held-snooze" }, button);
+}
+
 // The Undo of a to-do whose Add waits for its Undo time: a tint fills it and runs down from right to left as the time
 // passes, and the seconds left count down at its end. Each drawing picks the bar up where the last one left it.
 function undoAddButton(item, hold, cls, onclick) {
@@ -1207,7 +1273,7 @@ function showItemDraftMarks() {
 // session's transcript every few seconds while it shows.
 // `item` is the item the user opened it from, which its Back and its messages go to; `turn` counts the openings, so a
 // reading that comes back after the view closed or opened again is dropped.
-const sessionView = { id: null, item: null, from: null, drawnFor: null, turn: 0, log: null, error: "", timer: null, printed: "", open: new Set() };
+const sessionView = { id: null, item: null, from: null, followFrom: null, drawnFor: null, turn: 0, log: null, error: "", timer: null, printed: "", open: new Set() };
 
 function sessionViewButton(session, props, ...children) {
   return h("button", {
@@ -1272,7 +1338,9 @@ function slideView(direction, change) {
 }
 
 function openSessionView(sessionId, itemId) {
-  ui.navigations++;
+  window.CockpitNavigation?.before();
+  const navigation = ++ui.navigations;
+  const destination = window.CockpitNavigation?.capture();
   // From a session's line in the phone's list: the conversation shows on the item screen.
   const fromList = onPhone() && phoneListAsked();
   // The conversation takes the card's place: one of another item's session leaves the step on the clock, as showing
@@ -1281,12 +1349,14 @@ function openSessionView(sessionId, itemId) {
   if (timer && timer.item_id !== itemId) leaveTimedStep(timer);
   leaveFeedbackHoldStep(itemId);
   return slideView("in", () => {
+    if (ui.navigations !== navigation || (destination && !window.CockpitNavigation.current(destination))) return;
     if (fromList) showPhoneItem(false);
+    if (!destination?.restoring) window.CockpitNavigation?.session(sessionId, itemId, fromList);
     closeSettings(false);
     clearTimeout(sessionView.timer);
     // The step the card showed for this item and session, which the conversation's Send then answers (viewedStep).
     const from = ui.next && ui.next.item_id === itemId && ui.next.target && ui.next.target.session_id === sessionId ? ui.next.id : null;
-    Object.assign(sessionView, { id: sessionId, item: itemId, from, turn: sessionView.turn + 1, log: null, error: "", printed: "", open: new Set() });
+    Object.assign(sessionView, { id: sessionId, item: itemId, from, followFrom: null, turn: sessionView.turn + 1, log: null, error: "", printed: "", open: new Set() });
     document.body.classList.add("viewing-session");
     if (itemId !== null && ui.shownItem !== itemId) keepSelected(itemId);
     drawSessionView();
@@ -1300,9 +1370,13 @@ function openSessionView(sessionId, itemId) {
 // line in the sidebar.
 function closeSessionView(redraw) {
   if (!sessionView.id) return;
+  if (redraw) {
+    window.CockpitNavigation?.before();
+    window.CockpitNavigation?.task(selectedItem(), ui.warningOpen, false);
+  }
   const id = sessionView.id;
   clearTimeout(sessionView.timer);
-  Object.assign(sessionView, { id: null, item: null, turn: sessionView.turn + 1 });
+  Object.assign(sessionView, { id: null, item: null, followFrom: null, turn: sessionView.turn + 1 });
   document.body.classList.remove("viewing-session");
   // The card shows again, so a step the conversation left starts again (leaveTimedStep).
   ui.leftStepId = null;
@@ -1361,9 +1435,12 @@ function sessionComposerShape(step) {
 
 // The message box under the conversation, with its own draft. It is drawn again when its words changed outside it, as
 // after Send or Take back, and when what it shows besides them changed, as once Send handed the step off. The focus and the caret stay.
+// Before the page's first state, the box stays empty: the conversation can open first, from a part's panel, which
+// loads on its own, and the redraw that follows the state draws the box.
 function drawSessionComposer() {
   const el = document.getElementById("session-composer");
   if (!el) return;
+  if (!ui.state) { el.replaceChildren(); return; }
   const session = viewedSession();
   const item = viewedItem();
   const step = viewedStep();
@@ -1391,7 +1468,7 @@ function drawSessionHead() {
     : state === "idle" && (session.busy_with || []).length ? `idle, waits on ${session.busy_with.join(", ")}`
     : AGENT_DOING[state] || state;
   const lastWords = last && last.at ? `last activity ${ago(last.at)}` : "";
-  el.replaceChildren(stateDot(state, doing), h("strong", { text: sessionLabel(session, "") }),
+  el.replaceChildren(stateDot(state, doing), h("strong", { text: sessionModelLabel(ui.state, session) }),
     h("span", { class: "session-meta", "data-time": last && last.at ? last.at : null,
       text: [capitalize(doing), lastWords, session.account && `${session.account} account`, repoOf(session.cwd || "")].filter(Boolean).join(" · ") }));
 }
@@ -1550,8 +1627,29 @@ function callRun(calls) {
 }
 
 // The session view follows the state: its head, its "Working" line, and the message box once Send took its words.
+function followSessionHandover() {
+  if (!sessionView.id || sessionView.followFrom !== sessionView.id || !ui.state) return false;
+  const key = sessionKey();
+  if ((ui.drafts.get(key) || "").trim() || stagedImages(key).length || ui.starts.has(key)) return false;
+  const sessions = sessionMap(ui.state);
+  const visited = new Set();
+  let id = sessionView.id;
+  while (true) {
+    if (visited.has(id)) return false;
+    visited.add(id);
+    const handover = sessions.get(id)?.handover;
+    if (handover?.state !== "sent" || !handover.session_id) break;
+    id = handover.session_id;
+  }
+  if (id === sessionView.id) return false;
+  sessionView.followFrom = null;
+  openSessionView(id, sessionView.item);
+  return true;
+}
+
 document.addEventListener("cockpit:redraw", () => {
-  if (!SIDEBAR || !sessionView.id) return;
+  if (!sessionView.id) return;
+  if (followSessionHandover()) return;
   drawSessionHead();
   drawSessionLog(false);
   const step = viewedStep();

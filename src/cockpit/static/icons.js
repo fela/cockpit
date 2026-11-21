@@ -107,7 +107,7 @@
     // to five lit bars for low, medium, high, xhigh and max.
     claude: `<path d="M8 1.75v12.5M1.75 8h12.5M3.6 3.6l8.8 8.8M12.4 3.6l-8.8 8.8"/>`,
     codex: `${softRect(1.75, 2.75, 12.5, 10.5, 2.25)}<path d="M4.75 6.25L6.75 8l-2 1.75M8.75 10h2.5"/>`,
-    // The ACP agents (SESSION-26): a four-pointed star for Gemini, a slash through a ring for Grok.
+    // The ACP agents (SESSION-30): a four-pointed star for Gemini, a slash through a ring for Grok.
     gemini: `<path d="M8 1.75C8.6 5.4 10.6 7.4 14.25 8 10.6 8.6 8.6 10.6 8 14.25 7.4 10.6 5.4 8.6 1.75 8 5.4 7.4 7.4 5.4 8 1.75Z"/>`,
     grok: `<circle cx="8" cy="8" r="5.5"/><path d="M3.5 12.5l9-9"/>`,
     "effort-1": effort(1),
@@ -142,6 +142,7 @@
     // A step useful only until a time (SPEC NEXT-60): a stopwatch with its crown and side button.
     timer: `${softRing(8, 9, 5.25)}<path d="M6.5 1.75h3M8 1.75v2M12.1 4.9l1.05-1.05M8 9V6.25"/>`,
     key: `${softRing(5.25, 10.75, 3.25)}<path d="M7.6 8.4L13.5 2.5M10.8 5.2l1.8 1.8M12.4 3.6l1.6 1.6"/>`,
+    book: `<path d="M8 3.5C6 2.2 3.8 2 1.5 2.5v10c2.3-.5 4.5-.3 6.5 1 2-1.3 4.2-1.5 6.5-1v-10c-2.3-.5-4.5-.3-6.5 1zM8 3.5v10"/>`,
     person: `${softRing(8, 5, 2.75)}<path d="M2.75 14c.5-2.75 2.6-4.5 5.25-4.5s4.75 1.75 5.25 4.5"/>`,
     bot: `${softRect(2.25, 5, 11.5, 8.5, 2.25)}<path d="M8 5V2.75M6 8.5v1.5M10 8.5v1.5"/>${dot(8, 2.25, 0.9)}`,
     bug: `${softRect(5, 5, 6, 9, 3)}<path d="M6.25 5.2v-.7a1.75 1.75 0 0 1 3.5 0v.7M2.5 9.5H5M11 9.5h2.5M3 5.5l2 1.5M13 5.5L11 7M3 13.5l2-1.5M13 13.5L11 12"/>`,

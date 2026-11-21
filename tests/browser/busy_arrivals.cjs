@@ -44,8 +44,8 @@ async function main() {
     // A to-do added in the last half hour stays at the top of Busy whatever its group (sidebar.js freshTodos).
     const target = state.items.find((item) => item.group === "busy" && !item.archived && !item.open_steps
       && (!/^todo-/.test(item.key) || Date.now() - Date.parse(item.created_at) > 31 * 60e3)
-      && !handedItems.has(item.id) && item.waiting_on.some((entry) => entry.kind === "agent"));
-    if (!target) throw new Error("no Busy item without steps that waits on an agent in the fixture");
+      && !handedItems.has(item.id));
+    if (!target) throw new Error("no Busy item without steps or a handed step in the fixture");
     const put = (waiting_on) => fetch(`${info.origin}/api/items`, { method: "PUT", headers: AGENT,
       body: JSON.stringify({ key: target.key, waiting_on }) }).then(async (response) => {
       if (!response.ok) throw new Error(`put ${response.status}: ${await response.text()}`);
@@ -71,6 +71,11 @@ async function main() {
     const litAtOpen = await lit();
     check("at open only items made in the last minute are lit", litAtOpen.every((id) => Date.now() - made.get(id) < 70e3),
       litAtOpen.join(", "));
+    // The copy's items are seconds old, and an item in its first minute counts as having come in when it was made
+    // (sidebar.js busyArrivals), so the move starts once every Busy row made with the copy is past its minute.
+    const lastMade = Math.max(...[...made.values()].filter((at) => Date.now() - at < 70e3), 0);
+    await sleep(Math.max(0, lastMade + 62e3 - Date.now()));
+    await waitFor(lit, (ids) => ids.length === 0, 10e3);
 
     await put([{ kind: "person", who: "Alex", what: "review", until: "2026-01-15T10:00:00Z" }]);
     await waitFor(() => row.count(), (count) => count === 0, 20e3);

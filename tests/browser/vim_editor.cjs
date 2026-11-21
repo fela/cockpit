@@ -40,7 +40,7 @@ let browser, page;
   page.on("request", (request) => {
     if (request.method() === "POST" && request.url().endsWith("/api/messages")) sends.push(request.postDataJSON());
   });
-  await page.goto(origin + "/classic");
+  await page.goto(origin + "/");
   await page.locator("#next [data-step]").waitFor();
   const mod = await page.evaluate(() => /Mac|iPhone|iPad/.test(navigator.platform)) ? "Meta" : "Control";
   const press = (key) => page.keyboard.press(key);
@@ -128,7 +128,7 @@ let browser, page;
   console.log("PASS Preference and drafts survive reload; settings switch restores the native field without losing text");
 
   const second = await context.newPage();
-  await second.goto(origin + "/classic"); await second.locator("#next [data-step]").waitFor();
+  await second.goto(origin + "/"); await second.locator("#next [data-step]").waitFor();
   await command("Disable Vim editing");
   await second.waitForFunction(() => !CockpitEditor.get());
   await command("Enable Vim editing");
@@ -179,7 +179,7 @@ let browser, page;
     Storage.prototype.getItem = () => { throw new Error("Storage is blocked"); };
     Storage.prototype.setItem = () => { throw new Error("Storage is blocked"); };
   });
-  await blocked.goto(origin + "/classic");
+  await blocked.goto(origin + "/");
   await blocked.locator("#next [data-step]").waitFor();
   assert.equal(await blocked.evaluate(() => CockpitEditor.get()), false);
   await blocked.keyboard.press(`${mod}+k`);

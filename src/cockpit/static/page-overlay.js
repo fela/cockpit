@@ -493,8 +493,9 @@
 
   // The Pages view keeps a comment being written for the next layer on its page (pages.js).
   function keepComment(frame) {
+    if (!frame?.contentDocument) return;
     try {
-      frame?.contentWindow?.cockpitPagesLeaving?.();
+      frame.contentWindow?.cockpitPagesLeaving?.();
     } catch (error) {
       logError("keeping a comment as the page closed", error);
     }

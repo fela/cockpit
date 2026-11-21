@@ -6,22 +6,31 @@ agent sessions. `serve_preview.py` uses the same data without write delays.
 
 ## Which checks run where
 
+`polling_load.cjs` holds board responses on a synthetic page to check that slow periodic reads pause,
+explicit refreshes keep one immediate follow-up, and an old prefetched history refreshes when opened.
+`polling_load_state.cjs` also checks cache aging, failed-prefetch recovery and background-tab polling without a browser.
+
 `uv run --extra test pytest tests/test_browser_checks.py` runs these files:
 
 - every `*_state.cjs` check in this folder.
   They run page code with simulated browser state and need no browser or server. Pytest runs them with `bun` from
   `PATH`, else `~/.bun/bin/bun`, else `node`, and skips them when it finds neither. With `node` they need Node 19
   or later: two of them use the global `CustomEvent`, which Node 18 lacks.
-- `control_use_errors.cjs`, when `PLAYWRIGHT_MODULE` is set.
+- `control_use_errors.cjs`, `offline_shell_deadline.cjs`, `sidebar_startup.cjs` and `timer_overlay_recovery.cjs`
+  when `PLAYWRIGHT_MODULE` is set.
 
 The other checks run by hand from the checkout, one at a time: `node tests/browser/<name>.cjs`. Each needs
 Node 18 or later, Playwright and Chromium (the setup is under Keyboard navigation; every check reads
 `PLAYWRIGHT_MODULE` and `BROWSER_EXECUTABLE`).
 
-- `icon_warming.cjs`, `local_login.cjs`, `reviewed_fixes.cjs` and `usage_tables.cjs` start no server and need nothing
-  more.
+- `icon_warming.cjs`, `local_login.cjs`, `reviewed_fixes.cjs`, `usage_tables.cjs` and `usage_day_tip.cjs` start no
+  server and need nothing more.
 - The others start this checkout's Cockpit on a synthetic database themselves, through `serve_preview.py`,
   `serve_keyboard.py` or `serve_slow.py`, so they also need the test virtualenv (`uv sync --extra test`).
+- `feedback_waits.cjs` (Back to a page kept in the back-forward cache) and `installed_app.cjs` (installing the app)
+  need the full Chromium build, which `playwright install chromium` installs beside the headless shell. They pick it
+  themselves; a `BROWSER_EXECUTABLE` for them names that build (`chromium-*/chrome-linux64/chrome`), as the headless
+  shell (`chromium_headless_shell-*`) has neither feature. On it `feedback_waits.cjs` stops and says so.
 
 `shots.cjs` takes screenshots of a preview you start yourself. `work.cjs` and `machine_fixture.cjs` are helpers the
 checks load.
@@ -200,7 +209,7 @@ step starts with its timer running, as a step the user is on. The run presses:
 - Add (opening the box and submitting a to-do);
 - feedback mode (the button, picking a part, Send);
 - Priorities: Send and Drop;
-- Full sweep now and Update.
+- Update board, from the command menu.
 
 ## Usage colours
 
@@ -231,9 +240,9 @@ It prints one line per check and exits 0 when all passed. A run takes about half
 `usage_codex.cjs` checks the Usage page with Codex beside Claude (SPEC SESSION-10). It starts `serve_preview.py`
 and opens `/usage` at 1280 and 390 px in both themes, once Cockpit has counted synthetic transcripts:
 
-- Codex's weekly meter, its chart in the last 30 days, its tile and its card under "Where it went";
+- Codex's weekly meter, its chart in the last 30 days, its readout and its list under "Where it went";
 - the "Of its week" column in the Codex table;
-- cards padded at most 8 px and rank bars at most 3 px high;
+- lists padded at most 8 px and rank bars at most 3 px high;
 - nothing wider than the window;
 - no page errors.
 
@@ -244,10 +253,22 @@ node tests/browser/usage_codex.cjs
 It prints one line per check and exits 0 when all passed. The test seeds two Codex session transcripts and weekly readings before startup;
 it uses no installed account files.
 
+`usage_day_tip.cjs` serves synthetic API responses and this checkout's static files through Playwright routes.
+At 1280 and 390 px in both themes it checks the page order, unboxed totals, compact ranked rows, the shared
+30-day time axis, hover and keyboard day figures, Left/Right/Home/End navigation, focus after redraw,
+keyboard/click/touch pinning, a tooltip that stays inside the viewport, and each ranked list's All button
+opening its table. It saves four page screenshots in its temporary work folder. `usage_tables.cjs` checks
+the deferred tables and the Sessions list's All button.
+
+```
+node tests/browser/usage_day_tip.cjs
+node tests/browser/usage_tables.cjs
+```
+
 ## A weekly limit for one model
 
 `usage_model_limits.cjs` checks a Claude account's weekly limit that counts one model's use alone, beside the week all
-models share (SPEC UI-12, SESSION-10), on local accounts. It starts `serve_preview.py` and opens `/classic`
+models share (SPEC UI-12, SESSION-10), on local accounts. It starts `serve_preview.py` and opens `/`
 at 1440 px in both themes, then `/usage` at 1280 and 390 px:
 
 - the usage display's spoken words give both figures, "personal 62% (Fable 38%)";
@@ -444,7 +465,7 @@ It prints one line per check and exits 0 when all passed.
 ## The morning briefing opens in the layer
 
 `briefing_overlay.cjs` checks a link to the morning briefing on a step card (SPEC NEXT-47) against `serve_preview.py`
-(needing the same things as above), on `/` at desktop width and on `/classic` at phone width. The fixture stores
+(needing the same things as above), on `/` at desktop width and at phone width. The fixture stores
 yesterday's briefing and has Cockpit ask for today's, which the test then posts:
 
 - the briefing's read step does not load the briefing ahead, so it stays unread until the user opens it;
@@ -735,8 +756,8 @@ PLAYWRIGHT_MODULE=/tmp/cockpit-browser-tests/node_modules/playwright node tests/
 
 ## Cards that went within a minute
 
-`flashes.cjs` checks the recorder of cards that leave the page soon after showing (PERM-24), on the classic and the
-sidebar page, on the keyboard fixture's isolated database:
+`flashes.cjs` checks the recorder of cards that leave the page soon after showing (PERM-24), on the main page,
+on the keyboard fixture's isolated database:
 
 - a refusal that shows and is withdrawn by its session within a minute is noted, with what took it away, and so
   is one already there when the page loaded, since it came into view then;
@@ -749,7 +770,7 @@ PLAYWRIGHT_MODULE=/tmp/cockpit-browser-tests/node_modules/playwright node tests/
 ```
 
 `flash_hand_off.cjs` checks that a step the user's own send took off the page is not reported, though Cockpit has
-not yet heard of the send (a regression check), on the classic and the sidebar page, on `serve_preview.py`'s
+not yet heard of the send (a regression check), on the main page, on `serve_preview.py`'s
 synthetic database:
 
 - a queued step whose hand-off is held back before its request leaves the page, and the page sends no report for it,

@@ -1,4 +1,4 @@
-"""Sessions on agents Cockpit drives over the Agent Client Protocol: the Gemini CLI and Grok Build (SPEC SESSION-26).
+"""Sessions on agents Cockpit drives over the Agent Client Protocol: the Gemini CLI and Grok Build (SPEC SESSION-30).
 
 ACP is JSON-RPC 2.0 on the agent's stdin and stdout. Cockpit starts one agent process per provider and model, which
 hosts every session Cockpit starts on that model: `initialize`, then `session/new` in the session's folder, then a

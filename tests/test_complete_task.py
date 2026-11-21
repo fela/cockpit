@@ -172,7 +172,8 @@ def test_a_session_with_other_open_steps_is_told_and_kept(world: World, monkeypa
     assert _archives(world) == []
 
 
-def test_close_item_needs_a_reason_and_archives_the_item(world: World) -> None:
+def test_close_item_needs_a_reason_and_archives_the_item(world: World, monkeypatch) -> None:
+    stops_and_resumes(world, live("done", "idle"), monkeypatch)
     item_id = _item(world)
     step = _step(world, "reply", [])
     assert _finish(world, item_id, step["id"], "close", None, " ").status_code == 400

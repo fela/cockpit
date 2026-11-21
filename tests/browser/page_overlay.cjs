@@ -1,5 +1,5 @@
 // A page opens over Cockpit's page (SPEC NEXT-47), and its choices go to the step (NEXT-48). From a step card on
-// Cockpit's main page (`/` at desktop width in light, `/classic` at phone width in dark) it checks:
+// Cockpit's main page, at desktop width in light and phone width in dark, it checks:
 // - a click on the step's link to its page opens the page in a layer over the main page, with no header or list,
 //   and the address stays the main page's;
 // - a radio button on the page is a choice: it is saved for the step, the layer says so, and the Comment button
@@ -84,8 +84,8 @@ async function main() {
 
     browser = await chromium.launch({ executablePath: CHROMIUM });
     const run = Date.now();
-    const sizes = [["desktop", 1280, 900, "light", "/"], ["phone", 390, 844, "dark", "/classic"]];
-    for (const [label, width, height, scheme, home] of sizes) {
+    const sizes = [["desktop", 1280, 900, "light"], ["phone", 390, 844, "dark"]];
+    for (const [label, width, height, scheme] of sizes) {
       const key = `note:overlay-${run}-${label}`;
       const item = await agent("PUT", "/api/items", { key, title: `Overlay test ${label}`, priority: "urgent", sessions: [SESSION_B] });
       const options = await agent("POST", `/api/items/${item.id}/pages`, { title: "Launch plans", html: OPTIONS });
@@ -112,17 +112,13 @@ async function main() {
       };
       watch(page);
       const shot = (name) => page.screenshot({ path: path.join(SHOTS, `${label}-${scheme}-${name}.png`) });
-      const at = `${label} (${scheme}, ${home})`;
+      const at = `${label} (${scheme})`;
 
-      // On `/` the main page shows one inbox entry at a time; the test's own item is the one it opens, whatever else
-      // the fixture has waiting (a permission request comes first).
-      await page.goto(`${info.origin}${home}${home === "/" ? `#home/item/${item.id}` : ""}`);
+      // The main page shows one inbox entry at a time; the test's own item is the one it opens, whatever else the
+      // fixture has waiting (a permission request comes first).
+      await page.goto(`${info.origin}/#home/item/${item.id}`);
       const card = page.locator(`#next [data-step="${stepId}"]`).first();
       await card.waitFor();
-      const openCard = async () => {
-        if (await card.evaluate((el) => el.classList.contains("step-row") && !el.classList.contains("open"))) await card.locator(".row-head").click();
-      };
-      await openCard();
       // The link in the step's text; the folded ⋯ menu holds another to the same page (VIEW-29).
       const link = card.locator(`a[href*="/pages?id=${options.id}&step=${stepId}"]:visible`).first();
       const before = page.url();
@@ -230,7 +226,7 @@ async function main() {
       check(`${at}: the X closes the layer`, (await dialog.count()) === 0, "still open");
       const onOverlayEntry = () => page.evaluate(() => Boolean(history.state && history.state.cockpitPageOverlay));
       check(`${at}: closing takes its history entry back`, !(await waitFor(onOverlayEntry, (on) => !on)) && page.url() === before, page.url());
-      await openCard();
+      await card.waitFor();
       const listed = await waitFor(() => card.locator(".page-comments-pending summary").allTextContents(), (texts) => texts.some((text) => text.includes("choice")));
       check(`${at}: the step card lists the choice`, listed.includes("1 choice on pages go with this answer"), JSON.stringify(listed));
 
@@ -286,7 +282,7 @@ async function main() {
       check(`${at}: after a close, the page loads ahead again`, again, "no drawn layer loading ahead");
 
       // Again: Back closes and stays on the main page.
-      await openCard();
+      await card.waitFor();
       await link.click();
       await dialog.waitFor();
       await page.goBack();
@@ -296,7 +292,7 @@ async function main() {
       // Over the whole window, the comment column names the step's task above it. Its link opens the task on the main
       // page and closes the layer, rather than the whole of Cockpit loading inside the layer.
       if (!beside) {
-        await openCard();
+        await card.waitFor();
         await link.click();
         await dialog.waitFor();
         const headed = await openLayer(page);
@@ -316,13 +312,13 @@ async function main() {
         check(`${at}: the task's link above the page closes the layer and opens the task`, (await dialog.count()) === 0
           && Boolean(shown) && (shown.item === String(item.id) || shown.step === String(stepId)), JSON.stringify(shown));
         check(`${at}: and takes the layer's history entry back`, !(await waitFor(onOverlayEntry, (on) => !on))
-          && new URL(page.url()).pathname === home, page.url());
+          && new URL(page.url()).pathname === "/", page.url());
         await shot("4-task-link");
       }
 
       // A Ctrl click leaves the main page as it is.
       const opened = context.waitForEvent("page", { timeout: 5000 }).catch(() => null);
-      await openCard();
+      await card.waitFor();
       await link.click({ modifiers: ["Control"] });
       const tab = await opened;
       check(`${at}: a Ctrl click opens no layer`, (await dialog.count()) === 0, "a layer opened");
@@ -349,7 +345,7 @@ async function main() {
       };
       await page.route("**/api/state", slowState);
       await page.route(`**/pages/${options.id}/figure*`, heldFigure);
-      await openCard();
+      await card.waitFor();
       await dropAhead();
       const started = Date.now();
       await link.click();
@@ -390,7 +386,7 @@ async function main() {
         await route.continue().catch(() => {});
       };
       await page.route(`**/pages/${options.id}/figure*`, slowFigure);
-      await openCard();
+      await card.waitFor();
       await dropAhead();
       await link.focus();
       await link.press("Enter");
@@ -405,7 +401,7 @@ async function main() {
       await page.unroute(`**/pages/${options.id}/figure*`, slowFigure);
 
       // A slow save goes on after the X, and Send waits for it: the answer carries the choice just made.
-      await openCard();
+      await card.waitFor();
       await link.click();
       await dialog.waitFor();
       const figure3 = await figureIn(await openLayer(page), options.id);
@@ -421,8 +417,8 @@ async function main() {
       const refuse = (route) => route.fulfill({ status: 400, contentType: "application/json", body: JSON.stringify({ detail: "refused" }) });
       await page.route("**/api/item-pages/999999999/choices", refuse);
       await page.evaluate((id) => {
-        CockpitChoices.save(999999999, { name: "other", chosen: "x", label: "", step_id: 999999999 }, () => {});
-        CockpitChoices.save(999999998, { name: "gone", chosen: "x", label: "", step_id: id }, () => {});
+        CockpitChoices.save(999999999, { name: "other", chosen: "x", label: "", step_id: 999999999 }, () => {}, false);
+        CockpitChoices.save(999999998, { name: "gone", chosen: "x", label: "", step_id: id }, () => {}, false);
       }, stepId);
       const slow = async (route) => {
         // The saves for the other step and the removed page above keep their own answers.
@@ -434,7 +430,7 @@ async function main() {
       await figure3.locator("input[value=a]").check();
       await page.locator("dialog.page-overlay[open] .page-overlay-close").click();
       await waitFor(() => dialog.count(), (count) => count === 0);
-      await openCard();
+      await card.waitFor();
       const send = card.locator(".button.send");
       check(`${at}: Send works with only choices`, !(await send.isDisabled()), "Send disabled");
       await shot("5-card");

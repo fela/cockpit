@@ -68,6 +68,23 @@ def test_play_starts_the_timer_and_the_header_shows_it(world: World) -> None:
     assert item["time_spent"]["started_at"] == state["timer"]["started_at"]
 
 
+def test_the_quick_timer_check_answers_as_the_state_does(world: World) -> None:
+    """A page back after a stretch without activity measures it by `/api/timer` when the state is slow (SPEC TRACK-5)."""
+    fields = ("timer", "input", "away")
+
+    def check() -> dict:
+        return world.client.get("/api/timer").json()
+
+    assert check() == {field: _state(world)[field] for field in fields}
+    (step,) = _steps(world, "review@aaaa111")
+    _start(world, step)
+    world.client.post(f"/api/steps/{step}/timer/pause", headers=world.user())
+    _start(world, step)
+    state = _state(world)
+    assert state["timer"]["step_id"] == step
+    assert check() == {field: state[field] for field in fields}
+
+
 def test_play_puts_user_on_the_step_and_switching_applies_what_waited(world: World) -> None:
     first, second = _steps(world, "review@aaaa111", "reply:b")
     assert _state(world)["queue"][0]["user_on_it"] is False
@@ -147,6 +164,45 @@ def test_a_pause_behind_its_own_late_start_leaves_an_empty_span(world: World) ->
     assert _pause(world, step, 50 * 1000, "play-press-1", "late-pause-2") == 200
     ((started, ended, ended_by),) = _span_times(world)
     assert ended == started and ended_by == "pause"
+
+
+def test_a_pause_that_arrives_first_cancels_only_its_delayed_start(world: World) -> None:
+    step, other = _steps(world, "review@aaaa111", "reply:b")
+    page = "a" * 32
+    old = f"t-{page}-1-{step}"
+    _start(world, other)
+    assert _pause(world, step, 0, old, "pause-delayed-play") == 200
+    assert _start_pressed(world, step, old) == {"started": False}
+    assert _state(world)["timer"]["step_id"] == other
+    assert _spans(world) == [(other, None)]
+    assert _start_pressed(world, step, f"t-{page}-2-{step}")["started"] is True
+    assert _spans(world) == [(other, "switch"), (step, None)]
+
+
+def test_a_later_start_on_the_same_page_takes_priority_over_delayed_starts(world: World) -> None:
+    step, other = _steps(world, "review@aaaa111", "reply:b")
+    page = "a" * 32
+    assert _start_pressed(world, other, f"t-{page}-3-{other}")["started"] is True
+    assert _start_pressed(world, step, f"t-{page}-1-{step}") == {"started": False}
+    assert _start_pressed(world, other, f"t-{page}-2-{other}") == {"started": False}
+    assert _pause(world, other, 0, f"t-{page}-2-{other}", "pause-before-newer") == 200
+    assert _state(world)["timer"]["step_id"] == other
+    assert _spans(world) == [(other, None)]
+
+
+def test_a_refused_newer_start_still_blocks_an_older_delayed_start(world: World) -> None:
+    step, newer = _steps(world, "review@aaaa111", "reply:b")
+    page = "a" * 32
+    assert world.client.post(f"/api/steps/{newer}/done", json={}, headers=world.user()).status_code == 200
+    press = f"t-{page}-2-{newer}"
+    refused = world.client.post(f"/api/steps/{newer}/timer/start", json={"press": press},
+                                headers={**world.user(), "x-cockpit-action": press})
+    assert refused.status_code == 409
+    repeated = world.client.post(f"/api/steps/{newer}/timer/start", json={"press": press},
+                                 headers={**world.user(), "x-cockpit-action": press})
+    assert repeated.status_code == 409
+    assert _start_pressed(world, step, f"t-{page}-1-{step}") == {"started": False}
+    assert _spans(world) == []
 
 
 def test_a_late_pause_leaves_a_timer_started_since_elsewhere_running(world: World) -> None:

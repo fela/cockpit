@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 from pathlib import Path
+from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
 
@@ -23,7 +24,8 @@ def test_preview_reads_only_temporary_records_and_checkout_sources(tmp_path, mon
         for name, value in list(vars(target).items()):
             if not name.startswith("__"):
                 monkeypatch.setattr(target, name, value)
-    monkeypatch.setattr(module.spend, "refresh_forever", lambda *args: None)
+    monkeypatch.setattr(module.spend, "refresh_codex_forever", lambda *args: None)
+    monkeypatch.setattr(module.spend_worker, "start", lambda index: SimpleNamespace(stop=lambda: None))
     monkeypatch.setattr(machine, "read", dict)
     apps = []
 

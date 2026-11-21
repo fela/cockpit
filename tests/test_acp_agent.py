@@ -1,4 +1,4 @@
-"""Sessions on the ACP agents, Gemini and Grok (SPEC SESSION-26), against a stand-in agent (fake_acp.py)."""
+"""Sessions on the ACP agents, Gemini and Grok (SPEC SESSION-30), against a stand-in agent (fake_acp.py)."""
 
 from __future__ import annotations
 

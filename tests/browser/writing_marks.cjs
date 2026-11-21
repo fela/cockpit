@@ -85,7 +85,7 @@ async function main() {
       // The fixture can open the "Back after" dialog over the page while the user's timer is idle; answer it
       // as the user would, so it does not cover the menu.
       await page.addLocatorHandler(page.locator("dialog#idle[open]"), (dialog) => dialog.locator("button", { hasText: "Return" }).click());
-      await page.goto(`${info.origin}/classic`);
+      await page.goto(`${info.origin}/`);
       const card = page.locator(`#next [data-step="${stepId}"]`).first();
       // The first drawing can take a while on a busy host.
       await card.waitFor({ timeout: 120e3 });
@@ -126,7 +126,7 @@ async function main() {
       const page = await context.newPage();
       // Each action waits for the page to settle after it, which takes minutes on a busy host.
       page.setDefaultTimeout(180e3);
-      await page.goto(`${info.origin}/classic`);
+      await page.goto(`${info.origin}/`);
       const card = page.locator(`#next [data-step="${longStep}"]`).first();
       await card.locator(".step-menu").waitFor({ timeout: 60e3 });
       await page.screenshot({ path: path.join(work, `writing-marks-long-${width}.png`), timeout: 60e3 });

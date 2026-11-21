@@ -49,22 +49,13 @@ let page;
     const action = request.headers()["x-cockpit-action"];
     if (action && actions.has(action)) return;
     if (action) actions.add(action);
-    // Home (/) starts its card's timer too (UI-19). The test leaves / for /classic right
-    // away, so /classic finds step 1 on the clock or, while Home's start is still on its way, starts it as well. The
-    // checks count /classic's writes.
-    if (/\/timer\/start$/.test(request.url()) && new URL(request.frame().url()).pathname === "/") return;
+    // The page starts the timer of the step its card shows (UI-19, TRACK-2); the checks count every other write.
+    if (/\/timer\/start$/.test(request.url())) return;
     writes.push(request.url());
   });
-  // The page's own writes (the timer's start on its one-second tick) can take seconds on a busy host.
-  const wrote = async (pathname) => {
-    for (let at = 0; !writes.some((url) => new URL(url).pathname === pathname); at++) {
-      if (at > 150) throw new Error(`The page did not write ${pathname}: ${JSON.stringify(writes)}`);
-      await delay(100);
-    }
-  };
   const timerStart = await fetch(origin + "/api/steps/1/timer/start", { method: "POST", headers: { Cookie: cookie, Origin: origin } });
   assert.equal(timerStart.ok, true);
-  await page.goto(origin + "/classic");
+  await page.goto(origin + "/");
   await page.locator("#next [data-step]").waitFor();
   const mod = await page.evaluate(() => /Mac|iPhone|iPad/.test(navigator.platform)) ? "Meta" : "Control";
   const press = (key) => page.keyboard.press(key);
@@ -97,8 +88,8 @@ let page;
   assert.match(await palette.getByRole("option").nth(1).innerText(), /session 1111/);
   assert.match(await palette.getByRole("option").nth(2).innerText(), /Show matches on the page/);
   await press("Enter");
-  // An item with a step for the user opens as that step: Next up's card or its row in the queue (VIEW-18).
-  await page.locator("#next .next-card, #queue .row.open").filter({ hasText: "Alpha list reminders" }).waitFor();
+  // An item with a step for the user opens as that step on the card (VIEW-18).
+  await page.locator("#next .next-card").filter({ hasText: "Alpha list reminders" }).waitFor();
   assert.equal(await palette.isVisible(), false);
   console.log("PASS Cmd+K searches live work and opens its step");
 
@@ -169,7 +160,6 @@ let page;
   // Found work looks as its row in the list at the left does: neither has a coloured dot;
   // other work than Cockpit's leads with a plain grey mark in the menu and nothing in the list, and urgent work
   // (Alpha) has a red title in the list.
-  await page.goto(origin + "/");
   await page.locator("#sidebar .side-item").first().waitFor();
   const rows = await page.locator("#sidebar .side-item").evaluateAll((items) => Object.fromEntries(items.map((row) => [
     row.querySelector(".sidebar-title").textContent,
@@ -190,7 +180,6 @@ let page;
     assert.equal(menuMarks[title], "command-mark", title);
   }
   assert.notEqual(rows["Alpha list reminders"].color, rows["Beta CSV export"].color, "urgent Alpha has a red title");
-  await page.goto(origin + "/classic");
   many = true;
   await page.reload();
   await page.locator("#next [data-step]").waitFor();
@@ -202,25 +191,22 @@ let page;
   await page.locator("#next [data-step]").waitFor();
   console.log("PASS Each found session lists under the found item it is on");
 
-  await press("g");
-  await page.locator(".go-hint").waitFor();
-  await press("h");
-  // Home is the page with the list of items at its left (VIEW-26); the rest of this test uses /classic.
-  await page.waitForURL(origin + "/");
-  await page.locator("#sidebar").waitFor();
-  await page.goto(origin + "/classic");
+  await page.goto(origin + "/");
   await page.locator("#next [data-step]").waitFor();
   await page.waitForFunction(() => location.hash === "" && window.scrollY === 0);
+  // J and K move through the rows of the list at the left; the card takes no highlight.
   await press("j");
-  assert.equal(await page.locator("#next .keyboard-current").count(), 1);
-  // The user is active on the page with step 1 open on Next up, so its timer starts (TRACK-2, UI-19), here or already
-  // on Home.
-  await page.locator('#next [data-step="1"].on-clock').waitFor({ timeout: 15e3 });
+  assert.equal(await page.locator("#sidebar .keyboard-current").count(), 1);
+  assert.equal(await page.locator(".keyboard-current").count(), 1);
+  const first = await page.locator(".keyboard-current").evaluate((node) => node.dataset.item || node.dataset.warning);
+  // The user is active on the page with a step on the card, so its timer starts (TRACK-2, UI-19).
+  await page.locator("#next > [data-step].on-clock").waitFor({ timeout: 15e3 });
   await press("j");
-  assert.equal(await page.locator("#queue .keyboard-current").count(), 1);
+  assert.equal(await page.locator("#sidebar li[data-item][data-step].keyboard-current").count(), 1);
   const selected = await page.locator(".keyboard-current").getAttribute("data-step");
+  assert.notEqual(await page.locator(".keyboard-current").getAttribute("data-item"), first);
   await press("k");
-  assert.equal(await page.locator("#next .keyboard-current").count(), 1);
+  assert.equal(await page.locator(".keyboard-current").evaluate((node) => node.dataset.item || node.dataset.warning), first);
   await press("ArrowDown");
   assert.equal(await page.locator(".keyboard-current").getAttribute("data-step"), selected);
   const original = await page.locator(".keyboard-current").elementHandle();
@@ -237,18 +223,19 @@ let page;
   }
   await page.locator(".keyboard-current").waitFor();
   assert.equal(await page.locator(".keyboard-current").getAttribute("data-step"), selected);
+  // Enter on the highlighted row puts its step on the card.
   await press("Enter");
-  await page.locator(`#queue [data-step="${selected}"].open`).waitFor();
+  await page.locator(`#next > [data-step="${selected}"]`).waitFor();
   await press("r");
-  // Writing in another step's reply box leaves the step's timer running (TRACK-6): at most one start is all /classic
-  // wrote so far; the checks below count what typing and IME input write.
+  // Showing another item stops the first step's timer (TRACK-6); opening the reply box writes nothing more. The
+  // checks below count what typing and IME input write.
   await delay(500);
   const timerWrites = writes.map((url) => new URL(url).pathname);
-  assert.deepEqual(timerWrites.filter((pathname) => pathname !== "/api/steps/1/timer/start"), []);
-  assert.ok(timerWrites.filter((pathname) => pathname === "/api/steps/1/timer/start").length <= 1, JSON.stringify(timerWrites));
+  assert.deepEqual(timerWrites.filter((pathname) => !/^\/api\/steps\/\d+\/timer\/pause$/.test(pathname) || pathname.includes(`/${selected}/`)), []);
+  assert.ok(timerWrites.length <= 1, JSON.stringify(timerWrites));
   writes.length = 0;
   // Focus can reach the reply box a moment after the key, so the check waits for it.
-  const reply = page.locator(`#queue [data-step="${selected}"] .composer textarea`);
+  const reply = page.locator(`#next > [data-step="${selected}"] .composer textarea[data-key="msg:step:${selected}"]`);
   for (let at = 0; !(await reply.evaluate((node) => node === document.activeElement)); at++) {
     if (at > 20) throw new Error("R did not focus the highlighted row's reply box");
     await delay(100);
@@ -262,7 +249,7 @@ let page;
   assert.equal(writes.length, 0);
   await page.keyboard.press(`${mod}+a`);
   await press("Backspace");
-  const field = page.locator(`#queue [data-step="${selected}"] .composer textarea`);
+  const field = reply;
   await press(`${mod}+k`);
   await palette.waitFor();
   await press("Escape");
@@ -284,26 +271,28 @@ let page;
   assert.equal(await page.locator(".go-hint").isVisible(), false);
   console.log("PASS Help and invalid G chords do not leak destructive shortcuts");
 
-  await press("g"); await press("s");
-  await page.waitForFunction(() => location.hash === "#sessions");
   await press(`${mod}+k`);
   await search.fill("session 1111");
   await press("Enter");
-  // Alpha waits on the user, so its session's own composer is under Task details on Alpha's step on Next up (VIEW-3),
-  // and the step's reply stays the step's.
-  await page.waitForFunction(() => document.activeElement?.matches('#next .task-details textarea[data-key^="msg:side:"]'));
+  // A session opens as its conversation, with its message box focused.
+  await page.waitForFunction(() => document.activeElement?.matches("#session-composer textarea"));
   await page.evaluate(() => document.activeElement?.blur());
-  console.log("PASS G S jumps to Sessions, the list of work; palette opens a session and focuses its composer");
+  console.log("PASS The palette opens a session and focuses its composer");
 
-  // G R opens Briefing from Sessions, and Back returns to them.
+  // G R opens Briefing in the layer over the page, in place of the session it showed, and Back closes the layer.
+  const layer = page.locator("section.center-layer");
   await press("g"); await press("r");
-  await page.waitForURL(origin + "/briefing");
+  await layer.locator('iframe.center-page[src^="/briefing"]').waitFor();
+  assert.equal(new URL(page.url()).pathname, "/");
   await page.goBack();
-  await page.waitForFunction(() => location.hash === "#sessions");
-  console.log("PASS G R from Sessions opens Briefing");
-
+  await layer.waitFor({ state: "hidden" });
+  assert.equal(new URL(page.url()).pathname, "/");
+  // G U opens Usage the same way.
   await press("g"); await press("u");
-  await page.waitForURL(origin + "/usage");
+  await layer.locator('iframe.center-page[src^="/usage"]').waitFor();
+  console.log("PASS G R and G U open Briefing and Usage over the page, and Back closes them");
+
+  await page.goto(origin + "/usage");
   await page.getByRole("button", { name: "Search commands", exact: true }).waitFor();
   await press(`${mod}+k`);
   await search.fill("skill");
@@ -315,7 +304,7 @@ let page;
   await palette.getByRole("option").filter({ hasText: "Beta CSV export" }).waitFor();
   await press("Enter");
   await page.waitForURL(/#home\/item\//);
-  await page.locator("#next .next-card, #queue .row.open").filter({ hasText: "Beta CSV export" }).waitFor();
+  await page.locator("#next .next-card").filter({ hasText: "Beta CSV export" }).waitFor();
   console.log("PASS The switcher searches work from another page and follows its destination");
 
   for (const route of ["/spec", "/skills", "/briefing", "/usage"]) {
