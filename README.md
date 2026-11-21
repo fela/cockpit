@@ -116,6 +116,11 @@ use a dedicated environment as described in [docs/LOCAL.md](docs/LOCAL.md).
 On Linux, run `cockpit-server` in the foreground or configure your own user service.
 Cockpit and its agents can work only while the host is awake and online.
 
+To keep work and personal projects apart, run a second Cockpit beside the first:
+set `COCKPIT_INSTANCE=personal` and give it its own port. It gets its own setup,
+inbox, service, and Claude and Codex sign-ins. See
+[separate instances](docs/LOCAL.md#separate-instances).
+
 Claude sessions and `cockpit attach` run in tmux, so install it first (`brew install tmux` on macOS).
 Claude usage meters also work when the default `~/.claude` login is held in the macOS Keychain.
 
@@ -224,7 +229,8 @@ sweeps pause while you are away and resume when you return or request an update.
 Account discovery supports at most two Claude folders (`~/.claude` and
 `~/.claude-work`, `config.ACCOUNTS`) and two Codex folders (`~/.codex` and
 `~/.codex-2`, `config.CODEX_HOMES`). A single account works; these folder lists
-are defined in code.
+are defined in code. A named instance uses folders of its own instead (see
+[separate instances](docs/LOCAL.md#separate-instances)).
 
 An item can wait until its pull requests reach a release branch. Cockpit checks
 branches named `dev`, `staging` and `prod`, then wakes the item's session when the
@@ -242,7 +248,8 @@ Claude Code passes subscription limits to its
 [status-line command](https://code.claude.com/docs/en/statusline#rate-limit-usage).
 The small [capture script](docs/claude-statusline.py) saves them for Cockpit in
 `~/.claude/rate-limits.json`. It reads the status-line JSON, uses an email you supply,
-and prints the five-hour and weekly percentages. It needs Python 3.12 on macOS or Linux.
+and prints the five-hour and weekly percentages. A session of a named instance writes
+to that instance's own file ([separate instances](docs/LOCAL.md#separate-instances)). It needs Python 3.12 on macOS or Linux.
 From the checkout, install it with:
 
 ```bash
@@ -275,9 +282,9 @@ folder, the macOS login Keychain when the file is absent. If that login is unava
 a reading arrives; a saved window becomes unknown after its reset.
 Session token and cost estimates from local transcripts remain available.
 
-Local mode listens on IPv4 loopback port 8790 only. Its `origin` must be
-`http://127.0.0.1:8790` or `http://localhost:8790`; choosing another local port
-requires a code change.
+Local mode listens on IPv4 loopback, on port 8790 unless `port` in the setup
+file names another. Its `origin` must be `http://127.0.0.1:<port>` or
+`http://localhost:<port>`.
 
 Local mode trusts the other programs on the machine. Browsers send a cookie to
 every port of a host, so a web service you open on another `127.0.0.1` or

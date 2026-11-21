@@ -23,7 +23,7 @@ import threading
 import time
 from pathlib import Path
 
-from cockpit import db, server_logs
+from cockpit import config, db, server_logs
 from cockpit.codex_agent import CodexAgent, CodexError, WorkerRetired, mark_interrupted
 from cockpit.sessions import Session
 
@@ -188,7 +188,7 @@ class WorkerClient:
         try:
             # Deploy holds this same lock while replacing package files.
             # Take a consistent snapshot, including when startup races a deploy.
-            with (self.db_path.parent / "deploy.lock").open("a") as deploy_lock:
+            with config.deploy_lock(self.db_path.parent).open("a") as deploy_lock:
                 fcntl.flock(deploy_lock, fcntl.LOCK_EX)
                 launch(self.db_path, self.command)
         except (OSError, subprocess.SubprocessError, CodexError) as exc:

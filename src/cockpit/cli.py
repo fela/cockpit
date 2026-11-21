@@ -1,6 +1,7 @@
 """`cockpit`: the command agents use to read and change Cockpit.
 
-It talks to the server on 127.0.0.1 with the token in ~/.config/cockpit/token.
+It talks to the server on 127.0.0.1 with the token in ~/.config/cockpit/token, or in its instance's own config
+folder (SPEC SCOPE-7).
 Every write names the agent with --as; Cockpit records it on the rows it changes.
 `cockpit spec` reads and edits docs/SPEC.md through the server, which commits each edit.
 `cockpit permission` holds the two hooks that report tool calls to Cockpit (SPEC PERM-1), and lets
@@ -771,7 +772,7 @@ def flashes_text(found: list[dict[str, Any]]) -> str:
 
 def transcript_path(session_id: str) -> str:
     """The session's Claude Code transcript on this machine, or "" when none is here."""
-    found = sorted(Path.home().glob(f".claude/projects/*/{session_id}.jsonl"))
+    found = sorted(Path.home().glob(f"{config.CLAUDE_HOME.name}/projects/*/{session_id}.jsonl"))
     return str(found[0]) if found else ""
 
 
@@ -1731,10 +1732,15 @@ def _merged(result: dict[str, Any]) -> str:
 
 
 def _session_account() -> str:
-    """The Claude account this session runs on: the one whose folder CLAUDE_CONFIG_DIR names, else the default."""
+    """The Claude account this session runs on: the one whose folder CLAUDE_CONFIG_DIR names, else the one in Claude's
+    own default folder, which a named instance (SPEC SCOPE-7) has none of."""
     folder = os.environ.get("CLAUDE_CONFIG_DIR")
     if not folder:
-        return next(account.name for account in config.ACCOUNTS if account.default)
+        found = next((account.name for account in config.ACCOUNTS if account.claude_default), None)
+        if found is None:
+            raise CockpitError(f"CLAUDE_CONFIG_DIR is not set, and Claude's default folder is none of instance"
+                               f" {config.INSTANCE}'s Claude account folders")
+        return found
     found = next((each for each in config.ACCOUNTS if each.folder.resolve() == Path(folder).expanduser().resolve()), None)
     if found is None:
         raise CockpitError(f"CLAUDE_CONFIG_DIR {folder} is none of Cockpit's Claude account folders")

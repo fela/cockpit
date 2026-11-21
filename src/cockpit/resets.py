@@ -164,7 +164,7 @@ def fetch(account: Account, now: datetime) -> dict[str, Any] | None:
         except FileNotFoundError:
             # Claude Code keeps the default folder's login in the macOS Keychain under this name; another folder's
             # login sits under a name of its own, so it stays unknown here.
-            if sys.platform != "darwin" or not account.default:
+            if sys.platform != "darwin" or not account.claude_default:
                 raise
             credentials = subprocess.run(
                 ["security", "find-generic-password", "-s", "Claude Code-credentials", "-w"],

@@ -6,6 +6,11 @@ Cockpit works in, the commands it shows and the user's timezone. The people the 
 briefing follows are set on the page (briefing.py). A missing file or required key stops Cockpit at start
 with an error that names it. `docs/setup.example.toml` shows every key. The install's parts (parts.py) may read tables
 of their own from the same file.
+
+One user can run more than one Cockpit side by side, such as one for work and one for personal projects (SPEC
+SCOPE-7). Each is an instance with a name, set by COCKPIT_INSTANCE and by nothing else, and keeps everything of its
+own: its setup file, database, port, service, and its Claude and Codex folders, so the sessions, sign-ins and usage of
+one never show in the other. Without COCKPIT_INSTANCE, Cockpit uses the folders a single Cockpit has always used.
 """
 
 from __future__ import annotations
@@ -15,6 +20,7 @@ import os
 import re
 import sys
 import tomllib
+from collections.abc import Mapping
 from dataclasses import dataclass, field, fields
 from datetime import datetime
 from pathlib import Path
@@ -25,11 +31,43 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from cockpit.parts import TableReader, model_routes, setup_tables
 
 HOME = Path.home()
-DATA_DIR = HOME / ".local" / "share" / "cockpit"
+# A named instance's name: a lowercase letter, then lowercase letters and digits. "work" is taken, as ~/.claude-work
+# is the unnamed instance's second Claude folder.
+INSTANCE_NAME = re.compile(r"[a-z][a-z0-9]{0,19}")
+RESERVED_INSTANCES = frozenset({"work"})
+
+
+class InstanceError(ValueError):
+    """COCKPIT_INSTANCE is not a name an instance can have."""
+
+
+def find_instance(environ: Mapping[str, str]) -> str:
+    """The instance this process belongs to (SPEC SCOPE-7): COCKPIT_INSTANCE, or "" for the unnamed one."""
+    named = environ.get("COCKPIT_INSTANCE", "")
+    if named and (not INSTANCE_NAME.fullmatch(named) or named in RESERVED_INSTANCES):
+        raise InstanceError(f"COCKPIT_INSTANCE must be a lowercase letter followed by up to 19 lowercase letters or"
+                            f" digits, and not {', '.join(sorted(RESERVED_INSTANCES))}: {named!r}")
+    return named
+
+
+INSTANCE = find_instance(os.environ)
+# What the instance's folders and service names end in: "" for the unnamed instance, else "-<name>".
+SUFFIX = f"-{INSTANCE}" if INSTANCE else ""
+DATA_DIR = HOME / ".local" / "share" / f"cockpit{SUFFIX}"
 DB_PATH = DATA_DIR / "cockpit.db"
 BACKUP_DIR = DATA_DIR / "backups"
 BACKUP_KEEP_DAYS = 14
-CONFIG_DIR = HOME / ".config" / "cockpit"
+
+
+def deploy_lock(data_dir: Path) -> Path:
+    """The lock a deploy holds while it replaces the installed code, given an instance's data folder, with its folder
+    made: the unnamed instance's for every instance, since instances may share one virtualenv (SPEC SCOPE-7)."""
+    path = data_dir.parent / "cockpit" / "deploy.lock"
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    return path
+
+
+CONFIG_DIR = HOME / ".config" / f"cockpit{SUFFIX}"
 TOKEN_PATH = CONFIG_DIR / "token"
 LOCAL_LOGIN_PATH = CONFIG_DIR / "local-login-token"
 COOKIE_KEY_PATH = CONFIG_DIR / "cookie-key"
@@ -40,8 +78,8 @@ SECRETS_DIR = CONFIG_DIR / "secrets"
 # Connector sign-ins waiting for the address the user pastes on the card (connector_signin.py), a file each.
 SIGNINS_DIR = CONFIG_DIR / "signins"
 LISTEN_HOST = "127.0.0.1"
-LISTEN_PORT = 8790
-API_BASE = f"http://{LISTEN_HOST}:{LISTEN_PORT}"
+# The port the server listens on unless the setup file's `port` names another, as a second instance's must.
+DEFAULT_PORT = 8790
 # Each live Claude Code session listens on <pid>.sock here.
 SOCKETS_DIR = (Path(os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")) / "cc-socks"
                if sys.platform == "linux" else Path(f"/tmp/cc-socks-{os.getuid()}"))
@@ -49,10 +87,12 @@ SWEEP_PROMPT = (
     "Use the cockpit skill, read its references/sweep.md, and run a full sweep (section \"Sweep\"): check every"
     " source, decide what has priority, and get the top items ready."
 )
+# The instance's first Claude folder: Claude's own default, ~/.claude, for the unnamed instance, else ~/.claude-<name>.
+CLAUDE_HOME = HOME / f".claude{SUFFIX}"
 # The user's Claude Code settings: the allow lists the page reads and changes.
-CLAUDE_SETTINGS = HOME / ".claude" / "settings.json"
+CLAUDE_SETTINGS = CLAUDE_HOME / "settings.json"
 # The Claude rate limits and account the user's status line saves (usage.py), one record per account.
-CLAUDE_RATE_LIMITS = HOME / ".claude" / "rate-limits.json"
+CLAUDE_RATE_LIMITS = CLAUDE_HOME / "rate-limits.json"
 # Claude Code's native installer puts each release in ~/.local/share/claude/versions/<version> and points this
 # command at the newest one.
 CLAUDE_COMMAND = HOME / ".local" / "bin" / "claude"
@@ -132,22 +172,41 @@ class Account:
     letter: str
     folder: Path
     state: Path
-    # Claude's own default folder: `claude` runs there with CLAUDE_CONFIG_DIR unset. Set to ~/.claude, Claude reads
-    # ~/.claude/.claude.json instead of ~/.claude.json, which holds no trust.
+    # The instance's first account: always in use, the one the others link their shared entries to, and where a
+    # retired account's sessions resume.
     default: bool
 
     @property
     def jobs(self) -> Path:
         return self.folder / "jobs"
 
+    @property
+    def claude_default(self) -> bool:
+        """Whether the folder is Claude's own default, ~/.claude: `claude` runs there with CLAUDE_CONFIG_DIR unset, and
+        on macOS its sign-in is the Keychain's unnamed one. Set to ~/.claude, Claude reads ~/.claude/.claude.json
+        instead of ~/.claude.json, which holds no trust. Only the unnamed instance's first account uses it."""
+        return self.default and not INSTANCE
 
-# Both accounts are signed in at once. The personal one is Claude's default folder, used alone until the work
-# folder holds a sign-in; scripts/second-account.sh sets the work folder up.
-ACCOUNTS = (
-    Account(name="personal", letter="P", folder=HOME / ".claude", state=HOME / ".claude.json", default=True),
-    Account(name="work", letter="W", folder=HOME / ".claude-work", state=HOME / ".claude-work" / ".claude.json", default=False),
-)
-# What every account shares with the default one: a symlink in its folder to the same entry in ~/.claude.
+
+def instance_accounts(instance: str, home: Path) -> tuple[Account, ...]:
+    """The Claude accounts of `instance`. Both are signed in at once; the first is used alone until the second folder
+    holds a sign-in. The unnamed instance's are Claude's default folder and ~/.claude-work, which
+    scripts/second-account.sh sets up; a named instance's are ~/.claude-<name> and ~/.claude-<name>-2."""
+    if not instance:
+        return (
+            Account(name="personal", letter="P", folder=home / ".claude", state=home / ".claude.json", default=True),
+            Account(name="work", letter="W", folder=home / ".claude-work", state=home / ".claude-work" / ".claude.json",
+                    default=False),
+        )
+    first, second = home / f".claude-{instance}", home / f".claude-{instance}-2"
+    return (
+        Account(name=instance, letter=instance[0].upper(), folder=first, state=first / ".claude.json", default=True),
+        Account(name=f"{instance}2", letter="2", folder=second, state=second / ".claude.json", default=False),
+    )
+
+
+ACCOUNTS = instance_accounts(INSTANCE, HOME)
+# What every account shares with the default one: a symlink in its folder to the same entry in the default folder.
 # Transcripts and auto-memory, the permission rules and hooks Cockpit writes, skills, plugins, agents and the
 # status line script, which writes every account's usage into CLAUDE_RATE_LIMITS. The rest stays per folder.
 SHARED_ENTRIES = ("projects", "settings.json", "skills", "plugins", "agents", "statusline-command.sh")
@@ -158,8 +217,8 @@ MOUNTED_ENTRIES = ("projects",)
 
 # The Codex accounts signed in on this machine, one folder (CODEX_HOME) each, with its own sign-in (auth.json),
 # session files and weekly limit (SPEC SESSION-10). ~/.codex is Codex's default; a folder that does not exist
-# counts no use.
-CODEX_HOMES = (HOME / ".codex", HOME / ".codex-2")
+# counts no use. A named instance's are ~/.codex-<name> and ~/.codex-<name>-2.
+CODEX_HOMES = (HOME / f".codex{SUFFIX}", HOME / f".codex{SUFFIX}-2")
 
 
 def account(name: str) -> Account:
@@ -228,6 +287,8 @@ class Setup:
     retired_accounts: tuple[str, ...] = ()
     # The machine that runs sessions' slow commands ([offload], SPEC BG-29); None runs them here.
     offload: Offload | None = None
+    # The loopback port the server listens on; a second instance needs one of its own (SPEC SCOPE-7).
+    port: int = DEFAULT_PORT
 
 
 PATH_KEYS = {"checkouts", "spec_repo", "skills_repo"}
@@ -270,7 +331,7 @@ def read_setup(path: Path, tables: dict[str, TableReader]) -> Setup:
         )
     optional = {
         "auth_mode", "providers", "default_provider", "codex_command", "claude_sockets_dir", "deploy_branch",
-        "public_origin", "last_use", "retired_accounts", "offload", "features",
+        "public_origin", "last_use", "retired_accounts", "offload", "features", "port",
     }
     missing = [key for key in keys if key not in values and key not in optional]
     unknown = sorted(set(values) - set(keys) - set(tables))
@@ -280,9 +341,11 @@ def read_setup(path: Path, tables: dict[str, TableReader]) -> Setup:
     part_tables = {name: read(path, values.pop(name, None)) for name, read in tables.items()}
     values = {"auth_mode": "google", "providers": ["claude"], "default_provider": "claude",
               "codex_command": "codex", "claude_sockets_dir": "", "deploy_branch": "", "public_origin": "",
-              "last_use": {}, "retired_accounts": [], "offload": None, "features": [], **values}
+              "last_use": {}, "retired_accounts": [], "offload": None, "features": [], "port": DEFAULT_PORT,
+              **values}
     may_be_empty = {"claude_sockets_dir", "deploy_branch", "public_origin"}
-    wrong = [key for key in keys if key not in {"providers", "last_use", "retired_accounts", "offload", "features"}
+    wrong = [key for key in keys
+             if key not in {"providers", "last_use", "retired_accounts", "offload", "features", "port"}
              and (not isinstance(values[key], str) or (not values[key].strip() and key not in may_be_empty))]
     if wrong:
         raise SetupError(f"{path}: {', '.join(wrong)} must be text that is not empty")
@@ -298,8 +361,15 @@ def read_setup(path: Path, tables: dict[str, TableReader]) -> Setup:
         raise SetupError(f"{path}: email must be a Google account's address, such as you@example.com")
     if values["auth_mode"] not in {"local", "google"}:
         raise SetupError(f"{path}: auth_mode must be local or google")
+    port = values["port"]
+    if not isinstance(port, int) or isinstance(port, bool) or not 1024 <= port <= 65535:
+        raise SetupError(f"{path}: port must be a number from 1024 to 65535, such as {DEFAULT_PORT}")
+    # The unnamed instance keeps the port a single Cockpit always had; a second instance takes another one.
+    if not INSTANCE and port != DEFAULT_PORT:
+        raise SetupError(f"{path}: port must be {DEFAULT_PORT} without COCKPIT_INSTANCE; only a named instance, which"
+                         " runs beside the unnamed one, takes another port")
     if values["auth_mode"] == "local":
-        validate_local_origin(values["origin"])
+        validate_local_origin(values["origin"], port)
     elif not values["origin"].startswith("https://") or values["origin"].endswith("/"):
         raise SetupError(f"{path}: origin must be the page's https:// address without a trailing /")
     public_origin = str(values["public_origin"])
@@ -349,10 +419,10 @@ def _read_offload(path: Path, table: Any) -> Offload | None:
     return Offload(host=table["host"], repos=repos)
 
 
-def validate_local_origin(origin: str) -> None:
-    """Local mode is deliberately limited to the server's loopback HTTP address."""
-    if origin not in {f"http://127.0.0.1:{LISTEN_PORT}", f"http://localhost:{LISTEN_PORT}"}:
-        raise SetupError(f"local origin must be http://127.0.0.1:{LISTEN_PORT} or http://localhost:{LISTEN_PORT}")
+def validate_local_origin(origin: str, port: int) -> None:
+    """Local mode is deliberately limited to the server's loopback HTTP address on `port`."""
+    if origin not in {f"http://127.0.0.1:{port}", f"http://localhost:{port}"}:
+        raise SetupError(f"local origin must be http://127.0.0.1:{port} or http://localhost:{port}")
 
 
 @functools.cache
@@ -371,10 +441,25 @@ def cockpit_skill_folder() -> Path:
     return user.skills_repo / user.skills_folder / "cockpit"
 
 
+def loopback_base(port: int) -> str:
+    """The server's own address on this machine, listening on `port`."""
+    return f"http://{LISTEN_HOST}:{port}"
+
+
 def api_base() -> str:
     """Reach local mode under its configured Host; Google deployments use the loopback listener."""
     configured = setup()
-    return configured.origin if configured.auth_mode == "local" else API_BASE
+    return configured.origin if configured.auth_mode == "local" else loopback_base(configured.port)
+
+
+def instance_environment() -> dict[str, str]:
+    """What a named instance's server puts in its own environment, so everything it starts belongs to it: the `cockpit`
+    commands its sessions run reach it, and Codex runs on the instance's first Codex folder. That replaces a CODEX_HOME
+    the shell set, which names another instance's folder or one Cockpit does not count. Nothing for the unnamed
+    instance."""
+    if not INSTANCE:
+        return {}
+    return {"COCKPIT_INSTANCE": INSTANCE, "CODEX_HOME": str(CODEX_HOMES[0])}
 
 
 def private_data_dirs() -> None:

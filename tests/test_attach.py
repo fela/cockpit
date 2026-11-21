@@ -139,10 +139,12 @@ def test_a_window_name_keeps_the_status_line_short(tmp_path, monkeypatch):
     attach.attach(personal, "aaaa111", "Cockpit: the session-management web page", Path("/home/sam/dev/app"))
     attach.attach(work, "aaaa111", "Cockpit work", Path("/home/sam/dev/app"))
     assert opened == [
-        # Unset, so a CLAUDE_CONFIG_DIR the tmux shell kept from a work command does not apply.
-        ("aaaa111", "Cockpit: the session-managemen", Path("/home/sam/dev/app"), "env -u CLAUDE_CONFIG_DIR claude attach aaaa111"),
+        # Unset, so a CLAUDE_CONFIG_DIR or COCKPIT_INSTANCE the tmux shell kept from another command does not apply.
+        ("aaaa111", "Cockpit: the session-managemen", Path("/home/sam/dev/app"),
+         "env -u CLAUDE_CONFIG_DIR -u COCKPIT_INSTANCE claude attach aaaa111"),
         ["tmux", "attach-session", "-t", "main"],
         # A session on the work account attaches through the work folder's daemon.
-        ("aaaa111", "Cockpit work", Path("/home/sam/dev/app"), f"CLAUDE_CONFIG_DIR={work.folder} claude attach aaaa111"),
+        ("aaaa111", "Cockpit work", Path("/home/sam/dev/app"),
+         f"env -u COCKPIT_INSTANCE CLAUDE_CONFIG_DIR={work.folder} claude attach aaaa111"),
         ["tmux", "attach-session", "-t", "main"],
     ]
