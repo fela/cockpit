@@ -1174,6 +1174,18 @@ class TeamIn(Body):
     team: str
 
 
+Hour = Annotated[StrictInt, Field(ge=0, le=23)]
+
+
+class SettingsIn(Body):
+    # The whole schedule the Settings page shows (SPEC CONTROL-35): hours of the day, and the digest's weekday from
+    # Monday, 0, or null for no digest.
+    nullable = frozenset({"digest_day"})
+    briefing_hour: Hour
+    digest_day: Annotated[StrictInt, Field(ge=0, le=6)] | None
+    digest_hour: Hour
+
+
 class TopCardIn(Body):
     # A top card (SPEC NEXT-65): top_cards.put checks the fields.
     need: str
@@ -1688,6 +1700,11 @@ def create_app(
 
     app.router.routes.append(Route(connector_gateway.MCP_PATH, endpoint=connectors, methods=["GET", "POST", "DELETE"]))
 
+    # The Settings page and its schedule (SPEC CONTROL-35) answer only when the setup turns the page on.
+    def settings_only() -> None:
+        if not briefing.settings_on(config.setup()):
+            raise store.NotFound("the Settings page is off in this Cockpit's setup")
+
     def session_only(request: Request) -> None:
         if request.state.me != "agent":
             raise store.Forbidden(f"only the session that made the call does this; {user_name()} dismisses or answers it")
@@ -1812,10 +1829,12 @@ def create_app(
     # Each page says which Cockpit sent it. Its Reload (UI-13) compares against this, not against the first answer it
     # happens to get, which may already come from a newer Cockpit. The parts' first scripts (Part.first_scripts) follow,
     # ahead of the page's own.
+    # With the Settings page on (SPEC CONTROL-35), a mark tells prefs.js to add its entry to the logo menu.
     def with_version(page: str) -> str:
         first = "".join(f'\n  <script src="/static/{path}?v={static_tag}"></script>'
                         for part in built for path in part.first_scripts)
-        return page.replace("<head>", f'<head>\n  <meta name="cockpit-version" content="{version}">{first}', 1)
+        settings = '\n  <meta name="cockpit-settings">' if briefing.settings_on(config.setup()) else ""
+        return page.replace("<head>", f'<head>\n  <meta name="cockpit-version" content="{version}">{settings}{first}', 1)
 
     def scoped_page(request: Request, response: HTMLResponse) -> HTMLResponse:
         """Give authenticated helper pages the same opaque outbox partition as the board."""
@@ -1941,6 +1960,10 @@ def create_app(
     @app.get("/briefing")
     def briefing_page(request: Request) -> HTMLResponse:
         return scoped_page(request, framed_page("briefing.html"))
+
+    @app.get("/settings", dependencies=[Depends(settings_only)])
+    def settings_page(request: Request) -> HTMLResponse:
+        return scoped_page(request, framed_page("settings.html"))
 
     @app.get("/usage")
     def usage_page(request: Request) -> HTMLResponse:
@@ -3510,6 +3533,18 @@ def create_app(
     @app.post("/api/digests")
     def put_digest(body: BriefingIn, request: Request, conn: Conn) -> dict[str, Any]:
         return briefing.put_digest(conn, config.setup(), request.state.actor, body.day, body.body)
+
+    # The Settings page's schedule (SPEC CONTROL-35), when the setup turns the page on.
+    @app.get("/api/settings", dependencies=[Depends(settings_only), Depends(user_only)])
+    def get_settings(conn: Conn) -> dict[str, Any]:
+        setup = config.setup()
+        return {
+            "schedule": briefing.schedule(conn, setup), "digest": briefing.digest_on(setup), "zone": setup.timezone.key,
+        }
+
+    @app.put("/api/settings", dependencies=[Depends(settings_only), Depends(user_only)])
+    def put_settings(body: SettingsIn, conn: Conn) -> dict[str, Any]:
+        return {"schedule": briefing.put_schedule(conn, body.briefing_hour, body.digest_day, body.digest_hour)}
 
     # The user's time zone (SPEC CONTROL-32): each page reports its browser's zone and learns whether to ask about
     # switching; the user switches, keeps the zone, or picks one in the menu.

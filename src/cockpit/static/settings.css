@@ -1,0 +1,23 @@
+/* The Settings page (settings.html, settings.js). It loads after style.css and uses its tokens and shared parts:
+   the header, banners, notes and fields. */
+
+.settings-layout {
+  max-width: 760px;
+  margin: 0 auto;
+  padding: 24px var(--page-gutter) 48px;
+}
+.settings-layout h1 { margin: 0 0 16px; font: 700 30px/1.2 var(--sans); letter-spacing: -.022em; }
+
+/* Each setting: what it does at the left, its controls at the right; one column on a phone. */
+.settings-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px 24px; padding: 16px 0; border-top: 1px solid var(--line); align-items: start; }
+.settings-what h2 { margin: 0 0 2px; font: 600 var(--fs-read)/22px var(--sans); }
+.settings-what .note { margin: 0; }
+.settings-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.settings-pick { width: auto; min-width: 0; }
+.settings-said { margin: 8px 0 0; }
+.settings-said:empty { display: none; }
+.settings-said.fail { color: var(--fail); }
+
+@media (max-width: 640px) {
+  .settings-row { grid-template-columns: minmax(0, 1fr); }
+}

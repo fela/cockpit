@@ -168,7 +168,7 @@ async function until(check) { for (let n = 0; n < 30 && !check(); n++) await tic
     ["/api/item-pages/1/comments/send", "POST"], ["/api/item-pages/1/comments/item", "POST"],
     ["/api/part-notes", "POST"], ["/api/part-notes/1", "PUT"],
     ["/api/spec", "PUT"], ["/api/spec/part", "POST"], ["/api/skills/writing/part", "POST"], ["/api/skills/writing", "PUT"],
-    ["/api/team", "PUT"], ["/api/timezone", "PUT"], ["/api/timezone/report", "POST"], ["/api/timezone/keep", "POST"],
+    ["/api/team", "PUT"], ["/api/settings", "PUT"], ["/api/timezone", "PUT"], ["/api/timezone/report", "POST"], ["/api/timezone/keep", "POST"],
     ["/api/briefings/1/read", "POST"], ["/api/accounts/prefer", "POST"], ["/api/writing/1", "DELETE"],
   ];
   const helperValues = new Map(helperEdits.map(([url, method], index) => [prefix() + `helper-${index}`,
@@ -179,6 +179,20 @@ async function until(check) { for (let n = 0; n < 30 && !check(); n++) await tic
   recoveredHelper.start(); await until(() => helperValues.size === 0);
   assert.deepEqual(recoveredHelper.calls.filter(({ url }) => url !== "/api/offline/session").map(({ url, options }) => [url, options.method]).sort(), helperEdits.slice().sort());
   console.log("pass: scoped helper pages recover comments, choices, a part's actions, document edits and ordinary preferences after closing");
+
+  let settingsTries = 0;
+  const lostReply = world({ helper: true, fetchAction: async (url) => {
+    if (url !== "/api/settings") return reply();
+    if (++settingsTries === 1) throw new TypeError("Failed to fetch");
+    return reply({ schedule: { briefing_hour: 9, digest_day: 6, digest_hour: 8 } });
+  } });
+  const settingsSave = await lostReply.send("/api/settings", "PUT", JSON.stringify({ briefing_hour: 9, digest_day: 6, digest_hour: 8 }));
+  const settingsCalls = lostReply.calls.filter(({ url }) => url === "/api/settings");
+  assert.equal(settingsCalls.length, 2);
+  assert.ok(settingsCalls[0].options.headers["x-cockpit-action"]);
+  assert.equal(settingsCalls[1].options.headers["x-cockpit-action"], settingsCalls[0].options.headers["x-cockpit-action"]);
+  assert.equal(settingsSave.data.schedule.briefing_hour, 9);
+  console.log("pass: a Settings save whose answer is lost goes again with its id and ends on Cockpit's answer");
 
   const channels = [], oldHelper = world({ helper: true, channels });
   const privateBody = oldHelper.document.body.children[0];

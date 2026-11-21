@@ -501,6 +501,14 @@ the `briefings` table with `kind = 'weekly'` and their own read mark, so the
 page, read step and comments work as they do for a briefing. Without the
 feature none of this runs, and the page and API leave digests out.
 
+With `settings_page` in the setup's `features`, the Settings page (CONTROL-35)
+changes the briefing's hour and the digest's day and hour, or turns the digest
+off. The kv record `schedule` holds only the values the user changed from the
+defaults in `briefing.SCHEDULE`; without the feature Cockpit ignores it. The
+digest then waits four hours after its hour for that day's briefing, across
+midnight when the hour is late, and `_digest_week` gives the scheduler, its
+retry and the Briefing page one week boundary.
+
 ## 8. Tracking and usage
 
 Timers record active time on steps and allow corrections. Presence signals and

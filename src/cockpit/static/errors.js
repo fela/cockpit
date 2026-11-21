@@ -154,7 +154,7 @@
   function queuedAction(path, method) {
     if (typeof path !== "string" || !path.startsWith("/api/") || path.includes("?") || path.includes("#")) return false;
     if (partAction(path, method)) return true;
-    if (method === "PUT") return /^\/api\/(?:goals|inbox-settings|team|timezone|spec|skills\/[^/]+|item-pages\/\d+\/choices)$/.test(path);
+    if (method === "PUT") return /^\/api\/(?:goals|inbox-settings|settings|team|timezone|spec|skills\/[^/]+|item-pages\/\d+\/choices)$/.test(path);
     if (method === "PATCH") return /^\/api\/items\/\d+$/.test(path);
     if (method === "DELETE") return /^\/api\/(?:steps\/\d+\/writing|page-comments\/\d+|writing\/\d+)$/.test(path);
     if (method !== "POST") return false;

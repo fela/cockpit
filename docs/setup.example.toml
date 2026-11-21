@@ -17,7 +17,8 @@ default_provider = "codex"
 codex_command = "codex" # executable name or absolute path; uses existing login; models come from SESSION_OPTIONS
 
 # Optional features, all off unless listed here: "reopen" (a Reopen key on a finished task),
-# "weekly_digest" (a Sunday digest of the week's briefings).
+# "weekly_digest" (a Sunday digest of the week's briefings), "settings_page" (a Settings page for the
+# briefing and digest times).
 # Cockpit reads this file when it starts, so restart it after editing.
 features = []
 
