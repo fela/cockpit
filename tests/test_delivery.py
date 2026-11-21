@@ -19,7 +19,7 @@ from fastapi.testclient import TestClient
 
 from cockpit import cli, config, db, delivery, sessions, store
 from cockpit.sessions import Session
-from tests.conftest import ORIGIN, SESSION_A, SESSION_B, World, make_session
+from tests.conftest import ORIGIN, SESSION_A, SESSION_B, World, make_session, write_prompt
 from tests.test_api import add_item, put_item, put_step, run_sql
 
 
@@ -98,6 +98,19 @@ def test_agent_message_reaches_a_live_session_on_its_socket(world: World, tmp_pa
     assert line["message"]["content"].startswith("Message from agent app-fix via Cockpit (another agent, not Sam):")
     assert line["message"]["content"].endswith("Rebased; checks run")
     assert world.runner.calls == []
+
+
+def test_message_reaches_the_socket_the_session_records(world: World, tmp_path: Path) -> None:
+    # A process started without XDG_RUNTIME_DIR listens under /tmp; its sessions/<pid>.json says where.
+    world.cache.sessions = [live("done", "idle")]
+    elsewhere = tmp_path / "tmp-socks" / "4242.sock"
+    record = config.ACCOUNTS[0].folder / "sessions" / "4242.json"
+    record.parent.mkdir(parents=True)
+    record.write_text(json.dumps({"pid": 4242, "sessionId": SESSION_A, "messagingSocketPath": str(elsewhere)}))
+    with listen(elsewhere) as received:
+        sent = send_as_agent(world, {"session_id": SESSION_A})
+    assert sent["state"] == "sent" and sent["via"] == "socket"
+    assert json.loads(received[0].decode())["message"]["content"].endswith("Rebased; checks run")
 
 
 def test_agent_message_names_how_to_reply_to_its_session(world: World, tmp_path: Path) -> None:
@@ -424,20 +437,14 @@ def test_a_waiting_message_goes_when_the_session_stopped_or_left(world: World, t
     assert retried["waits_since"] is None
 
 
-def test_send_now_stops_the_session_at_once(world: World, tmp_path: Path, monkeypatch) -> None:
+def test_a_restart_stops_the_session_at_once(world: World, tmp_path: Path, monkeypatch) -> None:
     stops_and_resumes(world, live("working", "busy", str(tmp_path)), monkeypatch)
     waiting = send(world, {"session_id": SESSION_A})
-    agent = TestClient(world.client.app, base_url=ORIGIN)
-    assert agent.post(f"/api/messages/{waiting['id']}/send-now", headers=world.agent()).status_code == 403
-    response = world.client.post(f"/api/messages/{waiting['id']}/send-now", headers=world.user())
-    assert response.status_code == 200, response.text
+    world.deliverer.restart(waiting["id"])
     sent = message(world, waiting["id"])
     assert sent["state"] == "sent" and sent["via"] == "resume"
     assert sent["detail"] == "stopped the session at once and resumed it with the message as its prompt"
     assert [args[1] for args, _ in world.runner.calls] == ["stop", "--bg"]
-    again = world.client.post(f"/api/messages/{waiting['id']}/send-now", headers=world.user())
-    assert again.status_code == 409
-    assert world.client.post("/api/messages/999/send-now", headers=world.user()).status_code == 404
 
 
 def set_waits_since(world: World, message_id: int, at: str) -> None:
@@ -448,7 +455,7 @@ def set_waits_since(world: World, message_id: int, at: str) -> None:
         conn.close()
 
 
-def test_a_message_that_waited_15_minutes_goes_as_send_now_does(world: World, tmp_path: Path, monkeypatch) -> None:
+def test_a_message_that_waited_15_minutes_stops_the_session_and_goes(world: World, tmp_path: Path, monkeypatch) -> None:
     # A session idle between its own scheduled checks never ends its turn (SPEC MSG-7).
     timer = live("working", "busy", str(tmp_path), tempo="idle", job_state="working")
     stops_and_resumes(world, timer, monkeypatch)
@@ -527,6 +534,50 @@ def test_a_session_whose_turn_ended_gets_the_message_at_once_while_a_command_run
     assert world.runner.calls[-1][0][-1].endswith("Merge it\n\n" + delivery.AFTER_TURN)
 
 
+def test_two_messages_sent_back_to_back_both_reach_the_session_in_order(
+    world: World, tmp_path: Path, monkeypatch, transcripts: Path
+) -> None:
+    # A resumed session's process shows before Claude writes its prompt to the transcript, which until then ends
+    # with the last turn's end, so the session still looks idle with its background work running on. A stop in
+    # that moment ends the process, and the prompt is never written.
+    watching = replace(live("done", "busy", str(tmp_path), tempo="idle", job_state="working"), in_flight=["local_bash"])
+    end_turn(transcripts, ended=True)
+    monkeypatch.setattr(delivery, "RESUME_POLL_SECONDS", 0.01)
+    world.cache.sessions = [watching]
+    starting: list[threading.Timer] = []
+
+    def runner(account, args, cwd):
+        world.runner.calls.append((args, cwd))
+        if args[1] == "stop":
+            for timer in starting:
+                timer.cancel()
+            world.cache.sessions = [replace(watching, pid=None, status="")]
+        elif "--resume" in args:
+            world.cache.sessions = [replace(watching, pid=99, state="working", status="busy")]
+            timer = threading.Timer(0.3, write_prompt, (SESSION_A, args[-1]))
+            starting.append(timer)
+            timer.start()
+        return subprocess.CompletedProcess(args, 0, stdout=f"backgrounded · {SESSION_A[:8]}\n", stderr="")
+
+    world.deliverer.run = runner
+    first = send(world, {"session_id": SESSION_A}, "Keep both")
+    assert first["state"] == "sent"
+    assert sessions.received(SESSION_A, sessions.prefixed("user", "Keep both"), first["created_at"]) is not None
+    second = send(world, {"session_id": SESSION_A}, "Run here")
+    assert second["state"] == "queued"  # the first message's turn runs
+    reply = {"type": "assistant", "message": {"id": "m2", "content": [], "stop_reason": "end_turn"}}
+    with (transcripts / "-home-x" / f"{SESSION_A}.jsonl").open("a") as handle:
+        handle.write(json.dumps(reply) + "\n" + json.dumps({"type": "system", "subtype": "turn_duration"}) + "\n")
+    assert waiting_due(world) == [second["id"]]
+    world.deliverer.send(second["id"])
+    assert message(world, second["id"])["state"] == "sent"
+    lines = (transcripts / "-home-x" / f"{SESSION_A}.jsonl").read_text().splitlines()
+    prompts = [entry["message"]["content"] for entry in map(json.loads, lines) if entry["type"] == "user"]
+    assert len(prompts) == 2
+    assert prompts[0].startswith(sessions.prefixed("user", "Keep both") + "\n\n" + delivery.AFTER_TURN)
+    assert prompts[1].startswith(sessions.prefixed("user", "Run here") + "\n\n" + delivery.AFTER_TURN)
+
+
 def test_a_message_waits_for_a_turn_under_way_and_goes_once_it_ends(
     world: World, tmp_path: Path, monkeypatch, transcripts: Path
 ) -> None:
@@ -555,14 +606,14 @@ def test_a_running_subagent_keeps_the_message_waiting(world: World, tmp_path: Pa
     assert waiting_due(world) == [waiting["id"]]
 
 
-def test_send_now_tells_a_session_whose_turn_had_ended_that_its_background_work_ended(
+def test_a_restart_tells_a_session_whose_turn_had_ended_that_its_background_work_ended(
     world: World, tmp_path: Path, monkeypatch, transcripts: Path
 ) -> None:
     delegating = replace(live("done", "busy", str(tmp_path), tempo="idle"), in_flight=["local_agent"])
     end_turn(transcripts, ended=True)
     stops_and_resumes(world, delegating, monkeypatch)
     waiting = send(world, {"session_id": SESSION_A})
-    assert world.client.post(f"/api/messages/{waiting['id']}/send-now", headers=world.user()).status_code == 200
+    world.deliverer.restart(waiting["id"])
     assert world.runner.calls[-1][0][-1].endswith(delivery.AFTER_TURN)
 
 
@@ -581,7 +632,7 @@ def test_an_older_agent_message_does_not_block_an_overdue_user_prompt_to_codex(w
     agent = CodexAgent(world.db_path)
     agent.rpc = FakeRpc(agent)
     world.deliverer.codex = agent
-    agent.start(world.checkout, "test", "Do some work", "gpt-6.1-sol", "high", "standard")
+    agent.start(world.checkout, "test", "Do some work", "gpt-6.2-sol", "high", "standard")
     world.cache.sessions = agent.sessions()
     older = send_as_agent(world, {"session_id": SESSION_B}, "The checks passed")
     user = send(world, {"session_id": SESSION_B}, "Change direction")
@@ -731,6 +782,20 @@ def test_stopped_session_is_resumed_in_its_directory(world: World, tmp_path: Pat
 # Sessions started at extra-high effort move to high before Cockpit gives them a turn.
 
 
+def save_default(account: config.Account, command: str) -> None:
+    """Save what a typed `/effort` or `/model` sets as the user's default for new sessions, as Claude Code does."""
+    path = account.folder / "settings.json"
+    settings = json.loads(path.read_text()) if path.exists() else {}
+    key, value = command.removeprefix("/").split(" ", 1)
+    if key == "effort":
+        settings.setdefault("modelSettings", {}).setdefault(config.MAIN_MODEL, {})["effortLevel"] = value
+    else:
+        settings["model"] = value
+    settings["theme"] = "dark"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(settings))
+
+
 def effort_claude(world: World, session: Session, monkeypatch) -> None:
     """The fake `claude` for sessions whose options say xhigh: a stop leaves the session without a process,
     `/effort high` resumes it with high in its options and no turn under way, and a message resumes it busy."""
@@ -742,6 +807,7 @@ def effort_claude(world: World, session: Session, monkeypatch) -> None:
         if args[1] == "stop":
             world.cache.sessions = [replace(current, pid=None, status="")]
         elif args[-1] == "/effort high":
+            save_default(account, args[-1])
             world.cache.sessions = [replace(current, pid=99, state="working", status="idle", tempo="active", effort="high")]
         elif "--resume" in args:
             world.cache.sessions = [replace(current, pid=99, state="working", status="busy")]
@@ -827,6 +893,175 @@ def test_an_effort_switch_that_does_not_take_fails_the_message(world: World, tmp
     assert len(world.runner.calls) == 1
 
 
+def test_moving_a_session_to_high_keeps_the_users_default_effort(
+    world: World, tmp_path: Path, monkeypatch, claude_accounts, caplog
+) -> None:
+    personal, work = claude_accounts
+    personal.folder.mkdir(parents=True)
+    work.folder.mkdir(parents=True)
+    before = {"model": "claude-fable-5-2", "modelSettings": {config.MAIN_MODEL: {"effortLevel": "xhigh"}}, "theme": "light"}
+    (personal.folder / "settings.json").write_text(json.dumps(before))
+    (personal.folder / "settings.json").chmod(0o600)
+    (work.folder / "settings.json").symlink_to(personal.folder / "settings.json")
+    effort_claude(world, replace(make_session(SESSION_A, pid=None, cwd=str(tmp_path)), effort="xhigh"), monkeypatch)
+    caplog.set_level(logging.INFO, logger=delivery.log.name)
+    sent = send(world, {"session_id": SESSION_A})
+    assert sent["state"] == "sent" and sent["detail"].endswith("; first moved it from xhigh to high effort")
+    # The command's effort is back to the user's; the rest of what Claude saved stays.
+    assert json.loads((personal.folder / "settings.json").read_text()) == {**before, "theme": "dark"}
+    assert (personal.folder / "settings.json").stat().st_mode & 0o777 == 0o600
+    assert (work.folder / "settings.json").is_symlink()
+    assert [r.getMessage() for r in caplog.records if "put back" in r.getMessage()] == [
+        f"put back the user's default modelSettings.{config.MAIN_MODEL}.effortLevel in"
+        f" {(personal.folder / 'settings.json').resolve()} after Cockpit's /effort high"
+    ]
+
+
+def test_a_default_the_user_never_set_is_removed_again(world: World, tmp_path: Path, monkeypatch, claude_accounts) -> None:
+    personal, _ = claude_accounts
+    effort_claude(world, replace(make_session(SESSION_A, pid=None, cwd=str(tmp_path)), effort="xhigh"), monkeypatch)
+    sent = send(world, {"session_id": SESSION_A})
+    assert sent["state"] == "sent"
+    assert json.loads((personal.folder / "settings.json").read_text()) == {"theme": "dark"}
+
+
+def wait_for(condition, seconds: float = 5.0) -> None:
+    deadline = time.monotonic() + seconds
+    while not condition():
+        assert time.monotonic() < deadline, "timed out"
+        time.sleep(0.01)
+
+
+def test_a_command_that_runs_after_cockpit_stops_waiting_has_its_default_put_back(
+    world: World, tmp_path: Path, monkeypatch, claude_accounts, caplog
+) -> None:
+    """A command that shows no output within RESUME_SETTLE_SECONDS, for example behind a startup dialog, saves the
+    default when it runs later; a thread watching the transcript puts it back then."""
+    personal, _ = claude_accounts
+    personal.folder.mkdir(parents=True)
+    path = personal.folder / "settings.json"
+    path.write_text(json.dumps({"modelSettings": {config.MAIN_MODEL: {"effortLevel": "xhigh"}}}))
+    effort_claude(world, replace(make_session(SESSION_A, pid=None, cwd=str(tmp_path)), effort="xhigh"), monkeypatch)
+    monkeypatch.setattr(delivery, "RESUME_SETTLE_SECONDS", 0.05)
+    monkeypatch.setattr(delivery, "LATE_COMMAND_POLL_SECONDS", 0.01)
+    ran = threading.Event()
+    monkeypatch.setattr(delivery, "local_command_ran_since", lambda session_id, started_ms: ran.is_set())
+    fake = world.deliverer.run
+
+    def saves_later(account, args, cwd):
+        before = path.read_text()
+        result = fake(account, args, cwd)
+        path.write_text(before)
+        return result
+
+    world.deliverer.run = saves_later
+    caplog.set_level(logging.INFO, logger=delivery.log.name)
+    sent = send(world, {"session_id": SESSION_A})
+    assert sent["state"] == "sent"
+    assert [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING] == [
+        f"session {SESSION_A} showed no output within 0.05 s; Cockpit puts the user's default back once the session"
+        " runs /effort high"
+    ]
+    save_default(personal, "/effort high")
+    ran.set()
+    wait_for(lambda: json.loads(path.read_text())["modelSettings"][config.MAIN_MODEL]["effortLevel"] == "xhigh")
+    assert json.loads(path.read_text()) == {"modelSettings": {config.MAIN_MODEL: {"effortLevel": "xhigh"}}, "theme": "dark"}
+
+
+def test_an_effort_switch_confirmed_only_after_cockpit_gives_up_has_its_default_put_back(
+    world: World, tmp_path: Path, monkeypatch, claude_accounts, caplog
+) -> None:
+    """A session behind a startup dialog shows neither the new effort nor the command's output in time, so the message
+    fails; the command still runs once the dialog is answered, and a thread puts the default back then."""
+    personal, _ = claude_accounts
+    personal.folder.mkdir(parents=True)
+    path = personal.folder / "settings.json"
+    path.write_text(json.dumps({"modelSettings": {config.MAIN_MODEL: {"effortLevel": "xhigh"}}}))
+    effort_claude(world, replace(make_session(SESSION_A, pid=None, cwd=str(tmp_path)), effort="xhigh"), monkeypatch)
+    monkeypatch.setattr(delivery, "RESUME_SETTLE_SECONDS", 0.05)
+    monkeypatch.setattr(delivery, "LATE_COMMAND_POLL_SECONDS", 0.01)
+    ran = threading.Event()
+    monkeypatch.setattr(delivery, "local_command_ran_since", lambda session_id, started_ms: ran.is_set())
+    fake = world.deliverer.run
+
+    def waits_on_a_dialog(account, args, cwd):
+        result = fake(account, args, cwd)
+        if args[-1] == "/effort high":
+            path.write_text(json.dumps({"modelSettings": {config.MAIN_MODEL: {"effortLevel": "xhigh"}}}))
+            world.cache.sessions = [replace(world.cache.sessions[0], effort="xhigh")]
+        return result
+
+    world.deliverer.run = waits_on_a_dialog
+    sent = send(world, {"session_id": SESSION_A})
+    assert sent["state"] == "failed"
+    assert [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING] == [
+        f"session {SESSION_A} did not confirm /effort high within 0.05 s; Cockpit puts the user's default back once the"
+        " session runs /effort high"
+    ]
+    save_default(personal, "/effort high")
+    ran.set()
+    wait_for(lambda: json.loads(path.read_text())["modelSettings"][config.MAIN_MODEL]["effortLevel"] == "xhigh")
+    assert json.loads(path.read_text()) == {"modelSettings": {config.MAIN_MODEL: {"effortLevel": "xhigh"}}, "theme": "dark"}
+
+
+def test_a_default_changed_by_someone_else_meanwhile_stays(
+    world: World, tmp_path: Path, monkeypatch, claude_accounts, caplog
+) -> None:
+    personal, _ = claude_accounts
+    personal.folder.mkdir(parents=True)
+    path = personal.folder / "settings.json"
+    path.write_text(json.dumps({"modelSettings": {config.MAIN_MODEL: {"effortLevel": "xhigh"},
+                                                  "claude-fable-5-2": {"effortLevel": "high"}}}))
+    effort_claude(world, replace(make_session(SESSION_A, pid=None, cwd=str(tmp_path)), effort="xhigh"), monkeypatch)
+    fake = world.deliverer.run
+
+    def user_changes_fable_meanwhile(account, args, cwd):
+        result = fake(account, args, cwd)
+        if args[-1] == "/effort high":
+            settings = json.loads(path.read_text())
+            settings["modelSettings"]["claude-fable-5-2"]["effortLevel"] = "medium"
+            path.write_text(json.dumps(settings))
+        return result
+
+    world.deliverer.run = user_changes_fable_meanwhile
+    sent = send(world, {"session_id": SESSION_A})
+    assert sent["state"] == "sent"
+    assert json.loads(path.read_text())["modelSettings"] == {
+        config.MAIN_MODEL: {"effortLevel": "xhigh"}, "claude-fable-5-2": {"effortLevel": "medium"}
+    }
+    assert [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR] == [
+        f"left modelSettings.claude-fable-5-2.effortLevel in {path.resolve()} at 'medium': it changed from 'high'"
+        " while Cockpit ran /effort high, to a value other than Cockpit's"
+    ]
+
+
+def test_a_model_save_that_lands_after_its_output_is_put_back(monkeypatch, claude_accounts) -> None:
+    """Claude shows `/model`'s output after waiting at most 3 s for its save, which can land later."""
+    personal, _ = claude_accounts
+    personal.folder.mkdir(parents=True)
+    path = personal.folder / "settings.json"
+    path.write_text(json.dumps({"model": "claude-fable-5-2"}))
+    monkeypatch.setattr(delivery, "RESUME_POLL_SECONDS", 0.01)
+    with delivery.kept_defaults("model", config.MAIN_MODEL) as saved:
+        threading.Timer(0.1, save_default, (personal, f"/model {config.MAIN_MODEL}")).start()
+        delivery._wait_for_save(saved)
+    assert json.loads(path.read_text()) == {"model": "claude-fable-5-2", "theme": "dark"}
+
+
+def test_a_model_save_that_never_lands_is_an_error(monkeypatch, claude_accounts, caplog) -> None:
+    personal, _ = claude_accounts
+    personal.folder.mkdir(parents=True)
+    (personal.folder / "settings.json").write_text(json.dumps({"model": "claude-fable-5-2"}))
+    monkeypatch.setattr(delivery, "RESUME_POLL_SECONDS", 0.01)
+    monkeypatch.setattr(delivery, "MODEL_SAVE_SECONDS", 0.05)
+    with delivery.kept_defaults("model", config.MAIN_MODEL) as saved:
+        delivery._wait_for_save(saved)
+    assert [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR] == [
+        f"Claude did not save /model {config.MAIN_MODEL} as the user's default within 0.05 s of showing its output;"
+        " if it saves it later, the user's default changes"
+    ]
+
+
 def test_resume_that_starts_a_copy_fails_loudly(world: World, tmp_path: Path) -> None:
     world.runner.output = (
         f"note: background session {SESSION_A[:8]} is open in another Claude Code process, so this started a copy"
@@ -889,13 +1124,13 @@ def test_a_new_session_starts_on_the_model_and_effort_the_user_picked(world: Wor
     assert sent["detail"].endswith("claude-sonnet-5-5 at low effort")
 
 
-def test_picks_for_a_new_session_are_checked(world: World) -> None:
+def test_session_picks_are_checked(world: World) -> None:
     for target, problem in (
-        ({"new_cwd": str(world.checkout), "model": "gpt-6.1-sol"}, "claude offers no model gpt-6.1-sol"),
+        ({"new_cwd": str(world.checkout), "model": "gpt-6.2-sol"}, "claude offers no model gpt-6.2-sol"),
         ({"new_cwd": str(world.checkout), "effort": "huge"}, "claude offers no effort huge"),
         ({"new_cwd": str(world.checkout), "account": "nobody"}, "no Claude account nobody"),
         ({"new_cwd": str(world.checkout), "provider": "codex"}, "provider codex is not enabled"),
-        ({"session_id": SESSION_A, "model": "claude-sonnet-5-5"}, "new session"),
+        ({"session_id": SESSION_A, "model": "gpt-6.2-sol"}, "claude offers no model gpt-6.2-sol"),
     ):
         refused = world.client.post("/api/messages", json={"text": "hi", "target": target}, headers=world.user())
         assert refused.status_code == 400 and problem in refused.json()["detail"], (target, refused.text)

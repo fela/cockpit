@@ -20,29 +20,39 @@ function world(values) {
 
 async function usageChecks() {
   let state = { now: new Date().toISOString(), usage: { accounts: [] }, permission_requests: [], page_comments: [], queue: [] };
-  const calls = { usage: 0, fit: 0, render: 0 };
+  const calls = { usage: 0, render: 0 };
   const ui = { tick: 0, pending: new Map(), snoozing: new Map(), handing: new Map(), busy: new Set(),
     renderedAt: Date.now(), error: "", catchUpFrom: null, openedHidden: new Set() };
   const w = world({ ui, document: { hidden: false, querySelector: () => null }, window: {},
     readState: async () => state, URLSearchParams, ADDS_WAIT_MS: 1000, ARRIVED_MS: 10000, RERENDER_MS: 60000,
+    SAVED_PAGE_NOTE: "Showing the saved page; checking for updates",
     commentDeletions: new Map(), noticeCodexSignIns: noop,
     forgetSentMarks: noop, settleUploads: noop, noticeSideAnswers: noop, noticeSnoozeReads: noop, renderStatus: noop, caughtUp: noop,
-    fill: () => calls.usage++, usagePill: noop, fitHeader: () => calls.fit++,
+    fill: () => calls.usage++, usagePill: noop,
     logError: (_label, error) => { throw error; }, Motion: { redraw: (work) => work() }, renderBanner: noop,
   });
   w.run(part("app.js", "let usageGeneration =", "function usagePill("));
-  w.run(part("app.js", "async function refresh()", "// Resolves to whether the work went through."));
-  w.context.safeRender = () => { calls.render++; w.run("renderUsage(ui.state); fitHeader()"); };
+  w.run(part("app.js", "async function refresh(saved = null)", "// Resolves to whether the work went through."));
+  w.context.safeRender = () => { calls.render++; w.run("renderUsage(ui.state)"); };
   await w.run("refresh()");
-  assert.deepEqual(calls, { usage: 1, fit: 1, render: 1 }, "full render repeats usage work");
+  assert.deepEqual(calls, { usage: 1, render: 1 }, "full render repeats usage work");
   state = { ...state, usage: { accounts: [1] } };
   await w.run("refresh()");
-  assert.deepEqual(calls, { usage: 2, fit: 2, render: 1 }, "usage-only change fails to draw");
+  assert.deepEqual(calls, { usage: 2, render: 1 }, "usage-only change fails to draw");
   w.context.safeRender = () => { ui.pendingRender = true; };
   state = { ...state, queue: [1], usage: { accounts: [2] } };
   await w.run("refresh()");
-  assert.deepEqual(calls, { usage: 3, fit: 3, render: 1 }, "deferred render loses usage update");
-  console.log("pass: full render, usage-only refresh and deferred render usage work");
+  assert.deepEqual(calls, { usage: 3, render: 1 }, "deferred render loses usage update");
+  const prefetched = { state: Promise.resolve({ response: {}, data: {} }) };
+  w.context.window.CockpitBoot = prefetched;
+  const liveAt = ui.lastOk, offset = ui.clockOffset;
+  await w.run("refresh(ui.state)");
+  assert.equal(w.context.window.CockpitBoot, prefetched, "saved rendering discarded the live boot request");
+  assert.equal(ui.lastOk, liveAt, "saved rendering claimed a fresh live read");
+  assert.equal(ui.clockOffset, offset, "saved rendering shifted the live clock");
+  await w.run("refresh()");
+  assert.equal(w.context.window.CockpitBoot, null, "live drawing did not release consumed boot results");
+  console.log("pass: full render, usage-only refresh and deferred render usage work; saved drawing preserves boot and clock");
 }
 
 function sidebarChecks() {

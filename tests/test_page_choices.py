@@ -158,7 +158,10 @@ def test_task_done_without_words_on_an_item_with_no_session_leaves_the_choices_o
 def test_every_framed_page_carries_the_choices_script_and_removing_the_page_removes_its_choices(world: World) -> None:
     page, step = setup(world)
     plain = world.client.get(f"/pages/{page['id']}/figure")
-    assert plain.text == REPORT + app_module.FIGURE_SIZE_SCRIPT + app_module.FIGURE_LINK_SCRIPT + app_module.PAGE_CHOICES_SCRIPT
+    identity = world.client.get("/api/offline/session").json()
+    root = f'<html data-offline-user="{identity["user"]}" data-offline-until="{identity["until"]}" data-offline-helper="1">'
+    scoped_report = REPORT.replace("<!doctype html>", "<!doctype html>" + root, 1)
+    assert plain.text == scoped_report + app_module.FIGURE_SIZE_SCRIPT + app_module.FIGURE_LINK_SCRIPT + app_module.PAGE_CHOICES_SCRIPT
     choose(world, page, "plan", "b", "", step["id"]).raise_for_status()
     agent(world).delete(f"/api/item-pages/{page['id']}", headers=world.agent("app")).raise_for_status()
     conn = db.connect(world.db_path)

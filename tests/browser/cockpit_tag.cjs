@@ -2,12 +2,11 @@
 // the Cockpit tag (the header's key in small, the jet on amber, and the word). Checks, at 320, 390 and 1280 px in the
 // light and the dark theme:
 // - a session's put of "Cockpit" stores the project as "cockpit";
-// - the tag shows, visible and not clipped, in Next up's head, on a collapsed queue row, on the item's row in the work
-//   list, in Pinned, under You handed these, in the steps closed in the last day, in Finished this week, in the status
-//   lights' entry, in the search menu, and in the Pages tab's list and (wide) reader; the words show too except on a
-//   phone's one-line rows (handed and closed rows, the lights), which keep the key alone;
-// - a step that left the queue while open keeps its tag and its whole close button, open and collapsed;
-// - beside it, a handed step's ask loses at most the key's room;
+// - the tag shows, visible and not clipped, as the key alone at the end of Next up's heading and leading the item's
+//   rows in the list on the left (Inbox, Busy with a handed step, Finished this week), and in Pinned, the search
+//   menu, and the Pages tab's list and (wide) reader, with its word in Pinned and on Pages;
+// - a step that left the queue while on the card keeps its tag and its whole close button;
+// - beside it, a handed step's title loses at most the key's room;
 // - a step and an item of other work carry none;
 // - its key is a dark tile with an amber jet that stands out from the tile;
 // - the page does not scroll sideways, and has no page errors.
@@ -70,16 +69,14 @@ async function main() {
     const tool = await put("tag-tool", "Tag the tool's work", "Cockpit", 100);
     const toolQueued = await put("tag-tool-two", "Tighter card spacing", "cockpit", 95);
     const other = await put("tag-other", "Merge the reminder fix", "tasks", 90);
-    // A step the user hands to its session, one an agent closes, and an item the user closes.
+    // Steps the user hands to their session, and an item the user closes.
     const handed = await put("tag-hand", "Explain the Run key", "cockpit", 50);
     await user("POST", `/api/steps/${handed.step}/hand-off`, { text: "Go ahead with the shorter wording" });
     const handedOther = await put("tag-hand-other", "Explain the API key", "tasks", 45);
     await user("POST", `/api/steps/${handedOther.step}/hand-off`, { text: "Go ahead with the shorter wording" });
-    const closed = await put("tag-closed", "Shorter finish steps", "cockpit", 40);
-    await agent("POST", `/api/steps/${closed.step}/done`, { note: "Built and deployed" });
     const archived = await put("tag-archived", "Drop the old strip", "cockpit", 30);
     await user("PATCH", `/api/items/${archived.item.id}`, { archived: true });
-    // Items with no step: the work list shows them as rows, with agents. One is pinned and has a page.
+    // Items with no step, which agents work on. One is pinned and has a page.
     const resting = (slug, title, project) => agent("PUT", "/api/items", {
       key: `note:${slug}-${run}`, title, project, stage: "building", waiting_on: [{ kind: "agent", who: SESSION_B }], sessions: [SESSION_B],
     });
@@ -108,7 +105,7 @@ async function main() {
       }, { noWaitAfter: true });
       const errors = [];
       page.on("pageerror", (error) => errors.push(error.message));
-      await page.goto(`${info.origin}/classic`);
+      await page.goto(`${info.origin}/`);
       const card = page.locator(`#next [data-step="${tool.step}"]`).first();
       // The first drawing can take a while on a busy host.
       await card.waitFor({ timeout: 30e3 });
@@ -119,40 +116,6 @@ async function main() {
       check(`${at}: Next up's heading ends in the Cockpit key`, await shows(headTag, false)
         && await headTag.evaluate((el) => el.previousElementSibling?.classList.contains("task-heading-text")
           && getComputedStyle(el.querySelector(".chip-words")).display === "none"), await describe(headTag));
-      const toolRow = page.locator(`#queue .step-row[data-step="${toolQueued.step}"]`).first();
-      const otherRow = page.locator(`#queue .step-row[data-step="${other.step}"]`).first();
-      check(`${at}: a collapsed queue row of Cockpit work shows the tag`, await shows(toolRow.locator(".chip.cockpit"), true), await describe(toolRow.locator(".chip.cockpit")));
-      check(`${at}: a queue row of other work shows none`, await otherRow.count() === 1 && await otherRow.locator(".chip.cockpit").count() === 0,
-        `${await otherRow.count()} rows`);
-      const workTag = page.locator(`#work .row[data-item="${toolWork.id}"] .chip.cockpit`);
-      const otherRow2 = page.locator(`#work .row[data-item="${otherWork.id}"]`).first();
-      const handedRow = page.locator(`#work .with-agents li[data-step="${handed.step}"]`).first();
-      // Busy and Waiting start folded (VIEW-27): open the groups that hold the rows checked below.
-      for (const row of [workTag.first(), handedRow]) {
-        await row.evaluate((el) => { for (let at = el.closest("details"); at; at = at.parentElement.closest("details")) at.open = true; }).catch(() => {});
-      }
-      check(`${at}: the item's row in the work list shows the tag`, await shows(workTag, true), await describe(workTag));
-      check(`${at}: other work's row in the work list shows none`, await otherRow2.count() === 1 && await otherRow2.locator(".chip.cockpit").count() === 0,
-        `${await otherRow2.count()} rows`);
-      const pinTag = page.locator(`#pinned [data-pinned="${toolWork.id}"] .chip.cockpit`);
-      check(`${at}: Pinned shows the tag`, await shows(pinTag, true), await describe(pinTag));
-      check(`${at}: You handed these shows the tag${phone ? ", the key alone" : ""}`, await shows(handedRow.locator(".chip.cockpit"), !phone),
-        await describe(handedRow.locator(".chip.cockpit")));
-      const askWidth = (step) => page.locator(`#work .with-agents li[data-step="${step}"] .row-title`).first()
-        .evaluate((el) => el.getBoundingClientRect().width).catch(() => 0);
-      const [withTag, without] = [await askWidth(handed.step), await askWidth(handedOther.step)];
-      check(`${at}: beside the tag a handed step's ask loses at most the key's room to other work's`,
-        withTag > 0 && withTag >= without - (phone ? 26 : 90), `${Math.round(withTag)} px against ${Math.round(without)} px`);
-      // Folded lists, opened: the closed step and the closed item show the tag.
-      const closedStep = page.locator(`.closed-list li[data-at]`).filter({ hasText: "Shorter finish steps" });
-      const closedItem = page.locator(`#work .closed-item[data-item="${archived.item.id}"]`);
-      for (const folded of [closedStep, closedItem]) {
-        await folded.first().evaluate((el) => { for (let at = el.closest("details"); at; at = at.parentElement.closest("details")) at.open = true; }).catch(() => {});
-      }
-      check(`${at}: the steps closed in the last day show the tag${phone ? ", the key alone" : ""}`,
-        await shows(closedStep.locator(".chip.cockpit"), !phone), await describe(closedStep.locator(".chip.cockpit")));
-      check(`${at}: Finished this week's closed item shows the tag${phone ? ", the key alone" : ""}`,
-        await shows(closedItem.locator(".chip.cockpit"), !phone), await describe(closedItem.locator(".chip.cockpit")));
       const paint = await headTag.evaluate((el) => {
         const mark = el.querySelector(".cockpit-mark");
         const jet = getComputedStyle(mark, "::after");
@@ -167,34 +130,63 @@ async function main() {
       check(`${at}: the tag's key is a dark tile with an amber jet that stands out from the tile`,
         paint.tile.length >= 2 && paint.tile.every((stop) => Math.max(...stop) <= 80 && distance(paint.jet, stop) >= 160)
           && paint.masked && paint.jet[0] - paint.jet[2] >= 80, JSON.stringify(paint));
-      // The stage counts at the top: Cockpit work has a stage of its own, so its plate entry needs no tag, and
-      // other work's carries none either.
-      const lights = await page.evaluate(([mine, theirs]) => {
-        const entries = [...document.querySelectorAll(".light-item")];
-        const where = (title) => entries.filter((entry) => entry.querySelector(".light-title")?.textContent === title)
-          .map((entry) => ({ tag: Boolean(entry.querySelector(".chip.cockpit")), cockpit: Boolean(entry.closest(".stage-cockpit")) }));
-        return { mine: where(mine), theirs: where(theirs) };
-      }, ["Quieter sweep notes", "Add weekly reminders"]);
-      check(`${at}: the stage counts hold Cockpit work under Cockpit, untagged, and other work elsewhere`,
-        lights.mine.length === 1 && lights.mine[0].cockpit && !lights.mine[0].tag && lights.theirs.length > 0
-          && !lights.theirs.some((entry) => entry.tag || entry.cockpit), JSON.stringify(lights));
 
-      // A step an agent closes while the user has it open stays as "Left your queue", with its tag and its close.
-      const leaving = await put(`tag-left-${width}-${scheme}`, "Trim the sweep log", "cockpit", 20);
-      const leavingRow = page.locator(`#queue .step-row[data-step="${leaving.step}"]`).first();
-      await leavingRow.waitFor();
-      await leavingRow.locator(".row-age").click();
-      await page.locator(`#queue .step-row.open[data-step="${leaving.step}"]`).waitFor();
+      // The list on the left, the phone's list screen. Each row leads with its project's mark: the key alone for
+      // Cockpit's work. Busy, Waiting and Finished this week start folded: open the groups that hold the rows checked.
+      if (width <= 1000) await page.locator(".phone-bar .phone-back").click();
+      await page.evaluate(() => { for (const group of document.querySelectorAll("#sidebar details.sidebar-group")) group.open = true; });
+      const rowTag = (row) => row.locator(".sidebar-lead > .chip.cockpit");
+      const toolRow = page.locator(`#sidebar li[data-step="${toolQueued.step}"]`).first();
+      const otherRow = page.locator(`#sidebar li[data-step="${other.step}"]`).first();
+      check(`${at}: Cockpit work's row in Inbox shows the key`, await shows(rowTag(toolRow), false), await describe(rowTag(toolRow)));
+      check(`${at}: other work's row in Inbox shows none`, await otherRow.count() === 1 && await otherRow.locator(".chip.cockpit").count() === 0,
+        `${await otherRow.count()} rows`);
+      const workRow = page.locator(`#sidebar li[data-item="${toolWork.id}"]`).first();
+      const otherWorkRow = page.locator(`#sidebar li[data-item="${otherWork.id}"]`).first();
+      check(`${at}: the item's row with agents shows the key`, await shows(rowTag(workRow), false), await describe(rowTag(workRow)));
+      check(`${at}: other work's row with agents shows none`, await otherWorkRow.count() === 1 && await otherWorkRow.locator(".chip.cockpit").count() === 0,
+        `${await otherWorkRow.count()} rows`);
+      const handedRow = page.locator(`#sidebar li[data-step="${handed.step}"]`).first();
+      check(`${at}: the handed step's row shows the key`, await shows(rowTag(handedRow), false), await describe(rowTag(handedRow)));
+      const titleWidth = (step) => page.locator(`#sidebar li[data-step="${step}"] .sidebar-title`).first()
+        .evaluate((el) => el.getBoundingClientRect().width).catch(() => 0);
+      const [withTag, without] = [await titleWidth(handed.step), await titleWidth(handedOther.step)];
+      check(`${at}: beside the key a handed step's title loses at most the key's room to other work's`,
+        withTag > 0 && withTag >= without - 26, `${Math.round(withTag)} px against ${Math.round(without)} px`);
+      const closedRow = page.locator(`#sidebar details.sidebar-group.done li[data-item="${archived.item.id}"]`).first();
+      // The last group can sit below the list's fold.
+      await closedRow.scrollIntoViewIfNeeded().catch(() => {});
+      check(`${at}: Finished this week's closed item shows the key`, await shows(rowTag(closedRow), false), await describe(rowTag(closedRow)));
+      const pinTag = page.locator(`#pinned [data-pinned="${toolWork.id}"] .chip.cockpit`);
+      check(`${at}: Pinned shows the tag`, await shows(pinTag, true), await describe(pinTag));
+      await page.screenshot({ path: path.join(work, `cockpit-tag-list-${width}-${scheme}.png`) });
+
+      // The queue's first step, on Next up with no item picked, that an agent closes while the user has a draft in it
+      // stays there as "Left your queue", with its tag and its close.
+      // A step below it fills the queue's four places, so the step waits in Ready next.
+      const filler = await put(`tag-filler-${width}-${scheme}`, "Sort the old logs", "tasks", 20);
+      const leaving = await put(`tag-left-${width}-${scheme}`, "Trim the sweep log", "cockpit", 10);
+      await page.waitForFunction((id) => typeof takeStep === "function" && drawn(ui.state).ready_next.some((step) => step.id === id),
+        leaving.step, { timeout: 15e3 });
+      // The user takes it, which puts it first in the queue and on the card, here on a phone's item screen.
+      await page.evaluate((id) => {
+        takeStep(stepOnPage(id));
+        setPhoneScreen(false, false);
+      }, leaving.step);
+      const leavingCard = page.locator(`#next [data-step="${leaving.step}"]`).first();
+      await leavingCard.waitFor();
+      // The user writes a draft and leaves the box; a redraw holds the card while its box has the keyboard.
+      const draftBox = leavingCard.locator(`textarea[data-key="msg:step:${leaving.step}"]`);
+      await draftBox.fill("Keep the longer log for a week");
+      await draftBox.blur();
+      await page.waitForFunction((id) => ui.held.has(id), leaving.step, { timeout: 15e3 });
       await agent("POST", `/api/steps/${leaving.step}/done`, { note: "Done elsewhere" });
-      const leftRow = page.locator(`#queue .step-row.left[data-step="${leaving.step}"]`).first();
-      await leftRow.waitFor({ timeout: 15e3 }).catch(() => {});
-      check(`${at}: an open step that left the queue keeps its close button`,
-        await leftRow.count() === 1 && await whole(leftRow.locator(".left-note button")), await leftRow.count() + " rows");
-      await leftRow.locator(".row-age").click().catch(() => {});
-      check(`${at}: collapsed, it shows the tag`, await shows(leftRow.locator(".row-line2 .chip.cockpit"), true), await describe(leftRow.locator(".chip.cockpit")));
-      check(`${at}: collapsed, its close button is whole`,
-        !await leftRow.evaluate((el) => el.classList.contains("open")).catch(() => true) && await whole(leftRow.locator(".left-note button")), await leftRow.count() + " rows");
-      await leftRow.locator(".left-note button").click().catch(() => {});
+      const leftNote = leavingCard.locator(".left-note");
+      await leftNote.waitFor({ timeout: 15e3 }).catch(() => {});
+      check(`${at}: a step on the card that left the queue keeps its close button`, await whole(leftNote.locator("button")), `${await leftNote.count()} notes`);
+      check(`${at}: it keeps its tag`, await shows(leavingCard.locator(".task-heading > .chip.cockpit"), false), await describe(leavingCard.locator(".chip.cockpit")));
+      await leftNote.locator("button").click().catch(() => {});
+      await agent("POST", `/api/steps/${filler.step}/done`, { note: "Done elsewhere" });
       const wide = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
       check(`${at}: the page does not scroll sideways`, wide <= 0, `${wide} px too wide`);
 

@@ -201,11 +201,12 @@ async function main() {
 
       // The step card lists them above its reply box.
       const home = await context.newPage();
-      await home.goto(`${info.origin}/classic`);
-      const card = home.locator(`[data-step="${stepId}"]`).first();
+      await home.goto(`${info.origin}/`);
+      // Picks the step's item in the list at the left, so the card shows the step whichever step leads the queue.
+      await home.locator(`#sidebar li[data-item="${answer.step.item_id}"]`).waitFor({ state: "attached" });
+      await home.evaluate((itemId) => showInSidebar(itemId), answer.step.item_id);
+      const card = home.locator(`#next [data-step="${stepId}"]`).first();
       await card.waitFor();
-      // A step that is not the top one shows as a row; opening it shows its card.
-      if (await card.evaluate((el) => el.classList.contains("step-row") && !el.classList.contains("open"))) await card.locator(".row-head").click();
       const listed = await card.locator(".page-comments-pending summary").textContent().catch(() => "");
       check(`${at}: the step card lists the comments`, listed === "2 page comments go with this answer", listed);
       const link = await card.locator(".core-links a[href*='/pages?id=']").first().getAttribute("href").catch(() => "");

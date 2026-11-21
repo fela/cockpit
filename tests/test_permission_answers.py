@@ -295,10 +295,14 @@ def test_an_allow_carries_the_users_note_to_the_session(world: World) -> None:
     finally:
         conn.close()
     assert sent[0]["author"] == "user"
-    assert sent[0]["text"].startswith("The call that auto mode blocked in this session at")
+    assert sent[0]["text"].startswith(f"Sam added `{RULE}` to the Claude Code tool rules")
     assert sent[0]["text"].endswith("git push origin user/x\n\nSam's note with this answer: push only this branch")
     assert sent[1]["author"] == "user"
     assert sent[1]["text"].endswith("git push origin user/y\n\nSam's note with this answer: then open the PR")
+    for message in sent:
+        assert "Check whether the saved rule covers the call below" in message["text"]
+        assert "Follow normal permission checks before retrying it if you still need it." in message["text"]
+        assert "is allowed now" not in message["text"]
     # A dialog's call gets no message to carry it, and a note is one short line.
     asked = report(world, "asked", PUSH)
     assert answer(world, asked["id"], "allow", {"rule": None, "list": None, "note": "x"}).status_code == 400
@@ -345,7 +349,9 @@ def test_an_allow_changes_the_rule_the_card_names_in_place(world: World) -> None
     changed = "Pushing a branch of the user's own to its PR is fine"
     body = {"rule": changed, "list": "auto", "replaces": "Pushing a branch to its PR is fine"}
     sentences = auto_sentences(world)
-    assert answer(world, sentence["id"], "allow", body).status_code == 200
+    response = answer(world, sentence["id"], "allow", body)
+    assert response.status_code == 200
+    changed_sentence = response.json()
     assert auto_sentences(world) == [changed if s == "Pushing a branch to its PR is fine" else s for s in sentences]
     tool = report(world, "denied", {"command": "git push origin user/y"}, SESSION_B)
     body = {"rule": "Bash(git push origin user/*)", "list": "allow", "replaces": "Bash(git push origin main)"}
@@ -355,9 +361,18 @@ def test_an_allow_changes_the_rule_the_card_names_in_place(world: World) -> None
     conn = db.connect(world.db_path)
     try:
         sent = conn.execute("SELECT text FROM messages WHERE id = ?", (ruled["message_id"],)).fetchone()["text"]
+        sentence_text = conn.execute(
+            "SELECT text FROM messages WHERE id = ?", (changed_sentence["message_id"],)
+        ).fetchone()["text"]
     finally:
         conn.close()
     assert "Sam changed the tool rule `Bash(git push origin main)` to `Bash(git push origin user/*)`, so a matching" in sent
+    assert f'Sam changed the auto-mode sentence "Pushing a branch to its PR is fine" to "{changed}"' in sentence_text
+    assert "which the auto-mode check weighs from now on" in sentence_text
+    for text in (sent, sentence_text):
+        assert "Check whether the saved rule covers the call below" in text
+        assert "Follow normal permission checks before retrying it if you still need it." in text
+        assert "is allowed now" not in text
     assert [(e["old"], e["rule"]) for e in events(world, "permission.rule_edited")] == [
         ("Pushing a branch to its PR is fine", changed), ("Bash(git push origin main)", "Bash(git push origin user/*)"),
     ]

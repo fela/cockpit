@@ -11,103 +11,28 @@ const POLL_MS = 5000;
 const CATCH_UP_GRACE_MS = 2500;
 // A tab in the background asks the quick list this often, and the whole state only when a card it draws has gone.
 const HIDDEN_CHECK_MS = 30000;
-// The page with the list of items at its left (VIEW-26), served at /; /classic serves the page without it (sidebar.js).
-const SIDEBAR = document.body.dataset.layout === "sidebar";
 // One try of an image upload may take this long on a slow connection before it is sent again.
 const UPLOAD_TRY_MS = 120e3;
 const RERENDER_MS = 60000;
 // A press longer than this is no click (a long press to select, or a lost release): redraws go ahead.
 const PRESS_HOLD_MS = 3000;
+const SLIDER_HOLD_MS = 60e3;
 const PRESS_CLICK_WAIT_MS = 400;
-const QUEUE_TOP = 6;
 // The user's places (store.QUEUE_LIMIT).
 const QUEUE_LIMIT = 4;
 // How long Busy's folded heading stays lit after a message took a finished task back to Busy (SPEC CONTROL-28).
 const REOPENED_HEADING_MS = 8000;
-// The closed steps shown in Finished this week before their "Show N more" (SPEC VIEW-4).
-const CLOSED_TOP = 8;
-const SESSIONS_TOP = 10;
 // The most time the user adds to an item at once (TRACK-7), as store.ADD_LIMIT.
 const ADD_LIMIT = 24 * 3600;
 // How long the page skips polled states that may already count time being added (TRACK-7, see `refresh`).
 const ADDS_WAIT_MS = 30000;
-// A message's delivery state, as its mark's tooltip.
-const MESSAGE_STATES = {
-  queued: "Queued",
-  sending: "Sending",
-  waiting: "Waits for the session's turn to end, or for a subagent it runs, at most 15 minutes; then Cockpit stops the session and resumes it with your message as your own prompt",
-  sent: "Delivered",
-  held: "In the session's queue: it reads it once the dialog in its terminal is answered",
-  place: "Waits for a free place among the working sessions; Cockpit sends it when one finishes",
-  failed: "Did not arrive",
-};
 
-// A message the session has in its queue behind an open dialog shows as held, not delivered; one of
-// The user's that waits for the session's turn to end (MSG-3) shows as waiting; one that waits for a place among
-// the working sessions (SESSION-23) shows as place.
-function messageDelivery(message) {
-  if (message.state === "queued" && message.waits_since) return "waiting";
-  if (message.state === "queued" && message.capacity_since) return "place";
-  return message.behind_dialog ? "held" : message.state;
-}
-// Send now on a message that waits for a place (SESSION-23): it goes past the limit and stops no session.
-function sendNowButton(message) {
-  return h("button", { class: "button small ghost", type: "button", onclick: () => sendNow(message) },
-    icon("send"), h("span", { class: "label", text: "Send now" }));
-}
-// Since when a message waits for a place; from LONG_WAIT_MINUTES also how long.
-function placeWords(message) {
-  const minutes = Math.floor(Math.max(0, Date.now() - new Date(message.capacity_since).getTime()) / 60000);
-  return `Waits since ${clock(message.capacity_since)}${minutes >= LONG_WAIT_MINUTES ? ` (${span(minutes)})` : ""} for a free place:`
-    + ` at most ${ui.state.counts.working_limit} sessions work at once`;
-}
-// Interrupt and send on a message that waits (MSG-3): its label says that it stops the session's turn, so it needs no
-// hover.
-function interruptButton(message) {
-  return h("button", { class: "button small ghost interrupt", type: "button", onclick: () => sendNow(message) },
-    icon("send"), h("span", { class: "label", text: "Interrupt and send" }));
-}
-// A waiting message says since when; from LONG_WAIT_MINUTES it also says how long. Cockpit sends it itself
-// after 15 minutes (MSG-7), so only a wait past LATE_WAIT_MINUTES is red: then Interrupt and send is the user's to press.
-// A late wait's sentence leads with a red mark, the alert and how long, and the sentence itself stays quiet.
-const LONG_WAIT_MINUTES = 10;
-const LATE_WAIT_MINUTES = 20;
-
-function waitWords(message) {
-  const minutes = Math.floor(Math.max(0, Date.now() - new Date(message.waits_since).getTime()) / 60000);
-  const late = minutes >= LATE_WAIT_MINUTES;
-  const long = minutes >= LONG_WAIT_MINUTES && !late;
-  return { late, span: span(minutes), since: `since ${clock(message.waits_since)}${long ? ` (${span(minutes)})` : ""}` };
-}
-
-function lateMark(wait) {
-  if (!wait || !wait.late) return null;
-  return h("span", { class: "late-mark", title: `Waiting ${wait.span}; Interrupt and send sends it now` },
-    icon("alert"), wait.span);
-}
-
-// A failed message someone set aside (MSG-5): its text reached the session another way, or it is no
-// longer needed. Not a failure the user has to act on, so never red.
-function setAsideWords(message) {
-  return `Cockpit did not send it; ${actorWords(message.dismissed_by)} set it aside at ${clock(message.dismissed_at)}`
-    + (message.dismiss_reason ? `: ${message.dismiss_reason}` : "");
-}
 // A line-2 row shows this many tags; "+N" stands for the rest.
 const ROW_TAGS = 2;
 const TOAST_MS = 8000;
 // Phones get the one-row action bar; touch screens get no key hints.
 const PHONE = window.matchMedia("(max-width: 640px)");
 const TOUCH = window.matchMedia("(hover: none)");
-// Who the work waits for (SPEC VIEW-2), in the order of store.BALLS.
-const BALLS = [
-  ["you", "Waiting for you"],
-  ["people", "Waiting for another person"],
-  ["bots", "Waiting for a bot"],
-  ["merge", "Waiting for a merge to the next stage"],
-  ["agents", "With agents"],
-  ["nobody", "No one has the next move"],
-  ["done", "Finished this week"],
-];
 // The groups below the queue (SPEC VIEW-27), in the order of store.GROUPS: Busy, the agents' work while it moves, and
 // Waiting, the rest of the open work, each row with a short hover line (`workTip`). Work that waits for the user has
 // no group there: it shows as its steps in the queue. All start folded.
@@ -117,7 +42,6 @@ const GROUPS = [
   ["waiting", "Waiting"],
   ["done", "Finished this week"],
 ];
-const GROUPS_COLLAPSED = new Set(["busy", "waiting", "done"]);
 
 // A row's hover line in Busy or Waiting (SPEC VIEW-27): what the agent works on, or what the item waits for, with its
 // time in the user's own zone, the hour today and the date on another day: "its session resumes 3 Nov".
@@ -129,7 +53,6 @@ function workTip(item) {
     : `${date.getDate()} ${date.toLocaleDateString([], { month: "short" })}`;
   return `${item.tip} ${day}`;
 }
-const PATTERN_DAYS = 14;
 const STAGE_LABELS = {
   planning: "planning", building: "building", review: "in review",
   dev: "on dev", staging: "on staging", prod: "in prod", done: "done",
@@ -183,6 +106,10 @@ const ui = {
   catchUpListed: null,
   // Set while a tab in the background asks the quick list.
   hiddenCheck: false,
+  // The quick `/api/timer` answer a stretch without activity is measured by, with when it was asked (TRACK-5), and
+  // whether one is on its way.
+  timerCheck: null,
+  checkingTimer: false,
   // The quick list a background check last fetched the whole state for.
   hiddenListed: "",
   // Set when a catch-up ended on a failed state: the cards it showed again are old, so the banner says so at once.
@@ -250,11 +177,8 @@ const ui = {
   // The user's last press on Update until what it started is over (SPEC SWEEP-6), or null.
   updateRun: null,
   showAllQueue: false,
-  showAllClosed: false,
   // The items a part keeps off the main page that were opened here by their id.
   openedHidden: new Set(),
-  // Set by a press on a step's size bar until Your time has scrolled to the estimates (SPEC NEXT-35).
-  toEstimates: false,
   showAllSessions: false,
   seenBefore: readStored(SEEN_KEY, null),
   pendingRender: false,
@@ -373,6 +297,7 @@ const ui = {
   timerSent: Promise.resolve(null),
   // Numbers the timer presses, so each is its own action and none waits for or drops another (see `sendTimer`).
   timerPresses: 0,
+  timerPage: null,
   // Items the user completed or closed whose finish is on its way: their lamps stay off the status lights.
   finishing: new Set(),
   // Per item: its latest change on its way, which the next one waits for, and its latest archive or
@@ -438,6 +363,8 @@ const ui = {
   reopenedHeld: null,
   // Hand-offs whose Undo sits in Busy (`handedNotice`), while it is on offer: {at, stepId, to, timer, undo, end, drop}.
   handsHeld: new Set(),
+  // Snoozes whose Undo sits in Waiting (`snoozedNotice`), while it is on offer: {at, stepId, until, timer, undo, end}.
+  snoozesHeld: new Set(),
   // The interval that counts the held rows' seconds down (sidebar.js `tickUndo`), or null.
   undoTick: null,
   // The to-do just added, whose row the list at the left scrolls into view once (sidebar.js `showArrived`), or null:
@@ -461,9 +388,6 @@ const ui = {
   lightbox: null,
   // Where a one-finger touch on the lightbox began, for its swipe.
   lightboxTouch: null,
-  // Blocked cards past the first three show only after "+N more".
-  showAllBlocked: false,
-  showMovedPast: false,
   // The Cockpit that sent this page (UI-13): a state from another one shows the Reload button.
   version: document.querySelector('meta[name="cockpit-version"]')?.content || null,
   // Messages the user sent again: they stay in Messages' short list while they go out.
@@ -478,7 +402,7 @@ const ui = {
   // Top cards this page reported as seen (`markTopCardsSeen`); a failed report takes its card out again.
   topSeen: new Set(),
 };
-// The side column's feedback box is gone (FEEDBACK-9): words left in it carry on in the pick box.
+// The old general feedback box is gone (FEEDBACK-9): words left in it carry on in the pick box.
 if (ui.drafts.get("fb:general")) {
   ui.drafts.set("fb:pick", [ui.drafts.get("fb:pick"), ui.drafts.get("fb:general")].filter(Boolean).join("\n\n"));
 }
@@ -522,7 +446,7 @@ function saveDrafts() {
   // A blocked call's card keeps its list choice under the card, its drafts under the card and list.
   writeStored(TARGETS_KEY, [...ui.choices].filter(([key, choice]) =>
     ui.drafts.get(key) || ui.drafts.get(`${key}:${choice}`) || ui.replacing.has(`${key}:${choice}`)));
-  // A new session's picks, also for a box with no words yet; sending its words drops them (takeDraft).
+  // Model and effort choices stay with a draft, also before typing; sending drops them (takeDraft).
   writeStored(STARTS_KEY, [...ui.starts]);
   // A rule edit's target stays while its call is open: an answer sent and left by a reload that then fails puts
   // the words back, and they still change that rule.
@@ -598,7 +522,7 @@ function putBack(key, sent, choice, picks) {
   if (restoring) ui.starts.set(key, picks);
   restoreDraft(key, sent);
   restoreChoice(key, choice);
-  // An open box, such as Add, is not drawn again by render: its line shows the picks Send now uses.
+  // An open box, such as Add, is not drawn again by render: its line shows the picks a send from it uses.
   if (restoring) drawStartLines();
   return true;
 }
@@ -794,9 +718,24 @@ function jsonRequest(method, body) {
 }
 
 async function api(method, path, body) {
+  // A read of a part that keeps its reads on this device (offline.js register).
+  if (method === "GET" && window.CockpitOffline?.owns(path)) return window.CockpitOffline.read(path, () => readOnline(path));
+  if (method !== "GET" && window.CockpitOffline) {
+    const receipt = await window.CockpitOffline.write(path, body);
+    if (receipt) return receipt;
+  }
   const options = jsonRequest(method, body);
   // A read waits through a restart of Cockpit; an action is sent again until Cockpit has it (CODE-5).
   return answer(method === "GET" ? await readThroughRestart(path, options) : await sendAction(path, options, TRY_MS, null));
+}
+
+async function readOnline(path) {
+  return answer(await readThroughRestart(path, jsonRequest("GET", undefined)));
+}
+
+// An acknowledged online-only change needs a fresh base; retain any queued edits over it.
+async function apiReadFresh(path) {
+  return window.CockpitOffline?.readFresh(path, () => readOnline(path)) ?? readOnline(path);
 }
 
 // An action that carries words the user wrote in a box: `words` is {key, text}, the box's draft key and its
@@ -810,17 +749,43 @@ async function apiWritten(method, path, body, words) {
 // A Claude account's sign-in code: a credential that works once, so it is sent once from this page
 // and never kept in the browser's storage for a later try the way other actions are (CODE-5).
 async function apiCredential(path, body) {
+  requireConnection();
   const response = await fetch(path, jsonRequest("POST", body));
   return answer({ response, data: await answerJson(response) });
 }
 
-// A timer's start, sent as the action `press` with the JSON body {press}, which Cockpit does once however often
-// it arrives (actions.py): like a read, it waits through a restart of Cockpit or a connection that is not back
-// yet, and is tried again until `giveUpAt` (a `performance.now()`). `pressed`: `awayClock()` at the press (errors.js).
-async function apiStart(path, press, giveUpAt, pressed) {
+const TIMER_START_TRY_MS = 8e3;
+const TIMER_START_RETRY_MS = 500;
+
+// A second try uses the same press id, so a lost answer cannot start the timer twice.
+async function apiStart(path, press, giveUpAt) {
   const headers = { "content-type": "application/json", "x-cockpit-action": press };
   const options = { method: "POST", credentials: "same-origin", headers, body: JSON.stringify({ press }) };
-  return answer(await readWithin(path, options, giveUpAt, pressed));
+  let unconfirmed;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const remaining = giveUpAt - performance.now();
+    if (remaining <= 0) {
+      throw unconfirmed ?? Object.assign(new Error("press expired"), { timerExpired: true });
+    }
+    try { requireConnection(); } catch (error) { throw unconfirmed ?? error; }
+    let response;
+    try {
+      response = await fetch(path, { ...options, signal: AbortSignal.timeout(Math.min(TIMER_START_TRY_MS, Math.ceil(remaining))) });
+      const data = await answerJson(response);
+      if (response.status === 409 && typeof data?.detail !== "string") throw new Error("Cockpit's timer response was incomplete");
+      return answer({ response, data });
+    } catch (error) {
+      const retryable = !response || response.ok || [502, 503, 504].includes(response.status);
+      if (!retryable) {
+        if (error.cutOff || response.status >= 500 || (response.status === 409 && error.status === undefined)
+            || (unconfirmed && [401, 403].includes(response.status))) error.timerUnconfirmed = true;
+        throw error;
+      }
+      unconfirmed = Object.assign(error, { timerUnconfirmed: true });
+      if (attempt || giveUpAt - performance.now() <= TIMER_START_RETRY_MS) throw unconfirmed;
+      await new Promise((resolve) => setTimeout(resolve, TIMER_START_RETRY_MS));
+    }
+  }
 }
 
 // A timer's pause, which Cockpit applies at the time of the press, `pressedAt` (a Date.now()), whenever it
@@ -831,6 +796,7 @@ async function apiPressed(path, pressedAt, startPress) {
 
 // An image (a File or Blob) as the raw request body, with its own type as Content-Type.
 async function upload(path, blob) {
+  requireConnection();
   return answer(await sendAction(path, {
     method: "POST",
     headers: { "content-type": blob.type },
@@ -856,20 +822,24 @@ async function readState(path) {
   if (early) delete window.CockpitBoot.state;
   const options = jsonRequest("GET", undefined);
   options.headers["x-cockpit-sync"] = "1";
-  if (stateCursor) options.headers["x-cockpit-since"] = stateCursor;
+  const askedCursor = stateCursor;
+  const askedSnapshot = stateSnapshot;
+  if (askedCursor) options.headers["x-cockpit-since"] = askedCursor;
   const result = early ? await early : await readThroughRestart(path, options);
   const data = answer(result);
   const base = result.response.headers.get("x-cockpit-base");
-  if (base && (base !== stateCursor || !stateSnapshot)) {
+  if (base && (base !== askedCursor || !askedSnapshot)) {
     stateSnapshot = null;
     stateCursor = null;
     throw new Error("Cockpit sent changes for a different state; fetching the full state again");
   }
-  const next = base ? { ...stateSnapshot, ...data.changes } : data;
+  const next = base ? { ...askedSnapshot, ...data.changes } : data;
   if (base) for (const key of data.removed) delete next[key];
   // The rest of the page can apply local edits without changing this checkpoint's data.
   stateSnapshot = structuredClone(next);
   stateCursor = result.response.headers.get("x-cockpit-state");
+  // Save only the fully reconstructed state, never a delta tied to an in-memory cursor.
+  window.CockpitOffline?.save("/api/state", next).catch((error) => logError("saving the offline board", error));
   return next;
 }
 
@@ -913,7 +883,8 @@ function listHelperPages(pages) {
   }
 }
 
-async function refresh() {
+async function refresh(saved = null) {
+  if (ui.offlineCleared) return;
   if (ui.refreshing) { ui.refreshAgain = true; return; }
   ui.refreshing = true;
   const okBefore = ui.lastOk;
@@ -922,26 +893,26 @@ async function refresh() {
     const asked = ++ui.tick;
     const askedAt = Date.now();
     // A tab in the background is no sign the user is at the page (sweeper.user_seen, SWEEP-11).
-    const state = await readState(withOpened("/api/state", document.hidden ? { background: "1" } : {}));
+    const state = saved || await readState(withOpened("/api/state", document.hidden ? { background: "1" } : {}));
+    if (ui.offlineCleared) return;
     // A pending change that adds to what the state holds (time added, TRACK-7) may already be in a state
     // asked before the server confirmed it, and would then count twice: such a state is skipped. The
     // refresh after the confirmation is asked later and shows it. A change whose answer takes longer than
     // ADDS_WAIT_MS skips no more states, so one stalled request cannot hold the page still.
     const adding = (change) => change.apply.adds > Date.now() - ADDS_WAIT_MS && (change.confirmed === null || change.confirmed >= asked);
     if ([...ui.pending.values()].some(adding)) return;
-    // The top blocked card folds its rule editor when a rule already allows the call, so the rules
-    // load before the first drawing with a blocked card: it is drawn once, at its size (UI-16).
+    // Permission rules load independently so a slow settings read cannot delay the board.
     if ((state.permission_requests.length || (state.moved_past || []).length) && ui.permissions === null && !ui.permissionsError) {
-      await loadPermissions();
+      loadPermissions().then(() => safeRender()).catch((error) => logError("loading permission controls", error));
     }
     // A state asked for after the server confirmed a change already shows it. The drawing then
     // follows this state, also when nothing else in it changed.
     let dropped = false;
     for (const [key, change] of ui.pending) {
-      if (change.confirmed !== null && change.confirmed < asked) { ui.pending.delete(key); dropped = true; }
+      if (!saved && change.confirmed !== null && change.confirmed < asked) { ui.pending.delete(key); dropped = true; }
     }
-    for (const [key, change] of ui.snoozing) if (change.confirmed !== null && change.confirmed < asked) ui.snoozing.delete(key);
-    for (const [key, change] of ui.handing) if (change.confirmed !== null && change.confirmed < asked) ui.handing.delete(key);
+    for (const [key, change] of ui.snoozing) if (!saved && change.confirmed !== null && change.confirmed < asked) ui.snoozing.delete(key);
+    for (const [key, change] of ui.handing) if (!saved && change.confirmed !== null && change.confirmed < asked) ui.handing.delete(key);
     // Claude usage changes on most polls; it redraws only its own pill in the header (UI-16).
     const { now, usage, ...rest } = state;
     const fingerprint = JSON.stringify(window.cockpitPart?.boardState?.(rest) || rest);
@@ -949,6 +920,7 @@ async function refresh() {
     const usagePrint = JSON.stringify([usage, window.cockpitPart?.usageKey?.(state)]);
     const usageChanged = usagePrint !== ui.usagePrint;
     ui.state = state;
+    ui.savedState = Boolean(saved);
     noticeCodexSignIns(state);
     noticeSnoozeReads(state);
     window.cockpitPart?.notice?.(state);
@@ -957,8 +929,10 @@ async function refresh() {
     for (const id of commentDeletions.keys()) {
       if (!ui.busy.has(`page-comment:${id}`) && !state.page_comments.some((comment) => comment.id === id)) commentDeletions.delete(id);
     }
-    ui.stateAskedAt = askedAt;
-    ui.clockOffset = Date.parse(now) - Date.now();
+    if (!saved) {
+      ui.stateAskedAt = askedAt;
+      ui.clockOffset = Date.parse(now) - Date.now();
+    }
     ui.fingerprint = fingerprint;
     ui.usagePrint = usagePrint;
     const recovered = ui.error !== "";
@@ -966,8 +940,8 @@ async function refresh() {
     // Since when the page has read every state with no gap longer than ARRIVED_MS between them: a change in that time
     // happened at most one poll before the page saw it (sidebar.js `busyArrivals`).
     if (!ui.lastOk || okAt - ui.lastOk > ARRIVED_MS) ui.watchedSince = okAt.getTime();
-    ui.lastOk = okAt;
-    ui.error = "";
+    if (!saved) ui.lastOk = okAt;
+    ui.error = saved ? SAVED_PAGE_NOTE : "";
     ui.catchUpFailed = false;
     forgetSentMarks(state);
     settleUploads(state);
@@ -983,10 +957,10 @@ async function refresh() {
     } else if (changed || !fresh || ui.pendingRender || ui.actionRender
       || (dropped && drawnPrint(drawn(state)) !== ui.drawnPrint)) safeRender();
     else renderStatus();
-    if (usageChanged && usageGeneration === usageGenerationBefore) { renderUsage(state); fitHeader(); }
+    if (usageChanged && usageGeneration === usageGenerationBefore) renderUsage(state);
     // A state with nothing new to draw shows the page is current; one held back for the user's press or selection
     // is not drawn yet.
-    if (!ui.pendingRender) caughtUp(askedAt);
+    if (!saved && !ui.pendingRender) caughtUp(askedAt);
     // The banner sits above the board: it comes and goes inside a redraw, so what the user reads holds still.
     if (recovered) Motion.redraw(() => renderBanner(state), "poll");
   } catch (error) {
@@ -1009,7 +983,7 @@ async function refresh() {
     }
   } finally {
     // The first drawing is done: rules boot.js read that it did not need would be stale by the time they are.
-    window.CockpitBoot = null;
+    if (!saved) window.CockpitBoot = null;
     // The installed app's launch opens onto the page once it has drawn (UI-80).
     window.CockpitLaunch?.ready();
     ui.refreshing = false;
@@ -1042,7 +1016,7 @@ async function run(key, work, success) {
   } finally {
     ui.busy.delete(key);
     ui.actionRender = true;
-    await refresh();
+    refresh();
   }
   return done;
 }
@@ -1226,7 +1200,13 @@ function withStep(state, step, fields) {
 function applyAction(state, step, action, body) {
   const current = STEP_LISTS.flatMap((name) => state[name]).find((other) => other.id === step.id) || step;
   if (action === "done" || action === "dismiss") return withoutStep(timerStopped(state, [step.id]), step.id);
-  if (action === "snooze" && body.until !== null) return withoutStep(timerStopped(state, [step.id]), step.id);
+  if (action === "snooze" && body.until !== null) {
+    const shown = withoutStep(timerStopped(state, [step.id]), step.id);
+    // A snooze to a set time sits in Waiting at once, where its Undo is (`snoozedNotice`); one Cockpit still reads
+    // from the user's words gets its time, and its row, with the next state: its `until` only stands in meanwhile.
+    if (body.words) return shown;
+    return { ...shown, snoozed: [...shown.snoozed, { ...current, snoozed_until: body.until }] };
+  }
   if (action === "snooze") return withStep(state, current, { snoozed_until: null });
   if (action === "reopen") {
     // The closed list has only the step's title and ask; its full row comes with the next state.
@@ -1302,6 +1282,11 @@ function act(step, action, body = {}) {
     takenByUser(step.id);
     ui.leftAt.set(step.id, ui.state.now);
   }
+  // A snooze from Next up: a copy of the card glides into Waiting while the next step shows under it (`sendAway`).
+  const snoozing = action === "snooze" && body.until !== null;
+  const away = snoozing ? sendAway(step, "waiting") : null;
+  // An unsnooze ends the Undo a snooze of the step still has on offer in Waiting.
+  if (action === "snooze" && body.until === null) for (const hold of [...ui.snoozesHeld]) if (hold.stepId === step.id) hold.drop();
   const outcome = { answer: null };
   // Words in an open Add more box for this step, which the notice Take back replaces would drop (MSG-10).
   const following = action === "return" ? (document.querySelector(`#toast .toast-follow[data-step="${step.id}"] textarea`)?.value || "").trim() : "";
@@ -1335,7 +1320,8 @@ function act(step, action, body = {}) {
   }, action === "return" ? () => tookBack(step, outcome.answer, following, takenMark) : null);
   track(step.id, sent, undoing);
   if (before) holdLeave(sent);
-  actToast(step, action, body, acting, outcome);
+  if (!snoozing || !snoozedNotice(step, body, sent)) actToast(step, action, body, acting, outcome);
+  if (away) away();
   if (action === "return") {
     acting.then((done) => {
       if (done && outcome.answer && (outcome.answer.unsent || following)) document.querySelector(`textarea[data-key="${CSS.escape(draftKey)}"]`)?.focus();
@@ -1477,20 +1463,7 @@ function finished(given, step, how, said, reason) {
     const ended = { by: "user", note: said || "", at: now };
     shown.items = state.items.map((item) => (item.id === step.item_id ? { ...item, stage: "done", waiting_on: [], ball: "done", group: "done", tip: "", tip_at: null, ended } : item));
   }
-  return closedAs(recount(shown), "finished", step.item_id, true);
-}
-
-// The items the user closed in the last day (CONTROL-17), by id as the server sends them (`closed_by_user`):
-// `finished` with Task done, a closing answer or Close item, `archived` in All work. A close adds its item at
-// once and its Undo drops it; by id, a change replayed on a state that already holds it counts once, and an
-// item closed both ways counts once.
-function closedAs(state, list, itemId, add) {
-  const ids = state.closed_by_user[list].filter((id) => id !== itemId);
-  return { ...state, closed_by_user: { ...state.closed_by_user, [list]: add ? [...ids, itemId] : ids } };
-}
-
-function closedCount(state) {
-  return new Set([...state.closed_by_user.finished, ...state.closed_by_user.archived]).size;
+  return recount(shown);
 }
 
 // The item's open steps and the item as they were before the finish, for Undo.
@@ -1512,7 +1485,7 @@ function unfinished(state, before) {
   }
   if (before.item) shown.items = [...state.items.filter((item) => item.id !== before.item.id), before.item];
   shown.closed_recently = { ...state.closed_recently, items: state.closed_recently.items.filter((item) => item.id !== before.itemId) };
-  return closedAs(closedAs(recount(shown), "finished", before.itemId, false), "archived", before.itemId, false);
+  return recount(shown);
 }
 
 // An Undo's request goes after the timer presses made before it: a start on the step that took the place the close
@@ -1542,9 +1515,7 @@ function finishItem(step, how, answer, note, images, reason, words, pressed) {
   const key = `finish:${step.item_id}`;
   if (ui.busy.has(key)) return Promise.resolve(false);
   followQueue(step);
-  const title = step.item.title;
   const now = drawn(ui.state);
-  const others = itemOthers(step, now);
   const before = beforeFinish(now, step);
   closeAnimation(stepCard(step.id, pressed), pressed, how === "complete");
   for (const id of beforeIds(before)) {
@@ -1593,11 +1564,7 @@ function finishItem(step, how, answer, note, images, reason, words, pressed) {
   // A finish can wait in inTurn before it has an outbox entry, after Task done took its words from the draft.
   holdLeave(finishing);
   track(step.id, sent, false);
-  const verb = how === "complete" ? "Completed" : "Closed";
-  const steps = others ? ` and its ${plural(others + 1, "step", "steps")}` : "";
-  const first = closedWords("Closed!");
-  const tip = [`${verb}: ${title}${steps}.`, answer && `Your answer: ${answer}`, note && `Your last message: ${note}`, how === "close" && `Why: ${reason}`].filter(Boolean).join("\n");
-  // A closing answer or last message waits for this notice like a hand-off (MSG-8): it goes once the notice is gone.
+  // A closing answer or last message waits for the close's Undo like a hand-off (MSG-8): it goes once the Undo is gone.
   const mark = { id: null };
   const undo = () => {
     giveBack();
@@ -1605,58 +1572,29 @@ function finishItem(step, how, answer, note, images, reason, words, pressed) {
   };
   // Task done with no words still carries the step's page comments and choices when it has some; the release
   // does nothing when the finish told no session.
-  const shown = closedNotice(first, [step.item_id], undo, said || how === "complete" ? () => releaseHandOff(finishing, mark) : null, tip);
-  // What becomes of the session goes in the tooltip, so the notice stays its two words and Undo.
+  closedNotice([step.item_id], undo, said || how === "complete" ? () => releaseHandOff(finishing, mark) : null);
   finishing.then((done) => {
-    if (!done || !outcome.answer) return;
-    if (outcome.answer.message) mark.id = outcome.answer.message.id;
-    const end = sessionEndWords(outcome.answer.session_end);
-    if (end && shown !== null) retoast(shown, first, `${tip}\n${end}`);
+    if (done && outcome.answer?.message) mark.id = outcome.answer.message.id;
   });
   return finishing;
 }
 
-// The words of the notice after the user closes a task where the list is not shown (CONTROL-17): `head` and the
-// count of tasks the user closed in the last day, this one included (`closedCount`), counted once the close's change
-// is in.
-function closedWords(head) {
-  return `${head} (${closedCount(drawn(ui.state))} in the last 24h)`;
-}
-
-// Whether a close goes to Finished this week in the list at the left: not on the classic page, which draws no
-// list, nor on a phone's item screen, which hides it.
+// Whether a close goes to Finished this week in the list at the left: not on a phone's item screen, which hides it.
 function closeListShown() {
-  return SIDEBAR && !phoneItemScreen();
+  return !phoneItemScreen();
 }
-
-// Whether a close's, an Add's or a hand-off's Undo is held in the list (`closedNotice`, `handedNotice`, the Add):
-// on the page with the list at the left, also on a phone's item screen, whose bar's Your items holds it for the list
-// out of sight (sidebar.js `buildPhoneBar`). The classic page draws no list and shows a notice.
-const undoHeldInList = () => SIDEBAR;
 
 const phoneItemScreen = () => onPhone() && !phoneListShown();
 
-// `undo` runs on Undo; `gone`, when set, once the notice leaves without it (toast's `action.gone`). With no `undo`
-// the notice is its words alone.
-function closedToast(text, undo, gone, tip) {
-  const shown = toast(text, false, undo ? { label: "Undo", run: undo, gone } : null, tip);
-  const el = document.getElementById("toast");
-  el.classList.add("closed");
-  el.prepend(icon("check"));
-  return shown;
-}
-
-// How long a close's Undo stays in Finished this week: as long as the notice shows.
+// How long a close's Undo stays in Finished this week.
 const UNDO_CLOSE_MS = TOAST_MS;
 
-// The notice after a close, and its Undo. On the page with the list at the left, the closed tasks go to Finished this
-// week and the Undo sits there for UNDO_CLOSE_MS: on the group's heading while it is folded, as each task's row once it
-// is open (`closeHeld` in sidebar.js), and no notice shows at the foot, as Finished this week's count rolls up with the
-// close; on a phone's item screen, which hides the list, on the bar's Your items. It returns null then. The classic
-// page draws no list: there the notice shows and offers Undo, and it returns the notice's number. `itemIds`: the tasks the close ended. `gone`, when set, runs once
-// the Undo time ends without it, as the notice's would (MSG-8).
-function closedNotice(text, itemIds, undo, gone, tip) {
-  if (!undoHeldInList()) return closedToast(text, undo, gone, tip);
+// A close's Undo. The closed tasks go to Finished this week and the Undo sits there for UNDO_CLOSE_MS: on the group's
+// heading while it is folded, as each task's row once it is open (`closeHeld` in sidebar.js), and no notice shows at
+// the foot, as Finished this week's count rolls up with the close; on a phone's item screen, which hides the list, on
+// the bar's Your items. `itemIds`: the tasks the close ended. `gone`, when set, runs once the Undo time ends without
+// it (MSG-8).
+function closedNotice(itemIds, undo, gone) {
   const hold = { at: Date.now(), itemIds, timer: null };
   const release = () => {
     if (!ui.closesHeld.has(hold)) return false;
@@ -1669,24 +1607,23 @@ function closedNotice(text, itemIds, undo, gone, tip) {
   hold.timer = setTimeout(hold.end, UNDO_CLOSE_MS);
   ui.closesHeld.add(hold);
   render(false);
-  return null;
 }
 
 // A page hidden while a close's Undo is on offer ends it now, so a last message held for it goes out: a phone may
 // stop the page's timers in the background.
-// A hand-off's Undo in Busy ends the same way, so its message goes out.
+// A hand-off's Undo in Busy ends the same way, so its message goes out, and a snooze's in Waiting, which would
+// otherwise wait past its time.
 document.addEventListener("visibilitychange", () => {
   if (!document.hidden) return;
-  for (const hold of [...ui.closesHeld, ...ui.handsHeld]) hold.end();
+  for (const hold of [...ui.closesHeld, ...ui.handsHeld, ...ui.snoozesHeld]) hold.end();
 });
 
-// Close in an expanded All work row archives the item at once, with the same animation and notice as a close
-// from its step (CONTROL-17). Undo shows the row again at once; its request waits for the close's (`patchItem`).
+// Close on an item's row archives the item at once, with the same animation and Undo as a close from its step
+// (CONTROL-17). Undo shows the row again at once; its request waits for the close's (`patchItem`).
 function closeItemRow(item, pressed) {
   closeAnimation(pressed.closest(".row") || pressed, pressed, false);
   patchItem(item, { archived: true }, null);
-  closedNotice(closedWords("Closed!"), [item.id], () => patchItem(item, { archived: false }, null), null,
-    `Closed: ${item.title}. Finished this week, at the end of the list, keeps it with Unarchive.`);
+  closedNotice([item.id], () => patchItem(item, { archived: false }, null), null);
 }
 
 // Reopen on a finished task (SPEC CONTROL-33): the task goes back to Busy as the user's message would take it
@@ -1790,9 +1727,8 @@ function withoutStep(state, stepId) {
 }
 
 // Completes the ticked tasks of the step's list with one press: the close plays on `card` from the key `pressed`,
-// the step closes with them, the plum notice counts them, and one Undo for all sits in Finished this week (or on the
-// notice where the list is not shown; `closedNotice`). A task that changed
-// since the session listed it stays open, and the notice says how many did; when none closed, the step stays.
+// the step closes with them, and one Undo for all sits in Finished this week (`closedNotice`). A task that changed
+// since the session listed it stays open, and a notice says how many did; when none closed, the step stays.
 // On a finish step the card's own task closes last with them, so its steps and the item go too (`own`).
 function closeListed(step, items, card, pressed) {
   const key = `close-tasks:${step.id}`;
@@ -1832,8 +1768,7 @@ function closeListed(step, items, card, pressed) {
   const tip = `Completed ${plural(ended.length, "task", "tasks")}:\n${titles.map((title) => `- ${title}`).join("\n")}`;
   // The Undo in Finished this week covers the tasks this close ended; once the server answered, only those it closed.
   const held = ended.map((task) => task.item_id);
-  const shown = closedNotice(closedWords(`Closed ${ended.length}!`), held,
-    () => reopenTasks(befores, own, finishing, result), null, tip);
+  closedNotice(held, () => reopenTasks(befores, own, finishing, result), null);
   finishing.then((done) => {
     if (!done || !result.refused.length) return;
     const stayed = new Set(result.refused.map((entry) => entry.item_id));
@@ -1846,8 +1781,7 @@ function closeListed(step, items, card, pressed) {
       ? `Closed ${result.finished.length} of ${ended.length}! ${result.refused.length} changed and stay open`
       : `None closed: the ${plural(tasks.length, "task", "tasks")} changed and stay open`;
     const why = `${tip}\nStayed open, since they changed after the session listed them:\n${open.join("\n")}`;
-    // With no notice shown (the list at the left), the tasks that stayed open still get one.
-    if (shown === null) toast(words, false, null, why); else retoast(shown, words, why);
+    toast(words, false, null, why);
   });
   return finishing;
 }
@@ -2027,7 +1961,7 @@ function sendSecret(step, replyKey, key, name, value, target) {
 
 // The close (CONTROL-15, CONTROL-17): every close of a task plays one of eleven animations from the close lab, picked
 // at random and never the same twice in a row. The key that closed it springs back from its press while light floods
-// it, and a ring leaves it, with sparks when the task is done (`sparks`); then the card, or the All work row, goes its
+// it, and a ring leaves it, with sparks when the task is done (`sparks`); then the card, or the row, goes its
 // way: torn into paper pieces, stamped DONE, slung into the notice, burst into confetti, turned into coins, poured into
 // a portal, or, on the GPU (close-gpu.js), burnt from the key, burnt by flames climbing from the bottom, blown away as
 // dust, drained into the key or blasted apart. Copies do the moving, so the page redraws underneath at once, and the
@@ -2140,14 +2074,11 @@ function closeEnd(animation, piece) {
   animation.finished.catch(() => {}).then(() => piece.remove());
 }
 
-// Where the close is counted. On a phone's item screen, the Undo on the bar's Your items. On the page with the list at
-// the left, Finished this week: the closed task's row
-// while the group is open, its heading's count while it is folded (`closedNotice`); a group scrolled out of the
-// list's view, the list's edge on the way to it. Elsewhere the closed notice's check, once the notice shows; without
-// one, the corner it shows in. Read a frame after the press, when the notice is in: it is still lifting and growing
-// into place then, so the check's middle is mapped from the notice as drawn to the notice as laid out.
+// Where the close is counted. On a phone's item screen, the Undo on the bar's Your items. Otherwise Finished this
+// week: the closed task's row while the group is open, its heading's count while it is folded (`closedNotice`); a
+// group scrolled out of the list's view, the list's edge on the way to it. Without either, the page's lower right corner.
 function noticeMark() {
-  const bar = SIDEBAR && phoneItemScreen() && document.querySelector(".phone-items.holding > .busy-undo > .icon");
+  const bar = phoneItemScreen() && document.querySelector(".phone-items.holding > .busy-undo > .icon");
   if (bar) {
     const rect = bar.getBoundingClientRect();
     return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2, el: bar };
@@ -2174,17 +2105,7 @@ function noticeMark() {
       return { x: rect.left + rect.width / 2, y: Math.min(Math.max(y, view.top + 8), view.bottom - 8), el: inView ? el : null };
     }
   }
-  const toastEl = document.getElementById("toast");
-  const mark = !toastEl.hidden && toastEl.classList.contains("closed") ? toastEl.querySelector(":scope > .icon") : null;
-  if (!mark) return { x: innerWidth - 48, y: innerHeight - 40, el: null };
-  const rect = mark.getBoundingClientRect();
-  const drawn = toastEl.getBoundingClientRect();
-  if (!drawn.width || !drawn.height) return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2, el: mark };
-  return {
-    x: toastEl.offsetLeft + ((rect.left + rect.width / 2 - drawn.left) * toastEl.offsetWidth) / drawn.width,
-    y: toastEl.offsetTop + ((rect.top + rect.height / 2 - drawn.top) * toastEl.offsetHeight) / drawn.height,
-    el: mark,
-  };
+  return { x: innerWidth - 48, y: innerHeight - 40, el: null };
 }
 
 // The notice's check swells as something lands in it, `after` ms from now.
@@ -2716,6 +2637,13 @@ function plainText(html) {
   return h("span", { html }).textContent;
 }
 
+// A session's own one-line summary as plain words: Claude Code keeps the agent's Markdown in it, and the page
+// shows it as text, so the marks go and the words stay ("**Done:** `x`" reads "Done: x").
+function plainSummary(text) {
+  return text.replace(/\[([^\]]*)\]\([^)]*\)/g, "$1").replace(/^\s*(#+|[-*+]|\d+\.)\s+/gm, "")
+    .replace(/(\*\*|__|`)/g, "").replace(/\s+/g, " ").trim();
+}
+
 // The state with the item changed: archived items leave with their steps for the closed list, as the user's
 // close; an unarchived one leaves the closed list and, when the page has its full row, comes back.
 function withItem(state, item, fields) {
@@ -2725,14 +2653,12 @@ function withItem(state, item, fields) {
     for (const name of STEP_LISTS) shown[name] = state[name].filter((step) => step.item_id !== item.id);
     const row = { id: item.id, key: item.key, title: item.title, project: item.project, stage: item.stage, action: "archived", closed_at: new Date().toISOString(), closed_by: "user", note: "" };
     shown.closed_recently = { ...state.closed_recently, items: [row, ...state.closed_recently.items.filter((other) => other.id !== item.id)] };
-    return closedAs(recount(shown), "archived", item.id, true);
+    return recount(shown);
   }
   if (fields.archived === false) {
     const closed = { ...state.closed_recently, items: state.closed_recently.items.filter((other) => other.id !== item.id) };
     const items = "ball" in item ? [{ ...item, archived: false }, ...state.items.filter((other) => other.id !== item.id)] : state.items;
-    // Back from Close item it is open again; a completed item stays counted (store.closed_by_user).
-    const open = closedAs({ ...state, items, closed_recently: closed }, "archived", item.id, false);
-    return item.stage === "done" ? open : closedAs(open, "finished", item.id, false);
+    return { ...state, items, closed_recently: closed };
   }
   // A pin shows as the time it was pinned, kept while the item stays pinned (store.upsert_item).
   const { pinned, ...rest } = fields;
@@ -2868,14 +2794,6 @@ function forgetSentMarks(state) {
   if (changed) saveSent();
 }
 
-// On a closed row: the user wrote from this step.
-function sentMark(step) {
-  const mark = ui.sent.get(step.id);
-  if (!mark || mark.version !== stepVersion(step)) return null;
-  return h("span", { class: "sent-mark", role: "img", "aria-label": "You sent a message from this step",
-    title: `You sent to ${mark.to || "the session"}: ${clip(mark.text, 300)}`, "data-time": mark.at }, icon("send"));
-}
-
 // Send: the box empties and closes at once, the message shows under Messages as
 // sending, and the step (when it is from a step) gets a sent mark. If the server
 // refuses, the words go back into the box and the toast says why.
@@ -2985,11 +2903,10 @@ function reopenedByMessage(state, itemId) {
     ? { ...item, stage: "building", waiting_on: [], archived: 0, ball: "agents", group: "busy", tip: "", tip_at: null, why: "", ended: null }
     : item));
   const closed = { ...state.closed_recently, items: state.closed_recently.items.filter((other) => other.id !== itemId) };
-  const reopened = {
+  return {
     ...state, items, closed_recently: closed, queue: state.queue.filter(elsewhere), ready_next: state.ready_next.filter(elsewhere),
     timer: state.timer && state.timer.item_id === itemId ? null : state.timer,
   };
-  return closedAs(closedAs(reopened, "finished", itemId, false), "archived", itemId, false);
 }
 
 // What this Send does to the drawn state: only a Send that found the task finished moves it, or one right behind such a
@@ -3149,7 +3066,7 @@ function stepCard(stepId, pressed) {
   const own = pressed && pressed.closest(`[data-step="${stepId}"]`);
   if (own) return own;
   const shown = [...document.querySelectorAll(`[data-step="${stepId}"]`)].filter((el) => !el.closest(".motion-ghost, .close-copy, #toast"));
-  return shown.find((el) => el.closest("#next")) || shown.find((el) => el.closest("#queue")) || shown.find((el) => !el.closest("#sidebar")) || shown[0] || null;
+  return shown.find((el) => el.closest("#next")) || shown.find((el) => !el.closest("#sidebar")) || shown[0] || null;
 }
 
 // Where the copy of a step's ask starts its flight: the step, or what the user pressed or wrote in
@@ -3199,14 +3116,14 @@ async function choicesSaved(step) {
   await choices;
 }
 
-// Hand off: like Send, and the step leaves the user's queue at once for You handed these under With agents,
+// Hand off: like Send, and the step leaves the user's queue at once for Busy,
 // a copy of its ask flying there. If the server refuses, the step comes back and
 // `undo` (or null) puts back what else changed, and returns false when the words stay in the refusal's notice
 // (`putBack`). `images`: the box's staged images (SPEC MSG-18), which go up to the step's item first.
 function handOffStep(step, text, where, images, label, fromRect, words, undo) {
   followQueue(step);
   // Before the redraw takes Next up's card away: a copy of it leaves for Busy while the next step shows under it.
-  const away = sendAway(step);
+  const away = sendAway(step, "busy");
   const handoff = {
     session_id: where.session_id || null, new_cwd: where.new_cwd || null, text, author: "user",
     state: "queued", detail: "", created_at: new Date().toISOString(),
@@ -3277,21 +3194,20 @@ function handOffStep(step, text, where, images, label, fromRect, words, undo) {
   return handing;
 }
 
-// How long a hand-off's Undo stays in Busy: as long as the notice with Take back shows where there is no list.
+// How long a hand-off's Undo stays in Busy: as long as the notice with Take back shows when the list holds no row for it.
 const UNDO_HAND_MS = TOAST_MS;
 
-// Where a sent step goes to wait for its Undo time (MSG-8). On the page with the list at the left, the step goes to
-// Busy, and its Undo sits there for UNDO_HAND_MS: on Busy's heading while Busy is folded, as the step's row once it is
-// open (`handHeld` in sidebar.js), and on a phone's item screen, which hides the list, on the bar's Your items; no
-// notice shows. The message waits on the server until the Undo time ends (`gone`), and Undo takes the step back as
-// Take back does. The classic page draws no list: there the notice with Take back and Add more (MSG-10) shows, and
-// its number comes back; on the list page this returns null. So it does when another step of the item stays in Inbox or
-// Waiting next, or is with an agent already: the list draws each item once, by that step, so it draws no row for the
-// sent step to hold the Undo.
+// Where a sent step goes to wait for its Undo time (MSG-8). The step goes to Busy, and its Undo sits there for
+// UNDO_HAND_MS: on Busy's heading while Busy is folded, as the step's row once it is open (`handHeld` in sidebar.js),
+// and on a phone's item screen, which hides the list, on the bar's Your items; no notice shows, and this returns null.
+// The message waits on the server until the Undo time ends (`gone`), and Undo takes the step back as Take back does.
+// When another step of the item stays in Inbox or Waiting next, or is with an agent already, the list draws the item
+// by that step and has no row for the sent step to hold the Undo: then the notice with Take back and Add more (MSG-10)
+// shows, and its number comes back.
 // `sent` settles with whether Cockpit took the hand-off.
 function handedNotice(step, label, sent, gone, reopens) {
   const listed = [...ui.state.queue, ...ui.state.ready_next, ...ui.state.with_agents].some((other) => other.item_id === step.item_id && other.id !== step.id && !other.left);
-  if (!undoHeldInList() || listed) {
+  if (listed) {
     // This notice replaces the one that said the task reopened, so it says that too.
     const reopened = reopens ? `Reopened “${reopens.title}”, back in Busy. ` : "";
     return toast(`${reopened}Sent to ${label}; the step comes back only if it needs you`, false,
@@ -3328,6 +3244,38 @@ function handedNotice(step, label, sent, gone, reopens) {
   sent.then((done) => { if (!done) hold.drop(); });
   render(false);
   return null;
+}
+
+// How long a snooze's Undo stays in Waiting: as long as the notice with Undo shows when the list holds no row for it.
+const UNDO_SNOOZE_MS = TOAST_MS;
+
+// Where a snoozed step goes for its Undo time, as a sent step goes to Busy (`handedNotice`). The step goes to Waiting,
+// under Snoozed by you, and its Undo, which unsnoozes it, sits there for UNDO_SNOOZE_MS: on Waiting's heading while
+// Waiting is folded, as the step's row once it is open (`snoozeHeld` in sidebar.js), and on a phone's item screen on
+// the bar's Your items. Returns whether it holds the Undo there. When another step of the item stays in Inbox, is
+// with an agent or is snoozed too, the list may draw the item by that step and have no row for this one; and a snooze
+// Cockpit still reads from the user's words has no time, so no row, until Cockpit has read it. Then the notice at the
+// foot says the snooze, with Undo (`actToast`), and this returns false. `sent` settles with whether Cockpit took the
+// snooze; a refused one ends the Undo.
+function snoozedNotice(step, body, sent) {
+  if (body.words) return false;
+  const listed = STEP_LISTS.flatMap((name) => ui.state[name]).some((other) => other.item_id === step.item_id && other.id !== step.id && !other.left);
+  if (listed) return false;
+  const hold = { at: Date.now(), stepId: step.id, until: body.until, timer: null };
+  const release = () => {
+    if (!ui.snoozesHeld.has(hold)) return false;
+    clearTimeout(hold.timer);
+    ui.snoozesHeld.delete(hold);
+    return true;
+  };
+  hold.undo = () => act(step, "snooze", { until: null });
+  hold.drop = () => { if (release()) render(false); };
+  hold.end = hold.drop;
+  hold.timer = setTimeout(hold.end, UNDO_SNOOZE_MS);
+  ui.snoozesHeld.add(hold);
+  sent.then((done) => { if (!done) hold.drop(); });
+  render(false);
+  return true;
 }
 
 // Add more (MSG-10): while the notice with Take back shows, the user writes a follow-up for the same session.
@@ -3523,22 +3471,13 @@ function runWords(run) {
   return run.exit_code === null ? "Did not finish" : `Exit ${run.exit_code}`;
 }
 
-// The end of a run's output, for a tooltip.
-function outputTail(run) {
-  const output = run.output.trimEnd();
-  if (!output) return run.finished_at ? "It printed nothing." : "";
-  return output.length > RUN_TIP_CHARS ? `…${output.slice(-RUN_TIP_CHARS)}` : output;
-}
-
-// A copy of the step's ask flies from where the step was to its row under Busy in All work, or to that group's
-// heading when the group is closed; the count there bumps.
 // Send on Next up: the card lifts off the page and flies into Busy in the list on the left, shrinking as it goes, while the
 // step after it already stands where it was. Simpler than a close: one glide of transform and opacity. Called before
 // the redraw, it copies the card and asks motion.js to draw the next card in place (Motion.coverNext); the function
 // it returns starts the flight once the redraw drew Busy with the step in it. Null when the step is not on Next up.
 // The copy narrows to the card's top, the ask, and lands as a strip on the step's row in Busy, or on Busy's heading
-// while Busy is folded, which then lights up.
-function sendAway(step) {
+// while Busy is folded, which then lights up. A snooze sends the card the same way to Waiting (`group`).
+function sendAway(step, group) {
   const card = document.querySelector(`#next > [data-step="${step.id}"]:not(.motion-ghost)`);
   const from = card && card.getBoundingClientRect();
   if (!from || !from.width || from.bottom <= 0 || from.top >= innerHeight) return null;
@@ -3547,13 +3486,13 @@ function sendAway(step) {
   Object.assign(sheet.style, { left: `${from.left}px`, top: `${from.top}px`, width: `${from.width}px`, height: `${from.height}px` });
   document.body.append(sheet);
   Motion.coverNext();
-  // Busy's place for the step: its row while Busy is open, else its heading. A folded Busy still draws the row while
-  // it glides there from Inbox, so only an open Busy's row is a place.
+  // The group's place for the step: its row while the group is open, else its heading. A folded group still draws the
+  // row while it glides there from Inbox, so only an open group's row is a place.
   const busyPlace = () => {
-    const group = document.querySelector("#sidebar .sidebar-group.busy");
-    const row = group && group.open && group.querySelector(`li[data-step="${step.id}"]`);
-    const target = row && row.getBoundingClientRect().height ? row : group && group.querySelector(":scope > summary");
-    return { target, count: group && group.querySelector(".group-count") };
+    const shown = document.querySelector(`#sidebar .sidebar-group.${group}`);
+    const row = shown && shown.open && shown.querySelector(`li[data-step="${step.id}"]`);
+    const target = row && row.getBoundingClientRect().height ? row : shown && shown.querySelector(":scope > summary");
+    return { target, count: shown && shown.querySelector(".group-count") };
   };
   return () => {
     const { target } = busyPlace();
@@ -3719,7 +3658,7 @@ function sendFeedback(key, body, reopen) {
 // of a step's history is a part of its own, so a session's reply there keeps that session (FEEDBACK-8). The
 // Add box and the header are parts too, so Wider from the Add box's text steps out to the box, then the
 // header, before the whole page.
-const PICKABLE = "input, textarea, select, button, a, summary, iframe, .answers, .step-keys, .actions, .chip, .count, .rank, .row-age, h1, h2, h3, p, li, .hist-line, .hint, .row, .card, .side-row, .draft, details, section, .counts, .usage, .sweep-status, .add-inner, #header, .banner, .banner-area, aside, .rail-top, .rail-search, .rail-foot, .key-tray, [data-tip], [data-time]";
+const PICKABLE = "input, textarea, select, button, a, summary, iframe, .answers, .step-keys, .actions, .chip, .count, .rank, .row-age, h1, h2, h3, p, li, .hist-line, .hint, .row, .card, .side-row, .draft, details, section, .counts, .usage, .add-inner, #header, .banner, .banner-area, aside, .rail-top, .rail-search, .rail-foot, .key-tray, [data-tip], [data-time]";
 const PICK_KEY = "fb:pick";
 let hovered = null;
 
@@ -4100,14 +4039,6 @@ function pickPreview(pick, width) {
   return pick.quote ? h("blockquote", { class: "pick-quote", text: clip(pick.quote, 300) }) : null;
 }
 
-// Update shows "starting…" at once; the redraw after the request takes it off again.
-function fullSweep() {
-  const started = run("update", () => api("POST", "/api/sweeps/run"));
-  if (ui.state) renderSweep(ui.state);
-  ui.pendingRender = true;
-  return started;
-}
-
 // Whether Update is out of reach: it is starting, or a sweep or check runs.
 function updateBlocked(state) {
   return ui.busy.has("update") || Boolean(state && (state.sweep_running || state.checking));
@@ -4123,7 +4054,6 @@ function update() {
   toast(press.sweep ? "Your queue is empty, so a full sweep started" : `Checking your top ${plural(top.length, "step", "steps")} against live state`);
   const started = run("update", async () => { press.messageId = (await api("POST", "/api/update")).id; });
   started.then((ok) => { if (!ok && ui.updateRun === press) ui.updateRun = null; });
-  if (ui.state) renderSweep(ui.state);
   ui.pendingRender = true;
   return started;
 }
@@ -4153,12 +4083,6 @@ function updateFinished(state) {
     return;
   }
   toast(`Your top ${plural(launch.step_ids.length, "step is", "steps are")} checked against live state`);
-}
-
-// How long something under way has run: "under a minute", "4 min", "2 h".
-function runningFor(iso) {
-  const minutes = Math.floor(Math.max(0, Date.now() - new Date(iso).getTime()) / 60e3);
-  return minutes < 1 ? "under a minute" : span(minutes);
 }
 
 // Toast
@@ -4383,6 +4307,19 @@ function sessionLabel(session, cwd) {
   return repo ? `a session in ${repo}` : "a session";
 }
 
+// A model's name as the start options show it ("Opus 5.5", "GPT-6.2 Sol"), else its id. Claude Code may add a suffix
+// such as "[1m]" to the id, so an id that starts with an offered model's counts as that model.
+function modelLabel(state, id) {
+  const offered = Object.values((state && state.session_options) || {}).flatMap((choices) => choices.models);
+  const model = offered.find((each) => id === each.name || id.startsWith(`${each.name}[`) || id.startsWith(`${each.name}-2`));
+  return model ? model.label : id;
+}
+
+function sessionModelLabel(state, session) {
+  if (session.model) return modelLabel(state, session.model);
+  return `${session.provider === "codex" ? "Codex" : "Claude"} (model unknown)`;
+}
+
 // A session's name as a span, led by the session's mark (UI-25): its dot, in the colour of its state.
 // A session without a name keeps its id in the tooltip.
 function sessionName(session, sessionId, cwd, cls) {
@@ -4430,10 +4367,10 @@ function pressTarget(step) {
 // shows the session in the user's tmux, in the window it opened for that session before or a new one, and a
 // stopped session resumes. A touch screen has no iTerm2, so the page leaves the link out there, and so does a
 // session Cockpit took off `claude agents` (removals.py): a message resumes it. The click's toast says the two
-// confirmations still to come, and its tooltip holds the command. On the page with the list of items (VIEW-26) the
-// key shows the session's conversation in the page instead; that view keeps the iTerm2 link.
+// confirmations still to come, and its tooltip holds the command. A session with an id shows its conversation in the
+// page instead (VIEW-26); that view keeps the iTerm2 link.
 function itermLink(session, props, ...children) {
-  if (SIDEBAR && session.session_id) return sessionViewButton(session, props, ...children);
+  if (session.session_id) return sessionViewButton(session, props, ...children);
   return itermAnchor(session, props, ...children);
 }
 
@@ -4451,10 +4388,6 @@ function itermAnchor(session, props, ...children) {
 function actorWords(actor) {
   if (actor === "user") return "you";
   return (actor || "").replace(/^agent:/, "");
-}
-
-function isNew(step) {
-  return Boolean(ui.seenBefore) && (step.queued_at || step.created_at) > ui.seenBefore;
 }
 
 function stageChip(stage) {
@@ -4859,10 +4792,6 @@ function earlyChip(step) {
   return step.early ? h("span", { class: "chip early", title: EARLY_TITLE }, icon("hourglass"), h("span", { class: "chip-words", text: "Early look" })) : null;
 }
 
-function earlyMark(step) {
-  return step.early ? h("span", { class: "quick-mark early-mark", role: "img", "aria-label": "Early look", title: EARLY_TITLE }, icon("hourglass")) : null;
-}
-
 // "45 s", "6 min", "1 h 12 min": how long the user read a card.
 function readWords(seconds) {
   // Non-breaking spaces keep a number with its unit on a narrow screen.
@@ -4929,50 +4858,10 @@ function mergedBanner(item) {
         ]))));
 }
 
-// The merge on a closed queue row: the joining arrows after its title, in the merge pink.
-function mergedMark(item) {
-  if (!item || !item.merges.length) return null;
-  const words = `Merged in: ${item.merges.map((merge) => merge.from_title).join(", ")}`;
-  return h("span", { class: "quick-mark merged-mark", role: "img", "aria-label": words, title: words }, icon("joined"));
-}
-
 // A quick decision: a bolt before the ask, and after a queue row's title.
 function quickMark(step) {
   if (!step.reasons.some((reason) => /^quick decision$/i.test(reason))) return null;
   return h("span", { class: "quick-mark", role: "img", "aria-label": "Quick decision", title: "Quick decision" }, icon("bolt"));
-}
-
-// How big the user's part of a step is (the bar's height) and how much of the user's time on its item is behind
-// them (the fill, left to right), as the step's session judged them (SPEC NEXT-35); no bar while either is unset.
-// Once enough estimates are checked against the user's timer, the fill takes off their typical lead
-// (ui.state.progress_correction). A press opens Your time, lower on the page, where both estimates are checked.
-function sizeBar(step) {
-  if (!step.size || step.progress === null) return null;
-  const correction = ui.state && ui.state.progress_correction;
-  const shown = correction ? Math.min(100, Math.max(0, step.progress - correction.median_gap)) : step.progress;
-  const words = `Your part: ${step.size}, ${shown}% behind you`;
-  const fill = h("span", { class: "size-fill" });
-  fill.style.width = `${shown}%`;
-  if (SIDEBAR) return h("span", { class: `size-bar size-${step.size}`, role: "img", "aria-label": words, title: words }, h("span", { class: "size-track" }, fill));
-  return h("a", { class: `size-bar size-${step.size}`, href: "#home/time", "aria-label": `${words}. How accurate these estimates are`,
-    title: words, onclick: (event) => { event.preventDefault(); event.stopPropagation(); openEstimates(); } },
-  h("span", { class: "size-track" }, fill));
-}
-
-// Your time, lower on the page, open at the checks of the size and progress estimates (SPEC NEXT-35): renderTime scrolls
-// to them once the report is in.
-function openEstimates() {
-  ui.open.add("time");
-  ui.closed.delete("time");
-  ui.toEstimates = true;
-  scrollToId("time");
-  if (ui.time === null && !ui.timeError) loadTime();
-  else renderTime();
-}
-
-// New since the user last looked: a small amber dot.
-function newDot(step) {
-  return isNew(step) ? h("span", { class: "new-dot", role: "img", "aria-label": "New", title: "New" }) : null;
 }
 
 function rankTitle(step) {
@@ -5146,6 +5035,100 @@ function startOptions(key, saved) {
   return holder;
 }
 
+// Existing conversations keep their choices with the draft until Send, bound to that conversation.
+function turnPicks(key, session) {
+  const stored = ui.starts.get(key);
+  if (stored?.session_id === session.session_id) return stored;
+  const current = session.settings || {};
+  return { session_id: session.session_id, provider: current.provider || session.provider || "claude",
+    model: current.model || session.model || null, effort: current.effort || session.effort || null,
+    speed: current.speed || null };
+}
+
+function turnCapacity(state, picks, session) {
+  const current = session.settings || {};
+  const model = state.session_options?.[picks.provider]?.models.find((model) => model.name === picks.model);
+  const ownProvider = picks.provider === (current.provider || session.provider);
+  const ownModel = ownProvider && picks.model === (current.model || session.model);
+  const capacity = ownModel && current.capacity && current.capacity.state !== "unknown" ? current.capacity
+    : ownProvider && current.model_capacity?.[picks.model] ? current.model_capacity[picks.model] : model?.capacity;
+  if (!capacity || !["limited", "low"].includes(capacity.state)) return null;
+  if (capacity.resets_at && new Date(capacity.resets_at).getTime() <= Date.now()) return null;
+  return capacity;
+}
+
+function turnOptions(key, currentSession, changed) {
+  const holder = h("div", { class: "start-options turn-options" });
+  const effortLabel = (effort) => effort === "xhigh" ? "Extra high" : effort ? capitalize(effort) : "Default effort";
+  const draw = () => {
+    const session = currentSession();
+    if (!session || session.standing) { holder.replaceChildren(); return; }
+    const picks = turnPicks(key, session);
+    const offered = ui.state.session_options || {};
+    const choices = offered[picks.provider];
+    if (!choices) { holder.replaceChildren(); return; }
+    const set = (next, field) => {
+      ui.starts.set(key, { ...next, session_id: session.session_id });
+      saveDrafts();
+      draw();
+      changed();
+      holder.querySelector(`[data-turn-pick="${field}"] > summary`)?.focus();
+    };
+    const menu = (field, label, mark, words, contents) => {
+      const menuKey = `turn:${key}:${field}`;
+      const el = h("details", { class: "menu start-pick", "data-turn-pick": field });
+      el.open = ui.open.has(menuKey);
+      rememberOpen(el, (open) => { if (open) ui.open.add(menuKey); else ui.open.delete(menuKey); });
+      const close = () => { ui.open.delete(menuKey); el.open = false; };
+      const list = h("div", { class: "menu-list", role: "menu", "aria-label": label }, contents(close));
+      el.append(h("summary", { class: "start-button", "aria-label": `${label}: ${words}` },
+        mark, h("span", { class: "start-words", text: words }), icon("chevron")), list);
+      el.addEventListener("keydown", (event) => {
+        if (event.key === "Escape" && el.open) {
+          event.preventDefault(); event.stopPropagation(); close(); el.querySelector("summary").focus(); return;
+        }
+        if (!el.open || !["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
+        const entries = [...list.querySelectorAll("button")];
+        if (!entries.length) return;
+        event.preventDefault(); event.stopPropagation();
+        const at = entries.indexOf(document.activeElement);
+        const next = event.key === "Home" ? 0 : event.key === "End" ? entries.length - 1
+          : event.key === "ArrowDown" ? (at + 1) % entries.length : (at <= 0 ? entries.length : at) - 1;
+        entries[next].focus();
+      });
+      return el;
+    };
+    const option = (words, selected, capacity, onclick) => h("button", { type: "button", role: "menuitemradio",
+      "aria-checked": String(selected), class: [selected && "picked", capacity && `capacity-${capacity.state}`].filter(Boolean).join(" "), onclick },
+      h("span", { class: "menu-label", text: words }),
+      capacity && h("small", { class: "turn-capacity-state", text: capacity.state === "limited" ? "Unavailable"
+        : capacity.remaining_percent !== null ? `${Math.round(capacity.remaining_percent)}% left` : "Nearly full" }),
+      selected && icon("check"));
+    const modelName = picks.model ? modelLabel(ui.state, picks.model) : "Current model";
+    const models = menu("model", "Model", icon(picks.provider), modelName, (close) => Object.entries(offered).map(([provider, each]) =>
+      h("div", { class: "turn-model-group", role: "group", "aria-label": provider === "codex" ? "Codex" : "Claude" },
+        h("p", { class: "menu-note", text: provider === "codex" ? "Codex" : "Claude" }),
+        each.models.map((model) => option(model.label, provider === picks.provider && model.name === picks.model,
+          turnCapacity(ui.state, { provider, model: model.name }, session), () => {
+          close();
+          const speeds = model.speeds || [];
+          set({ ...picks, provider, model: model.name,
+            effort: each.efforts.includes(picks.effort) ? picks.effort : each.effort,
+            speed: speeds.some((speed) => speed.name === picks.speed) ? picks.speed : speeds[0]?.name || null }, "model");
+        })))));
+    const efforts = menu("effort", "Effort", picks.effort ? icon(`effort-${EFFORTS.indexOf(picks.effort) + 1}`) : null,
+      effortLabel(picks.effort), (close) => choices.efforts.map((effort) => option(effortLabel(effort), effort === picks.effort, null, () => {
+        close(); set({ ...picks, effort }, "effort");
+      })));
+    const capacity = turnCapacity(ui.state, picks, session);
+    models.querySelector("summary").classList.toggle("capacity-warning", Boolean(capacity));
+    holder.replaceChildren(models, efforts);
+  };
+  holder.draw = draw;
+  draw();
+  return holder;
+}
+
 // The composer: one text box, the target shown and changeable (a step's reply box has none: it goes to the step's
 // session, or starts a new one). Option values name the target itself ("session:<id>", "new:<checkout>"), and typing
 // binds the draft to the target shown, so a redraw that changes the default target keeps an unsent draft addressed
@@ -5190,7 +5173,7 @@ function composer(key, { session, context, project, step, handOff, toSession }) 
   }
   if (!options.length) return h("p", { class: "note", text: "Add a checkout to start a session" });
   const fallback = session ? `session:${session.session_id}` : `new:${defaultCheckout(project, state)}`;
-  // A step's reply box shows no picker and no start line (SPEC SESSION-22): its words go to the step's own session, or
+  // A step keeps its target fixed (SPEC SESSION-22); model and effort choices sit beside Send. Its words go to its session, or
   // with none start a new session in the project's checkout with the item's picks from Add, else Cockpit's defaults.
   // The item card's and the session view's boxes on the sidebar page show none while they have a session. Every
   // other box picks where the words go, or which checkout a new session starts in and with what.
@@ -5198,7 +5181,7 @@ function composer(key, { session, context, project, step, handOff, toSession }) 
   if (fixed) {
     // A choice or picks kept from before give way to the box's one target, also in what Send records.
     if (stored && stored !== fallback) ui.choices.set(key, fallback);
-    ui.starts.delete(key);
+    if (!session) ui.starts.delete(key);
   }
   const choice = !fixed && options.some(([value]) => value === stored) ? stored : fallback;
   const select = h("select", { "data-key": `${key}:to`, "aria-label": "To", onchange: () => { ui.choices.set(key, select.value); saveDrafts(); } },
@@ -5208,6 +5191,14 @@ function composer(key, { session, context, project, step, handOff, toSession }) 
   // A to-do's first session starts with what the user picked on Add, shown here until changed (SPEC SESSION-22).
   const saved = (context.item_id && state.items.find((item) => item.id === context.item_id)?.start_options) || null;
   const starting = startOptions(key, saved);
+  const currentSession = () => {
+    if (!select.value.startsWith("session:")) return null;
+    const id = select.value.slice("session:".length);
+    return sessionMap(ui.state).get(id) || sessions.get(id) || (session?.session_id === id ? session : { session_id: id, provider: "claude" });
+  };
+  const turning = turnOptions(key, currentSession, () => explain());
+  const turnHint = h("p", { class: "turn-hint", hidden: true });
+  const capacityHint = h("p", { class: "turn-capacity fail-text", hidden: true, role: "status" });
   const name = () => select.selectedOptions[0].dataset.name;
   // The step's reply hint says what kind of answer it expects (NEXT-51); it is a placeholder, never a draft.
   const hint = step ? step.reply_hint || "Reply…" : "Message…";
@@ -5217,13 +5208,34 @@ function composer(key, { session, context, project, step, handOff, toSession }) 
   const box = h("div", { class: "composer inline-send" });
   const where = () => {
     const picked = select.value;
-    if (picked.startsWith("session:")) return { session_id: picked.slice("session:".length) };
+    if (picked.startsWith("session:")) {
+      const id = picked.slice("session:".length);
+      if (currentSession()?.standing) return { session_id: id };
+      const picks = ui.starts.get(key);
+      return picks?.session_id === id
+        ? Object.fromEntries(Object.entries(picks).filter(([, value]) => value !== null))
+        : { session_id: id };
+    }
     const picks = startPicks(key, saved);
     // The start names its agent and the picks the line shows, also the item's own from Add, so Cockpit starts
     // exactly those and does not fill in the item's picks itself (store.create_message).
     return { new_cwd: select.selectedOptions[0].dataset.cwd, ...picks, provider: picks.provider || ui.state.default_provider || "claude" };
   };
-  const send = () => (handOff ? handOffDraft(key, step, where(), name()) : sendMessage(key, context, where(), name(), step));
+  const send = () => {
+    const target = where();
+    const source = currentSession();
+    const follow = source && target.provider && target.provider !== (source.settings?.provider || source.provider)
+      && typeof sessionView !== "undefined" && sessionView.id === target.session_id && key === sessionKey();
+    const followTurn = follow ? sessionView.turn : null;
+    const sent = handOff ? handOffDraft(key, step, target, name()) : sendMessage(key, context, target, name(), step);
+    if (follow && sent) Promise.resolve(sent).then((went) => {
+      if (went && sessionView.id === target.session_id && sessionView.turn === followTurn) {
+        sessionView.followFrom = target.session_id;
+        followSessionHandover();
+      }
+    });
+    return sent;
+  };
   const comments = handOff ? stepPageComments(step, state) : [];
   const choices = handOff ? stepPageChoices(step, state) : [];
   const carried = comments.length + choices.length;
@@ -5300,6 +5312,27 @@ function composer(key, { session, context, project, step, handOff, toSession }) 
   const explain = () => {
     const option = select.selectedOptions[0];
     const fresh = select.value.startsWith("new:");
+    const source = currentSession();
+    const configurable = Boolean(source && !source.standing);
+    turning.hidden = !configurable;
+    box.classList.toggle("with-turn-options", configurable);
+    if (!turning.contains(document.activeElement)) turning.draw();
+    const nextProvider = source && turnPicks(key, source).provider;
+    turnHint.hidden = !configurable || nextProvider === (source.settings?.provider || source.provider || "claude");
+    turnHint.textContent = turnHint.hidden ? "" : `Continues in ${nextProvider === "codex" ? "Codex" : "Claude"}`;
+    const picks = configurable ? turnPicks(key, source) : null;
+    const capacity = picks && turnCapacity(ui.state, picks, source);
+    turning.querySelector('[data-turn-pick="model"] > summary')?.classList.toggle("capacity-warning", Boolean(capacity));
+    box.classList.toggle("has-capacity-warning", Boolean(capacity));
+    box.classList.toggle("has-turn-choice", Boolean(configurable && ui.starts.get(key)?.session_id === source.session_id));
+    capacityHint.hidden = !capacity;
+    if (capacity) {
+      const model = picks.model ? modelLabel(ui.state, picks.model) : "This model";
+      const reset = capacity.resets_at ? ` Resets ${when(new Date(capacity.resets_at))}.` : "";
+      const words = capacity.state === "limited" ? `${model} is unavailable now.${reset} Choose another model, or wait.`
+        : `${model} is nearly out of capacity${capacity.remaining_percent !== null ? ` (${Math.round(capacity.remaining_percent)}% left)` : ""}.${reset}`;
+      capacityHint.replaceChildren(icon("alert"), h("span", { text: words }));
+    }
     select.title = `To ${name()}: ${option.dataset.status}`;
     starting.hidden = !fresh;
     // The buttons show only for a new session and once the box has words (an empty box drawn after Send too).
@@ -5326,12 +5359,19 @@ function composer(key, { session, context, project, step, handOff, toSession }) 
     ...(fixed ? [] : [h("div", { class: "composer-target" }, session && stateDot(session.alive ? "working" : session.state, null), select, starting)]),
     staged,
     composerField(area, send),
-    h("div", { class: "composer-foot" }, h("div", { class: "send-split" }, sendButton, ways)),
+    turnHint,
+    capacityHint,
+    h("div", { class: "composer-foot" }, turning, h("div", { class: "send-split" }, sendButton, ways)),
     picker);
+  box.refreshTurn = explain;
   // Nothing shows under the box about a message sent from it: Messages and the handed row say how it is doing, and the
   // sweeper resends one that failed.
   return box;
 }
+
+document.addEventListener("cockpit:redraw", () => {
+  for (const box of document.querySelectorAll(".composer.with-turn-options")) box.refreshTurn?.();
+});
 
 // While a page shows beside the step's card (page-overlay.js), the comments and choices the user leaves on it show open
 // above the card's reply box, which sends them.
@@ -5378,17 +5418,11 @@ function deletePageComment(comment) {
   }, null);
   commentDeletions.set(comment.id, { stepId: comment.step_id, sent });
   // A refused deletion stays until Delete is tried again or refresh finds the comment gone.
-  sent.then((done) => { if (done && commentDeletions.get(comment.id)?.sent === sent) commentDeletions.delete(comment.id); });
+  sent.then((done) => {
+    const absent = !ui.savedState && ui.state?.page_comments && !ui.state.page_comments.some((entry) => entry.id === comment.id);
+    if ((done || absent) && commentDeletions.get(comment.id)?.sent === sent) commentDeletions.delete(comment.id);
+  });
   return sent;
-}
-
-// A delivery state as a mark: a dot while it goes out, a green check once delivered,
-// a red dot when it did not arrive. `detail`: the server's delivery note, for the tooltip.
-function deliveryMark(delivery, detail) {
-  const words = MESSAGE_STATES[delivery] || delivery;
-  const title = delivery === "sent" ? words : [words, detail].filter(Boolean).join("\n");
-  if (delivery === "sent") return h("span", { class: "delivered", role: "img", "aria-label": words, title }, icon("check"));
-  return h("span", { class: `state-dot ${delivery}`, role: "img", "aria-label": words, title });
 }
 
 // Inline comments (NEXT-33): words the user selects in a step get a Comment button under them. It quotes
@@ -5457,10 +5491,8 @@ function quoteIntoReply({ text, key }) {
 // A draft longer than this folds to its first lines, with "Show whole draft".
 const DRAFT_FOLD_LINES = 6;
 const DRAFT_FOLD_CHARS = 480;
-// How much of a run's output a You handed these row shows on hover.
-const RUN_TIP_CHARS = 1500;
 
-// The item of a step as All work lists it (with its images), or null.
+// The item of a step as the state lists it (with its images), or null.
 function stepItem(step, state) {
   return state.items.find((other) => other.id === step.item_id) || null;
 }
@@ -5549,7 +5581,7 @@ function stepBody(step, state, group) {
   const about = aboutStep(step, group, isNext && isTop(step, state) ? checkWords(step, state) : null, ready);
   // A snoozed step the user picked in the sidebar is the card, with no queue row above it to show its ask.
   // The card heads with the task's name and the ask as its short line under it (NEXT-49, UI-68).
-  const headed = isNext || (SIDEBAR && (group === "snoozed" || working));
+  const headed = isNext || group === "snoozed" || working;
   // The task's title ends in its marks, each a small picture: Cockpit's key on Cockpit's own work, the
   // pencil while the reply box holds an unsent draft. The title is the card's heading, or the head's line on a row.
   const titleMarks = [cockpitChip(item.project), !step.left && draftMark(step, isNext)];
@@ -5610,14 +5642,21 @@ function stepBody(step, state, group) {
         "data-key": isNext ? "E" : null, onclick: () => act(step, "done"),
       }, icon("archive"), h("span", { class: "label", text: "Archive session" }))
       : iconButton("check", "Done", { class: "button", "data-key": isNext ? "E" : null, onclick: () => act(step, "done") });
+  // The step's marks, Updated and the ⋯ menu. On a headed card they end the heading's line, so the card's top
+  // holds no row for them alone; on a row they end the item's line.
+  const marks = h("span", { class: "context-marks" }, isNext && updatedMark(step, true),
+    live && stepMenu(step, state, { group, about, full, closeOpen, secretKey, secretOpen }));
+  // The marks come before the heading so that on a phone, floated right, only the heading's first line gives way to
+  // them (look.css); the wider layout shows them after it.
+  if (headed) ask[0] = h("div", { class: "destination-heading" }, marks, ask[0]);
+  const place = stepOf(step, state);
   return [
     expiryBanner(step),
-    h("div", { class: "step-context" },
+    (!headed || place || tags.length > 0) && h("div", { class: "step-context" },
       !headed && h("span", { class: "title-line" }, h("span", { class: "item-title", title: item.title, text: item.title }), titleMarks),
-      stepOf(step, state),
+      place,
       h("span", { class: "context-tags" }, tags),
-      h("span", { class: "context-marks" }, isNext && updatedMark(step, true),
-        live && stepMenu(step, state, { group, about, full, closeOpen, secretKey, secretOpen }))),
+      !headed && marks),
     ask,
     changedBanner(step, full),
     mergedBanner(full),
@@ -5722,12 +5761,16 @@ function stepMenu(step, state, { group, about, full, closeOpen, secretKey, secre
   const known = sessionMap(state);
   const sessions = ids.map((id) => {
     const session = known.get(id) || (id === own ? step.target : { session_id: id });
-    const doing = capitalize((session.state && AGENT_DOING[sessionState(session)]) || (session.alive ? "live" : "stopped"));
+    const phase = session.state ? sessionState(session) : null;
+    const doing = capitalize(phase === "idle" && (session.busy_with || []).length ? `idle, waits on ${session.busy_with.join(", ")}`
+      : (phase && AGENT_DOING[phase]) || (session.alive ? "live" : "stopped"));
+    // The model leads; its state stays beneath it, where the conversation opens.
     const small = h("small", { text: doing });
-    const words = [sessionMark(session), h("span", { class: "menu-two" }, h("span", { class: "menu-name", text: sessionLabel(session, "") }), small)];
+    const words = [sessionMark(session), h("span", { class: "menu-two" },
+      h("span", { class: "menu-name", text: sessionModelLabel(state, session) }), small)];
     const opens = itermLink(session, { class: "menu-session", role: "menuitem" }, words);
     if (!opens) return h("p", { class: "menu-note menu-session" }, words);
-    small.textContent = `${doing} · ${opens.tagName === "A" ? "open it in iTerm2" : "open the conversation"}`;
+    small.textContent = `${doing} · ${opens.tagName === "A" ? "open in iTerm2" : "open conversation"}`;
     opens.addEventListener("click", close);
     return opens;
   });
@@ -5864,18 +5907,19 @@ function openSnoozeWords(title, note, words, snooze) {
 // How long a snooze in words lasts while Cockpit reads the words.
 const SNOOZE_READ_MINUTES = 30;
 
-// Snoozes typed in words this page sent, by target ("step:ID", "warning:KEY"): the words, and the id of the read the
-// target had before, so the page tells the outcome of its own read only, once. Acting on the target again drops it.
+// Snoozes typed in words this page sent, by target ("step:ID", "warning:KEY"): the words, the id of the read the
+// target had before, so the page tells the outcome of its own read only, once, and the warnings snoozed with it
+// (`joined`, see snoozeWarning). Acting on the target again drops it.
 const wordReads = new Map();
 
 function snoozeStepInWords(step, until, words) {
-  noteWordRead(`step:${step.id}`, words);
+  noteWordRead(`step:${step.id}`, words, []);
   return act(step, "snooze", { until, words });
 }
 
-function noteWordRead(target, words) {
+function noteWordRead(target, words, joined) {
   const before = (ui.state.snooze_reads || {})[target];
-  wordReads.set(target, { words: words.text, before: before ? before.id : null });
+  wordReads.set(target, { words: words.text, before: before ? before.id : null, joined });
 }
 
 // Tells how Cockpit read the words of a snooze this page sent, once the read is done: the time it moved the snooze
@@ -5888,10 +5932,12 @@ function noticeSnoozeReads(state) {
     wordReads.delete(target);
     const [kind, name] = [target.slice(0, target.indexOf(":")), target.slice(target.indexOf(":") + 1)];
     const step = kind === "step" ? STEP_LISTS.flatMap((list) => state[list]).find((other) => String(other.id) === name) : null;
-    const warning = kind === "warning" ? allWarnings(state).find((other) => other.key === name) : null;
+    // Once snoozed, a joined card shows as its parts, so the warning takes back the parts it was sent with.
+    const found = kind === "warning" ? allWarnings(state).find((other) => other.key === name) : null;
+    const warning = found && { ...found, joined: sent.joined };
     const tip = `You typed “${entry.words}”`;
     if (entry.status === "read") {
-      const undo = step ? () => act(step, "snooze", { until: null }) : warning ? () => setWarningSnooze(warning, null, null) : null;
+      const undo = step ? () => act(step, "snooze", { until: null }) : warning ? () => clearWarningSnooze(warning) : null;
       toast(`Snoozed until ${when(new Date(entry.until))}`, false, undo && { label: "Undo", run: undo }, tip);
     } else {
       const again = step ? () => openSnoozeWords(step.item.title, null, entry.words, (until, words) => snoozeStepInWords(step, until, words))
@@ -6138,20 +6184,53 @@ function fitFigure(frame) {
 // A frame drawn anew loads its page anew, so a chart would go blank on each redraw. Before a section is
 // redrawn, its figure frames move aside, still loaded (moveBefore keeps a frame's page as it is), and after the
 // redraw each takes the place of a new frame for the same page; a new frame with none to take its place loads.
+// Images keep their loaded pixels and intrinsic dimensions through the same redraw.
 const figurePark = h("div", { hidden: true });
 
 function parkFigures(ids) {
   if (!figurePark.isConnected) document.body.append(figurePark);
-  if (!figurePark.moveBefore) return;
   for (const id of ids) {
-    for (const frame of document.getElementById(id).querySelectorAll("iframe.figure-frame")) figurePark.moveBefore(frame, null);
+    const section = document.getElementById(id);
+    const images = [...section.querySelectorAll("img.figure-image")]
+      .filter((image) => !image.closest(".motion-ghost"))
+      .map((image) => {
+        const { width, height } = getComputedStyle(image);
+        return { image, width, height };
+      });
+    for (const { image, width, height } of images) {
+      // Motion may keep the old card for its fade; leave its image and layout in place.
+      const copy = image.cloneNode();
+      Object.assign(copy.style, { width, height });
+      image.replaceWith(copy);
+      figurePark.append(image);
+    }
+    if (figurePark.moveBefore) {
+      for (const frame of section.querySelectorAll("iframe.figure-frame")) figurePark.moveBefore(frame, null);
+    }
   }
 }
 
 function placeFigures() {
+  const images = new Map([...figurePark.querySelectorAll("img.figure-image")]
+    .filter((image) => image.complete && image.naturalWidth).map((image) => [image.getAttribute("src"), image]));
+  for (const image of document.querySelectorAll("img.figure-image")) {
+    if (image.closest(".motion-ghost") || figurePark.contains(image)) continue;
+    const src = image.getAttribute("src");
+    const id = Number(src?.match(/^\/item-images\/(\d+)$/)?.[1]);
+    const parked = images.get(src);
+    const loaded = parked?.complete && parked.naturalWidth ? parked : warmImages.get(id);
+    if (loaded?.complete && loaded.naturalWidth) {
+      // Place loaded images only after the card is drawn; prose also builds paragraphs used only for their text.
+      for (const { name, value } of image.attributes) if (name !== "src") loaded.setAttribute(name, value);
+      loaded.onclick = image.onclick;
+      image.replaceWith(loaded);
+      images.delete(src);
+      warmImages.delete(id);
+    }
+  }
   const parked = new Map();
   // A frame loaded ahead for a step about to show (`warmNext`) serves too, once its frames are parked and kept.
-  const kept = figurePark.moveBefore ? [...figurePark.children, ...figureWarm.querySelectorAll("iframe.figure-frame")] : [];
+  const kept = figurePark.moveBefore ? [...figurePark.querySelectorAll("iframe.figure-frame"), ...figureWarm.querySelectorAll("iframe.figure-frame")] : [];
   for (const frame of kept) parked.set(figureAddress(frame), [...(parked.get(figureAddress(frame)) || []), frame]);
   for (const frame of document.querySelectorAll("iframe.figure-frame[data-src]")) {
     const kept = (parked.get(frame.dataset.src) || []).shift();
@@ -6226,7 +6305,7 @@ function prose(key, cls, html) {
     fitFigure(frame);
   });
   el.querySelectorAll("img.figure-image").forEach((image) => {
-    image.addEventListener("click", (event) => { event.stopPropagation(); openLightbox(image.getAttribute("src"), image); });
+    image.onclick = (event) => { event.stopPropagation(); openLightbox(event.currentTarget.getAttribute("src"), event.currentTarget); };
   });
   el.querySelectorAll("details").forEach((fold, index) => {
     const id = `${key}:fold:${index}`;
@@ -6456,12 +6535,9 @@ function clockClass(step) {
   return step.timer.started_at ? " on-clock" : " paused-clock";
 }
 
-// A press on a phone that just woke often comes before its connection is back: the press shows at once and is sent
-// again until Cockpit has it. Presses reach Cockpit in the order the user made them, each as its own action, so a later
-// press is neither dropped nor overtaken by an earlier one still waiting for the connection. Cockpit starts a timer
-// when the start arrives, so a start it has not started sending within TIMER_PRESS_MS of being made is given up: it
-// goes back on the page, and the user sees that it failed, with Start now to start it afresh. A try already on its way
-// when that time is up runs to its end. A pause is never given up: it tells Cockpit how long ago it was pressed, and
+// Presses show at once and go to Cockpit in order. A start can try twice online and must go within TIMER_PRESS_MS
+// of the press. An unsent start expires and offers Start now. A pause is never given up: it tells Cockpit how long
+// ago it was pressed, and
 // Cockpit stops the span that ran at the press, and no timer started since on another page. Behind this page's start of
 // the step it names that start, whose span then stops too when the start landed after the press, also when its answer
 // was lost. A pause that fails all the same (Cockpit refused it) offers to pause again, as the timer may still run.
@@ -6474,13 +6550,13 @@ const TIMER_PRESS_MS = 60e3;
 function sendTimer(stepId, running, own = true) {
   const at = Date.now();
   const giveUpAt = performance.now() + TIMER_PRESS_MS;
-  const awayAtPress = awayClock();
   const action = running ? "start" : "pause";
-  return run(`timer:${stepId}:${action}:${++ui.timerPresses}`, async () => {
+  const sequence = ++ui.timerPresses;
+  return run(`timer:${stepId}:${action}:${sequence}`, async () => {
     const path = `/api/steps/${stepId}/timer/${action}`;
-    const press = crypto.randomUUID();
+    const press = running ? `t-${ui.timerPage ??= crypto.randomUUID().replaceAll("-", "")}-${sequence}-${stepId}` : null;
     const before = ui.timerSent;
-    const sent = before.then((last) => running ? apiStart(path, press, giveUpAt, awayAtPress)
+    const sent = before.then((last) => running ? apiStart(path, press, giveUpAt)
       : apiPressed(path, at, last && last.stepId === stepId ? last.press : null));
     // A pause that failed leaves the start before it as the one a next pause names.
     const pressed = running ? { stepId, press } : null;
@@ -6491,20 +6567,13 @@ function sendTimer(stepId, running, own = true) {
       await optimistic((state) => timedState(state, stepId, running, at),
         () => sent.catch((error) => { if (error.status !== 409 || error.cutOff) throw error; }), null, own);
     } catch (error) {
-      // A start given up because the page was asleep, offline or in the background for most of TIMER_PRESS_MS: the
-      // toast says which ("hidden" for the background) and for how long, in words short enough for its two lines in the
-      // side column, explains on hover, and offers to start the timer now. It is not logged as a page error (errors.js,
-      // `pageAway`).
-      if (running && error.pageAway) {
-        // One unbroken length: "3h 26m" does not split across the toast's lines.
-        const away = (error.awaySeconds < 60 ? `${error.awaySeconds} s` : durationWords(error.awaySeconds)).replace(/ /g, "\u00a0");
-        const where = error.offline ? "offline" : "in the background";
-        throw Object.assign(new Error(`Timer not started: ${error.offline ? "offline" : "hidden"} ${away}`, { cause: error }), {
-          tip: `You pressed Start, then this page was ${where} or your device asleep for ${away}, so Cockpit never got the press.`,
+      if (running && error.timerExpired) {
+        throw Object.assign(refused("Timer not started", error), {
+          tip: "The press expired before it was sent.",
           retry: { label: "Start now", run: () => setTimer(stepId, true) },
         });
       }
-      if (running) throw refused("Timer not started", error);
+      if (running) throw refused(error.timerUnconfirmed ? "Timer start not confirmed" : "Timer not started", error);
       throw Object.assign(refused("Timer not paused", error), { retry: { label: "Pause", run: () => setTimer(stepId, false) } });
     }
   });
@@ -6647,7 +6716,7 @@ function loadActivityNotes(menuEl) {
   }
 }
 
-// An item's time on its All work row, ticking while one of its steps' timers runs; it opens the time's
+// An item's time on its row, ticking while one of its steps' timers runs; it opens the time's
 // correction (TRACK-4) without opening the row.
 function timeChip(item) {
   const spent = item.time_spent;
@@ -6884,7 +6953,7 @@ function gapSeen(gap) {
 // Each second: the question shows while Cockpit holds one, the veil follows the time without activity, and the step
 // on the card starts.
 function checkIdle() {
-  const shown = ui.state && drawn(ui.state);
+  const shown = ui.state && drawn(idleState());
   if (!shown) return;
   // Input before the first state: the stretch before its first input is measured now, and the one after its last
   // below, both before the input is let go, which counts as activity from then on.
@@ -6990,20 +7059,23 @@ function noteSeen() {
 }
 
 // The timer stops at the start of the stretch (`ui.gap`) and the page asks how to go on. A page in the background
-// polls nothing, so it first needs a state asked after it saw the stretch, for input another page reported in it
-// (`input.last`; this page reports none while the stretch waits): the user may have been working there. Until one
-// came, each check asks for it; a refresh already on its way was asked too early, and one that fails leaves the
-// stretch waiting. The stop names the `input.count` the stretch was measured by, not the newer state's, and Cockpit
-// refuses it when input, a start or an answer came since: a page whose clock runs ahead cannot tell those from its
-// stretch by their times.
+// polls nothing, so it first needs Cockpit's timer, input and question as they were after it saw the stretch, for
+// input another page reported in it (`input.last`; this page reports none while the stretch waits): the user may have
+// been working there. The quick `/api/timer` answers them in a fraction of the state's time, which can take a minute
+// on a busy host while the veil stays over the page; a state asked after the stretch serves too. Until one came, each
+// check asks for both; a refresh already on its way was asked too early, and one that fails leaves the stretch
+// waiting. The stop names the `input.count` the stretch was measured by, not the newer answer's, and Cockpit refuses
+// it when input, a start or an answer came since: a page whose clock runs ahead cannot tell those from its stretch by
+// their times.
 function askIdle() {
   const gap = ui.gap;
-  if (ui.stateAskedAt < gap.at) {
+  if (Math.max(ui.stateAskedAt, ui.timerCheck ? ui.timerCheck.askedAt : 0) < gap.at) {
     if (!ui.refreshing) refresh();
+    checkTimer();
     return;
   }
   ui.gap = null;
-  const shown = drawn(ui.state);
+  const shown = drawn(idleState());
   const timer = shown.timer;
   const since = timer && Math.max(gap.since, shown.input.last ? Date.parse(shown.input.last) : 0);
   // A timer started in the stretch (Return on another page) has activity in it.
@@ -7015,6 +7087,32 @@ function askIdle() {
   // An input ended the stretch when it was what measured it (the `cockpit:input` listener).
   const back = ui.back && ui.back.at >= gap.at ? ui.back : null;
   ui.idleStop = stopIdle(timer, since, gapSeen(gap), Boolean(back) && !asksHere(since, back.before, back.at));
+}
+
+// Asks the quick `/api/timer` for the stretch waiting in `ui.gap`, one at a time, and measures the stretch by its
+// answer as soon as it comes.
+async function checkTimer() {
+  if (ui.checkingTimer) return;
+  ui.checkingTimer = true;
+  const askedAt = Date.now();
+  try {
+    ui.timerCheck = { askedAt, answer: await api("GET", "/api/timer") };
+  } catch (error) {
+    // The state asked beside it measures the stretch then, and the next second's check asks again.
+    console.warn("Cockpit's quick check of the timer failed:", error);
+    return;
+  } finally {
+    ui.checkingTimer = false;
+  }
+  if (ui.gap) checkIdle();
+}
+
+// The state the idle flow reads: the server's, with the quick `/api/timer` answer over its timer, input and question
+// until a state asked after it came. A question another page asked then shows at once, and a timer stopped elsewhere
+// measures no new stretch.
+function idleState() {
+  const check = ui.timerCheck;
+  return check && check.askedAt > ui.stateAskedAt ? { ...ui.state, ...check.answer } : ui.state;
 }
 
 // The timer stops at `since` (ms), and the question shows at once; once Cockpit answers, the box carries the
@@ -7117,7 +7215,7 @@ async function answerIdle(away, add, pressed) {
   if (!question) return;
   // The timer runs on with its step in sight, as Continue brings it back: the phone's back gesture may have shown
   // the list behind the question (TRACK-8).
-  if (pressed && SIDEBAR) selectItem(away.item_id);
+  if (pressed) selectItem(away.item_id);
   let leftOut = null;
   const answered = await run(`away:${away.step_id}`, async () => {
     // The box goes with the press, as the timer shows running at once. A refused answer leaves the question in
@@ -7177,7 +7275,7 @@ function startOpened(shown) {
   // again once the card has stopped showing it, or the user's next move to a view (sidebar.js) ends the hold.
   if (onCard !== ui.leftStepId) ui.leftStepId = null;
   // While Next up waits to be current (UI-60), its card may be a step that already went.
-  if (shown.timer || ui.picking || document.hidden || !document.hasFocus() || catchingUp("next")) return;
+  if (ui.savedState || !navigator.onLine || shown.timer || ui.picking || document.hidden || !document.hasFocus() || catchingUp("next")) return;
   if (Date.now() - ui.lastInput >= START_INPUT_MS) return;
   if (onCard === null) return;
   const id = onCard;
@@ -7208,7 +7306,7 @@ addEventListener("cockpit:input", (event) => {
     event.preventDefault();
     return;
   }
-  const shown = drawn(ui.state);
+  const shown = drawn(idleState());
   const timer = !shown.away && shown.timer;
   if (timer && !ui.gap && now - lastActivity(shown) >= AWAY_MS) ui.gap = idleGap(shown, now);
   ui.lastInput = now;
@@ -7256,7 +7354,7 @@ function noteAside(event) {
 }
 function noteMoved() {
   if (document.visibilityState !== "visible" || !ui.state) return;
-  const shown = drawn(ui.state);
+  const shown = drawn(idleState());
   if (shown.away || !shown.timer || ui.gap || ui.stopping) return;
   if (Date.now() - lastActivity(shown) >= AWAY_MS) return;
   noteSeen();
@@ -7350,16 +7448,14 @@ function leftNote(step) {
 // scores clearly above a step the user opened, so it would have taken that place. A press puts this step in its
 // ranked place and Next up shows the highest-ranked step (pausing this step's timer if it runs); with a step waiting,
 // the press takes that step to the top instead (Take it).
-function reorderButton(step, state, isNext) {
+function reorderButton(step, state) {
   if (step.left) return null;
-  // On the sidebar page a waiting warning comes next, so the arrows on Next up turn red for it (SPEC UI-52). They
-  // pulse for a warning that came after the step came up, and name the newest first; a change of order under the
-  // step since then shows the Resorted key instead of the still red arrows of warnings that were already there.
-  if (SIDEBAR && isNext) {
-    const { fresh, older } = warningsSince(step, warningList(state));
-    if (fresh.length) return warningKey([...fresh, ...older], true);
-    if (older.length && !movedUnder(step, state)) return warningKey(older, false);
-  }
+  // A waiting warning comes next, so the arrows on Next up turn red for it (SPEC UI-52). They pulse for a warning
+  // that came after the step came up, and name the newest first; a change of order under the step since then shows
+  // the Resorted key instead of the still red arrows of warnings that were already there.
+  const { fresh, older } = warningsSince(step, warningList(state));
+  if (fresh.length) return warningKey([...fresh, ...older], true);
+  if (older.length && !movedUnder(step, state)) return warningKey(older, false);
   if (!movedUnder(step, state)) return null;
   const waiting = keptOut(state);
   const first = waiting || state.queue[0];
@@ -7371,9 +7467,9 @@ function reorderButton(step, state, isNext) {
   const props = { class: "button small ghost reorder resorted",
     onclick: (event) => { event.stopPropagation(); if (waiting) takeStep(waiting); else reorder(step); } };
   const key = iconButton("sort", words, props);
-  // On Next up it sits on the card's top edge, before the card in #next, and stays in sight below the header
-  // while any of the card shows.
-  return isNext ? h("div", { class: "resorted-pin" }, key) : key;
+  // It sits on the card's top edge, before the card in #next, and stays in sight below the header while any of the
+  // card shows.
+  return h("div", { class: "resorted-pin" }, key);
 }
 
 // Whether the Resorted key shows on the step: the user holds it, and the queue's order changed under it or a step
@@ -7493,14 +7589,6 @@ function askHold(stepId, placedHere) {
   });
 }
 
-// Take it (NEXT-36), on a ready-next row: the step takes a place now, first in the queue.
-function takeButton(step) {
-  return h("button", { class: "button small take", type: "button", "aria-keyshortcuts": "t",
-    title: "To the top of your queue now (key T)",
-    onclick: (event) => { event.stopPropagation(); takeStep(step); } },
-  icon("up"), h("span", { class: "label", text: "Take it" }));
-}
-
 // The user chose the step for the top, so steps held in their places give them up, also one whose timer runs
 // (NEXT-16 holds a step against agents' changes, not against the user's own choice). With the drawn order
 // forgotten too, `placeSteps` holds a running step at its new place in the server's order.
@@ -7526,10 +7614,10 @@ function takeBack(step) {
   render(false);
 }
 
-// Take it and Take back put the step on the sidebar page's card unless the card shows another item, so a timer on
+// Take it and Take back put the step on the card unless the card shows another item, so a timer on
 // another step stops as it does when the user shows another item (TRACK-8, leaveTimedStep), and the step starts its own.
 function leaveTimerFor(step) {
-  if (!SIDEBAR || (ui.selItem !== null && ui.selItem !== step.item_id)) return;
+  if (ui.selItem !== null && ui.selItem !== step.item_id) return;
   const timer = ui.state && drawn(ui.state).timer;
   if (timer && timer.step_id !== step.id) leaveTimedStep(timer);
 }
@@ -7619,25 +7707,7 @@ function scrollToId(id) {
   document.getElementById(id).scrollIntoView({ behavior: "smooth" });
 }
 
-// The failed messages, in the work list's Your latest message view; the list when none is drawn.
-function openFailures() {
-  // The page with the list of items at its left has no list of work: /classic opens them.
-  if (SIDEBAR) { location.assign("/classic#board/failed"); return; }
-  showMessages();
-  const first = document.querySelector("#work .msg.failed");
-  for (let group = first?.closest("details"); group; group = group.parentElement.closest("details")) group.open = true;
-  (first || document.getElementById("work")).scrollIntoView({ behavior: "smooth", block: "center" });
-}
-
-// The work list sorted by the user's latest message, each row with the messages it got; a search filter would
-// hide them, so it goes.
-function showMessages() {
-  writeStored("cockpit:work-sort", "messages");
-  dropFind();
-  render(false);
-}
-
-// The header shows no counts (UI-26): the queue, the status strip and Blocked already say what waits and who works. A
+// The header shows no counts (UI-26): the list on the left and Next up already say what waits and who works. A
 // failed message or a blocked call goes to the sweeper first, and what needs the user comes as a step (MSG-5).
 function renderCounts(state) {
   // The Briefing tab's light: a morning briefing the user has not opened yet (SPEC VIEW-8). A phone
@@ -7656,29 +7726,6 @@ function renderCounts(state) {
   document.getElementById("feedback-mode").title = feedback > 0
     ? `Feedback: ${feedback} not picked up yet`
     : "Feedback: pick a part of the page, then add a to-do about it";
-}
-
-// Above 1000 px the tabs, the timer, the usage and the keys share one line. When they do not fit there, the
-// header makes room in steps until they do (style.css, "tight-"): the usage wells shorten, then four tabs
-// move into the brand menu. At 1000 px and below the brand, the tabs and the keys share the first line; when
-// the keys would wrap to a line of their own (a zoomed-in screen, UI-5), the four tabs move into the brand
-// menu instead.
-// Each fit starts from the full header, so a wider window gives the room back.
-const WIDE_HEADER = window.matchMedia("(min-width: 1001px)");
-const TIGHT_STEPS = ["tight-usage", "tight-tabs"];
-function fitHeader() {
-  // The page with the rail has no top bar (sidebar.js).
-  if (SIDEBAR) return;
-  const inner = document.querySelector(".top-inner");
-  inner.classList.remove(...TIGHT_STEPS);
-  if (!WIDE_HEADER.matches) {
-    if (inner.querySelector(".top-right").offsetTop > inner.querySelector(".brand-menu").offsetTop) inner.classList.add("tight-tabs");
-    return;
-  }
-  for (const step of TIGHT_STEPS) {
-    if (inner.scrollWidth <= inner.clientWidth) return;
-    inner.classList.add(step);
-  }
 }
 
 // Claude usage (SPEC UI-12, UI-37): one line per signed-in Claude account, in the same order on every poll, with no
@@ -8264,8 +8311,7 @@ function codexSignInAsked(state, key) {
 // The hover card's Sign in again, there while the account still works: the warning with Start opens first.
 function prepareCodexSignIn(folder) {
   codexPrepared.add(folder);
-  if (SIDEBAR) openWarning(codexSignInKey(folder));
-  else render(false);
+  openWarning(codexSignInKey(folder));
 }
 
 // A sign-in that finished since the last state: which account the folder held before and holds now. A mismatch also
@@ -8311,7 +8357,7 @@ function startClaudeSignIn(account) {
 }
 
 // Signing in on the page (SPEC UI-40, UI-53): once the sign-in page's link is known, the warning it belongs to
-// takes the code itself, on the card where it opens (the sidebar page's Next up, the classic page's banner), with no
+// takes the code itself, on the card where it opens on Next up, with no
 // dialog over the page. `ui.signIn` is the one sign-in waiting: its warning's `key`, the page's `url` and name, the
 // field's `label`, `send(code)`, which resolves to the words that say it signed in, and the `code` typed so far, which a redraw puts
 // back and which never goes to the browser's storage, being a credential that works once. Only the sign-in pressed
@@ -8334,8 +8380,7 @@ function startSignIn(key) {
 
 function waitForCode({ key, url, page, label, send }) {
   ui.signIn = { key, url, page, label, send, code: "", sending: false };
-  if (SIDEBAR) openWarning(key);
-  else render(false);
+  openWarning(key);
   focusSignInCode();
 }
 
@@ -8401,36 +8446,6 @@ async function sendSignInCode(signIn) {
   refresh();
 }
 
-// The last sweep, full or light (its summary starts "Full:" or "Light:"): `hint` beside "Full sweep
-// now", `line` for the tooltips, `detail` for the sweep menu's tooltip, `time` for the exact time, and
-// whether it failed.
-function sweepInfo(state) {
-  const sweep = state.last_sweep;
-  if (state.sweep_running) {
-    const since = clock(sweep.started_at);
-    return { hint: `since ${since}`, line: `A sweep is running since ${since}`, detail: `Started by ${actorWords(sweep.by)}`, time: sweep.started_at, failed: false };
-  }
-  if (sweep && sweep.error) {
-    return { hint: `failed ${age(sweep.finished_at)}`, line: `The last sweep failed ${ago(sweep.finished_at)}`, detail: sweep.error, time: sweep.finished_at, failed: true };
-  }
-  if (sweep && sweep.finished_at) {
-    return { hint: age(sweep.finished_at), line: `Last sweep ${ago(sweep.finished_at)}`, detail: sweep.summary || "", time: sweep.finished_at, failed: false };
-  }
-  if (sweep) {
-    return { hint: "stopped", line: "The last sweep stopped without finishing", detail: `Started ${clock(sweep.started_at)} by ${actorWords(sweep.by)}`, time: sweep.started_at, failed: true };
-  }
-  return { hint: "none yet", line: "No sweep yet", detail: "", time: null, failed: false };
-}
-
-// The slowest sweep of each kind over the last week, as one line (SPEC SWEEP-16, UI-46): "Slowest in 7 days:
-// full 9 min, light 5 min". `cockpit patterns` gives the counts and medians.
-function sweepTimesWords(state) {
-  const span = (seconds) => seconds < 60 ? `${seconds} s` : `${Math.round(seconds / 60)} min`;
-  const kinds = [["full", "full"], ["light", "light"], ["fill", "quick"], ["reorder", "reorder"]].filter(([kind]) => state.sweep_times[kind]);
-  if (!kinds.length) return "";
-  return `Slowest in ${state.sweep_time_days} days: ${kinds.map(([kind, name]) => `${name} ${span(state.sweep_times[kind].slowest_seconds)}`).join(", ")}`;
-}
-
 // Whether the sweeper checks this step: it is among the first places of the user's queue.
 function isTop(step, state) {
   return state.queue.slice(0, state.check_top).some((top) => top.id === step.id);
@@ -8441,26 +8456,6 @@ function checkedTitle(step) {
   return `Checked ${ago(step.checked_at)} by ${actorWords(step.checked_by)}${step.check_note ? `: ${step.check_note}` : ""}`;
 }
 
-// When a top step was last checked against live state, as a mark: a quiet check within the check
-// interval, a clock once a check is overdue, a blue square while one runs, and no mark before the
-// first check. The hover says when, by whom and what was checked; `ready`, what the agent made ready, or "".
-// Next up's info mark says when too.
-function checkedMark(step, state, ready) {
-  const checking = Boolean(state.checking && state.checking.step_ids.includes(step.id));
-  const checkedAge = step.checked_at ? Date.now() - new Date(step.checked_at).getTime() : null;
-  const kind = checking ? "checking" : checkedAge === null ? "none" : checkedAge < state.check_every_minutes * 60e3 ? "fresh" : "stale";
-  if (kind === "none") return null;
-  const words = checking ? "Checking now" : kind === "stale" ? `Check overdue: checked ${ago(step.checked_at)}` : `Checked ${ago(step.checked_at)}`;
-  const title = [
-    checking ? "Checking now" : kind === "stale" ? "Check overdue" : null,
-    !checking && checkedTitle(step),
-    kind === "stale" && `A check is due every ${state.check_every_minutes} min`,
-    ready && `Ready: ${ready}`,
-  ].filter(Boolean).join("\n");
-  return h("span", { class: `checked ${kind}`, role: "img", "aria-label": words, title, "data-time": step.checked_at || null },
-    kind === "fresh" ? icon("check") : kind === "stale" ? icon("clock") : null);
-}
-
 // When a top step was last checked, in words for the step's ⋯ menu: "Checking now", "Check overdue: …" or "Checked …".
 function checkWords(step, state) {
   if (state.checking && state.checking.step_ids.includes(step.id)) return "Checking now";
@@ -8469,58 +8464,16 @@ function checkWords(step, state) {
   return overdue ? `Check overdue: ${checkedTitle(step).replace(/^C/, "c")}` : checkedTitle(step);
 }
 
-// Update is an icon with a dot for how fresh the check of the top steps is; its hover is short: what it
-// does and where the check stands, how long a running one has run (SPEC SWEEP-6). The menu beside it runs
-// a full sweep and says when the last sweep, full or light, ran. A failed sweep turns that menu red.
-// Sweeps stopped while the user was away show as one button, Restart sweeps (SPEC SWEEP-11): in a "Sweeps paused"
-// line above the rail's foot, as an icon in the top bar on /classic. Writing on Cockpit starts them again too.
+// Sweeps stopped while the user was away show as one button, Restart sweeps (SPEC SWEEP-11), in a "Sweeps paused"
+// line above the rail's foot (sidebar.js). Writing on Cockpit starts them again too.
 function renderSweep(state) {
   const resume = document.getElementById("resume-sweeps");
   resume.hidden = !state.sweeps_paused;
   resume.disabled = ui.busy.has("resume");
   resume.title = state.sweeps_paused ? `Restart sweeps: they stopped at ${clock(state.sweeps_paused.at)} while you were away` : "";
   const pausedLine = document.getElementById("sweeps-paused");
-  if (pausedLine) {
-    pausedLine.hidden = !state.sweeps_paused;
-    pausedLine.title = state.sweeps_paused ? `Sweeps stopped at ${clock(state.sweeps_paused.at)} while you were away` : "";
-  }
-  const sweep = sweepInfo(state);
-  const starting = ui.busy.has("update");
-  const blocked = updateBlocked(state);
-  const sweepMenu = menu("menu:sweep", icon("chevron"), [[[icon("radar"), "Full sweep now"], sweep.hint, fullSweep]], "sweep");
-  const summary = sweepMenu.querySelector("summary");
-  summary.className = `button sweep-summary${sweep.failed ? " fail" : ""}`;
-  summary.setAttribute("aria-label", "Full sweep");
-  // A failed sweep's error is the one detail worth a line; a finished sweep's own summary is the sweeper's shorthand.
-  summary.title = [sweep.line, sweep.failed ? clip(sweep.detail, 60) : "", sweepTimesWords(state)].filter(Boolean).join("\n");
-  if (sweep.time) summary.dataset.time = sweep.time;
-  const entry = sweepMenu.querySelector(".menu-list button");
-  entry.disabled = blocked;
-  if (sweep.failed) entry.querySelector(".when").classList.add("fail-text");
-  fill("sweep-status", sweepMenu);
-
-  const top = state.queue.slice(0, state.check_top);
-  const checks = top.map((step) => step.checked_at).filter(Boolean).sort();
-  const checked = top.length > 0 && checks.length === top.length;
-  // The lamp bar on Update: blue while busy, green while the top steps' oldest check is within the
-  // check interval, unlit after it or when one of them was never checked.
-  let sub;
-  let dotKind;
-  if (starting) { sub = "Starting"; dotKind = "busy"; }
-  else if (state.sweep_running) { sub = `A sweep has run for ${runningFor(state.last_sweep.started_at)}`; dotKind = "busy"; }
-  else if (state.checking) { sub = `Checking the top steps: ${runningFor(state.checking.since)} so far`; dotKind = "busy"; }
-  else if (!top.length) { sub = "Your queue is empty: Update runs a full sweep"; dotKind = "none"; }
-  else if (!checked) { sub = "Not all top steps are checked yet"; dotKind = "none"; }
-  else {
-    const fresh = Date.now() - new Date(checks[0]).getTime() < state.check_every_minutes * 60e3;
-    sub = `Top steps checked ${ago(checks[0])}`;
-    dotKind = fresh ? "fresh" : "stale";
-  }
-  const button = document.getElementById("update");
-  button.disabled = blocked;
-  button.classList.toggle("busy", blocked);
-  document.getElementById("update-sub").className = `update-sub ${dotKind}`;
-  button.title = sub;
+  pausedLine.hidden = !state.sweeps_paused;
+  pausedLine.title = state.sweeps_paused ? `Sweeps stopped at ${clock(state.sweeps_paused.at)} while you were away` : "";
   updateFinished(state);
 }
 
@@ -8533,6 +8486,22 @@ function wrongModelWarning(wrong) {
   const name = wrong.name.length > 60 ? `${wrong.name.slice(0, 59)}…` : wrong.name;
   const calls = wrong.calls === 1 ? "1 call" : `${wrong.calls} calls`;
   const key = `wrong-model:${wrong.session_id}:${wrong.model}`;
+  // A model that is not Claude's is the fallback while the hub has no Claude (SPEC SESSION-20): amber,
+  // as nothing in the session went wrong, and with nothing to investigate.
+  if (!wrong.claude) {
+    const model = modelLabel(ui.state, wrong.model);
+    return {
+      key, tone: "soon", mark: "alert", tip: `Session ${wrong.session_id}, from ${when(new Date(wrong.first))}`,
+      short: wrong.back ? `“${name}” ran on ${model} for a while` : `“${name}” runs on ${model}`,
+      title: `Session “${name}” ran on ${model} in place of Claude: ${calls}, the last at ${when(new Date(wrong.last))}. `
+        + "A session moves to another model when the model hub cannot reach Claude.",
+      more: wrong.back ? `It is back on ${modelLabel(ui.state, wrong.latest)}.` : "It moves back to Claude once the hub reaches Claude again.",
+      fix: null,
+      close: { title: "Stays closed while the session stays on this model", busy: ui.busy.has(key), confirm: true,
+        onclick: (event) => dismissWrongModel(wrong, event.currentTarget) },
+      extra: null,
+    };
+  }
   return {
     key, tone: "fail", mark: "alert", tip: `Session ${wrong.session_id}, from ${when(new Date(wrong.first))}`,
     short: `“${name}” ran on ${wrong.model}`,
@@ -8540,8 +8509,8 @@ function wrongModelWarning(wrong) {
     more: wrong.back ? `It is back on ${intended}.` : `/model ${intended} in that session moves it back.`,
     fix: { words: ui.busy.has(key) ? "Starting…" : "Investigate", busy: ui.busy.has(key),
       onclick: () => investigateWrongModel(wrong) },
-    close: { title: "Stays closed while the session stays on this model", busy: ui.busy.has(key),
-      onclick: () => dismissWrongModel(wrong) },
+    close: { title: "Stays closed while the session stays on this model", busy: ui.busy.has(key), confirm: true,
+      onclick: (event) => dismissWrongModel(wrong, event.currentTarget) },
     extra: null,
   };
 }
@@ -8582,32 +8551,39 @@ function markTopCardsSeen(state) {
   }
 }
 
-// The close on a wrong-model banner: Cockpit keeps it, so every tab and device drops the banner while the session
-// stays on that model (SPEC SESSION-20).
-function dismissWrongModel(wrong) {
-  return run(`wrong-model:${wrong.session_id}:${wrong.model}`, async () => {
-    await api("POST", "/api/wrong-models/dismiss", { session_id: wrong.session_id, model: wrong.model });
-    // By session and model, since a poll that landed meanwhile replaced the rows.
-    ui.state.wrong_models = ui.state.wrong_models.filter((row) => row.session_id !== wrong.session_id || row.model !== wrong.model);
-    render(false);
-  });
+// The state without a wrong-model banner, by session and model, so a poll that lands meanwhile cannot bring it back.
+function withoutWrongModel(wrong) {
+  return (state) => ({ ...state, wrong_models: state.wrong_models.filter((row) => row.session_id !== wrong.session_id || row.model !== wrong.model) });
+}
+
+// The close on a wrong-model banner, the plum close key (CONTROL-17): the close plays from the key `pressed` and the
+// banner goes on the press, as a step's close does. Cockpit keeps the close, so every tab and device drops the banner
+// while the session stays on that model (SPEC SESSION-20); a refusal brings it back with the reason.
+function dismissWrongModel(wrong, pressed) {
+  const key = `wrong-model:${wrong.session_id}:${wrong.model}`;
+  if (ui.busy.has(key)) return Promise.resolve(false);
+  closeAnimation(pressed?.closest("[data-warning]") || null, pressed, true);
+  dropWarning(key);
+  return run(key, () => optimistic(withoutWrongModel(wrong),
+    () => api("POST", "/api/wrong-models/dismiss", { session_id: wrong.session_id, model: wrong.model })));
 }
 
 // Investigate on a wrong-model banner: Cockpit adds a to-do that asks a new session in Cockpit's checkout why that
-// session changed model, and closes the banner, as the to-do now follows it (SPEC SESSION-20).
+// session changed model, and closes the banner on the press, as the to-do now follows it (SPEC SESSION-20).
 function investigateWrongModel(wrong) {
-  return run(`wrong-model:${wrong.session_id}:${wrong.model}`, async () => {
-    const item = await api("POST", "/api/wrong-models/investigate", { session_id: wrong.session_id, model: wrong.model });
-    // By session and model, since a poll that landed meanwhile replaced the rows.
-    ui.state.wrong_models = ui.state.wrong_models.filter((row) => row.session_id !== wrong.session_id || row.model !== wrong.model);
-    render(false);
+  const key = `wrong-model:${wrong.session_id}:${wrong.model}`;
+  if (ui.busy.has(key)) return Promise.resolve(false);
+  dropWarning(key);
+  return run(key, async () => {
+    const item = await optimistic(withoutWrongModel(wrong),
+      () => api("POST", "/api/wrong-models/investigate", { session_id: wrong.session_id, model: wrong.model }));
     toast("A new session is investigating", false, { label: "Open", run: () => openAdded(item.id) });
   });
 }
 
 // What is broken now or needs seeing to soon, red before amber (SPEC UI-52), each as one description that the page
-// draws in its places: on the sidebar page a row in Your queue, the card on Next up and the small card under the
-// current step's change-order arrows; on the classic page a card at the top. `key` names it while it lasts, `short`
+// draws in its places: a row in Your queue, the card on Next up and the small card under the current step's
+// change-order arrows. `key` names it while it lasts, `short`
 // is the few words a row and the small card show, `tip` its hover text, `fix` the button that fixes it, `close` how it closes
 // (null for one that goes only once fixed), `extra` what goes under its words. Red is something broken now, amber something to see to soon.
 // A top card comes first, as what the user should do now.
@@ -8742,7 +8718,7 @@ function warningMenu(warning) {
 function openWarningSnoozeWords(warning, words) {
   openSnoozeWords(warning.short, warning.noun ? `The ${warning.noun} moves to Waiting until then.` : `The warning moves to Waiting until then. ${warning.more || "The problem stays until it is fixed."}`,
     words, (until, typed) => {
-      noteWordRead(`warning:${warning.key}`, typed);
+      noteWordRead(`warning:${warning.key}`, typed, warning.joined || []);
       snoozeWarning(warning, until, `while Cockpit reads “${typed.text}”`, typed);
     });
 }
@@ -8750,12 +8726,21 @@ function openWarningSnoozeWords(warning, words) {
 // Snoozes a warning on every page until `until` (store.snooze_warning), with Undo in the toast; `phrase` says how
 // long: "for 2 hours", "while Cockpit reads “friday”". `words`, or null, are the user's words for the time, which
 // Cockpit reads to move the snooze (`openSnoozeWords`). The card then shows what it would with the warning gone, as
-// after a step's snooze.
+// after a step's snooze. A card that joins other warnings into one (`joined`, such as a part's card that combines several warnings) snoozes them
+// with it to the same time, and Cockpit reads the user's words for each.
 function snoozeWarning(warning, until, phrase, words) {
-  if (ui.warningOpen === warning.key) ui.warningOpen = null;
+  dropWarning(warning.key);
+  const parts = warning.joined || [];
+  for (const part of parts) setWarningSnooze(part, until, words);
   const snoozed = setWarningSnooze(warning, until, words);
-  toast(`Snoozed “${warning.short}” ${phrase}`, false, { label: "Undo", run: () => setWarningSnooze(warning, null, null) });
+  toast(`Snoozed “${warning.short}” ${phrase}`, false, { label: "Undo", run: () => clearWarningSnooze(warning) });
   return snoozed;
+}
+
+// A snooze's Undo: the warning, and the warnings it joins, back now.
+function clearWarningSnooze(warning) {
+  for (const part of warning.joined || []) setWarningSnooze(part, null, null);
+  return setWarningSnooze(warning, null, null);
 }
 
 // Brings a snoozed warning back to Inbox now; the card stays on it.
@@ -8803,43 +8788,41 @@ function setWarningSnooze(warning, until, words) {
   return sent;
 }
 
-// A warning as a card at the top of the classic page, and the page's own refresh failure on both pages.
-function warnCard({ key, tone, mark, tip, title, more, fix, close, extra }) {
+// A card at the top of the page: the page's own refresh failure, and the questions about the user's team and time zone.
+function warnCard({ key, tone, mark, tip, title, more, extra }) {
   return h("article", { class: `card warn-card ${tone}`, title: tip, "data-warning": key },
     icon(mark),
     h("div", { class: "warn-text" },
       h("p", { class: "warn-title", text: title }),
       more && h("p", { class: "warn-more", text: more })),
-    fix && h("div", { class: "warn-actions" }, fixButton(fix), close && close.words && h("button", {
-      class: "button small ghost", type: "button", disabled: close.busy, onclick: close.onclick }, close.words)),
-    close && !close.words && h("div", { class: "warn-close" }, h("button", {
-      class: "button small ghost icon-only", type: "button", "aria-label": "Close this warning", title: close.title,
-      disabled: close.busy, onclick: close.onclick }, icon("x"))),
     extra && h("div", { class: "warn-extra" }, extra));
 }
 
-// The sidebar page shows a warning on Next up as a step: its words where a step has its ask and why, and its fix
-// where a step has its answers (SPEC UI-52). A blocked call, dialog or Codex question brings its own card.
+// A warning shows on Next up as a step: its words where a step has its ask and why, and its fix
+// where a step has its answers (SPEC UI-52). A blocked call, dialog or Codex question brings its own card,
+// drawn from the warning as shown, snoozed or not.
+// A warning answered in its own view keeps those controls there (including its own snooze).
 function warningCard(warning) {
   if (warning.card) {
-    const card = warning.card();
+    const card = warning.card(warning);
     card.classList.add("warn-blocked");
     card.dataset.warning = warning.key;
     card.dataset.glide = `warning ${warning.key}`;
     return card;
   }
   return h("article", { class: `card next-card warn-step${warning.tone === "top" ? " top" : ""}`, "data-warning": warning.key, "data-glide": `warning ${warning.key}`, title: warning.tip },
-    h("div", { class: "warn-step-head" }, warningMenu(warning)),
+    !warning.viewActions && h("div", { class: "warn-step-head" }, warningMenu(warning)),
     h("h1", { class: "ask" }, h("span", { class: "warn-step-mark" }, icon(warning.mark)), h("span", { class: "ask-text", text: warning.title })),
     warning.more && h("p", { class: "why", text: warning.more }),
     warning.snoozedUntil && h("p", { class: "warn-snoozed-note" }, icon("clock"), `Snoozed until ${when(new Date(warning.snoozedUntil))}`),
     warning.extra && h("div", { class: "warn-extra" }, warning.extra),
     (warning.fix || warning.close) && h("div", { class: "answers", role: "group", "aria-label": "Answers" },
-      warning.fix && h("button", { class: "button answer", type: "button", disabled: warning.fix.busy, onclick: warning.fix.onclick },
-        h("span", { class: "answer-words", text: warning.fix.words })),
-      warning.close && h("button", { class: "button answer", type: "button", disabled: warning.close.busy,
-        onclick: warning.close.onclick, title: warning.close.title }, h("span", { class: "answer-words", text: warning.close.words || "Close this warning" }))),
-    warningMessageBox(warning));
+      warning.fix && h("button", { class: `button answer${warning.fix.confirm ? " confirm" : ""}`, type: "button", disabled: warning.fix.busy, onclick: warning.fix.onclick },
+        warning.fix.confirm && icon("done"), h("span", { class: "answer-words", text: warning.fix.words })),
+      warning.close && h("button", { class: `button answer${warning.close.confirm ? " confirm" : ""}`, type: "button", disabled: warning.close.busy,
+        onclick: warning.close.onclick, title: warning.close.title },
+        warning.close.confirm && icon("done"), h("span", { class: "answer-words", text: warning.close.words || "Close this warning" }))),
+    !warning.viewActions && warningMessageBox(warning));
 }
 
 // A message on a warning, in place of its fix (SPEC UI-82): it becomes a to-do with the warning attached, as Add makes
@@ -8856,14 +8839,14 @@ function warningMessageBox(warning) {
     takeDraft(key);
     const change = { confirmed: null };
     ui.handing.set(warning.key, change);
-    if (ui.warningOpen === warning.key) ui.warningOpen = null;
+    dropWarning(warning.key);
     render(false);
     const quote = [warning.title, warning.more].filter(Boolean).join(" ");
     return run(key, async () => {
       let answer;
       try {
         answer = await apiWritten("POST", "/api/warnings/message",
-          { key: warning.key, text, part: { target: "page:next/warning", quote, detail: "" } }, { key, text });
+          { key: warning.key, text, part: { target: "page:next/warning", quote, detail: warning.detail || "" } }, { key, text });
       } catch (error) {
         if (ui.handing.get(warning.key) === change) ui.handing.delete(warning.key);
         restoreDraft(key, text);
@@ -8897,34 +8880,140 @@ function warningMessageBox(warning) {
   return box;
 }
 
-// A warning's fix as a small key, on a classic page's card and in the small card under the red arrows.
+// A warning's fix as a small key, in the small card under the red arrows.
 function fixButton(fix) {
   return h("button", { class: `button small${fix.primary ? " primary" : ""}`, type: "button", disabled: fix.busy, onclick: fix.onclick }, fix.words);
 }
 
-// On the sidebar page the refresh failure stays a card at the top: it says the page itself is behind. The
-// question about the user's team is a plain card there too, as it is no warning.
+// The refresh failure is a card at the top: it says the page itself is behind. The questions about the user's team
+// and time zone are plain cards there too, as they are no warnings.
 function renderBanner(state) {
   const cards = [];
   if (ui.error && (!ui.lastOk || ui.catchUpFailed || Date.now() - ui.lastOk.getTime() > BANNER_AFTER_MS)) {
-    cards.push(warnCard({
+    if (!ui.savedState && navigator.onLine) cards.push(warnCard({
       key: "refresh", tone: "fail", mark: "alert", tip: null, title: `Cockpit could not refresh: ${ui.error}.`,
       more: `Showing what it had at ${ui.lastOk ? clock(ui.lastOk.toISOString()) : "load"}.`,
-      fix: null, close: null, extra: null,
-    }));
-  }
-  if (!SIDEBAR) {
-    cards.push(...warningList(state).map((warning) => {
-      const card = warnCard(warning);
-      if (warning.key.startsWith("account-problem:")) card.classList.add("account-problem");
-      return card;
+      extra: null,
     }));
   }
   if (state.team === null) cards.push(teamAsk());
   if (ui.zone?.ask) cards.push(zoneAsk(ui.zone));
   fill("banner", cards);
+  renderOfflineStatus();
   keepPulses();
 }
+
+// Saved-page and queued-edit feedback opens from a fixed slot in the current view.
+const OFFLINE_NOTE_MS = 2000;
+const SAVED_PAGE_NOTE = "Showing the saved page; checking for updates";
+let offlineNoteTimer = null;
+// When the page began showing its saved copy, and when the browser last went offline. Each usually lasts under a
+// second (the saved copy shows until the first fresh state lands; a network switch drops the connection briefly), so
+// the key names them only once they have lasted OFFLINE_NOTE_MS, as it does a waiting edit.
+// They are timed on the page's own clock, which a change to the device's clock leaves alone.
+const offlineSince = { saved: null, offline: null };
+function lasting(name, on, now) {
+  if (!on) offlineSince[name] = null;
+  else offlineSince[name] ??= now;
+  return on && now - offlineSince[name] >= OFFLINE_NOTE_MS;
+}
+function renderOfflineStatus() {
+  const state = window.CockpitOffline?.status();
+  if (!state) return;
+  let note = document.getElementById("offline-note");
+  if (!note) {
+    note = h("div", { id: "offline-note", class: "offline-note", popover: "auto", "aria-label": "Connection and saved edits" },
+      h("p", { tabindex: "-1" }));
+    document.body.append(note, h("span", { id: "offline-announcement", class: "offline-announcement", role: "status" }));
+  }
+  if (!state.refused) ui.open.delete("offline-refusals");
+  // Online, an edit usually sends within a moment; the note names it only once it has waited OFFLINE_NOTE_MS, so a
+  // quick save does not flash a line on the page.
+  clearTimeout(offlineNoteTimer);
+  const now = Date.now();
+  const tick = performance.now();
+  const offline = lasting("offline", !navigator.onLine, tick);
+  const savedPage = lasting("saved", ui.savedState, tick);
+  const waiting = offline ? state.pending : state.waiting.filter((entry) => now - entry.at >= OFFLINE_NOTE_MS).length;
+  // Each wait is worked out from the same elapsed time the checks above compare, so a state still hidden always has one.
+  const due = [...state.waiting.map((entry) => OFFLINE_NOTE_MS - (now - entry.at)),
+    ...Object.values(offlineSince).filter((since) => since !== null).map((since) => OFFLINE_NOTE_MS - (tick - since))]
+    .filter((wait) => wait > 0);
+  if (due.length) offlineNoteTimer = setTimeout(renderOfflineStatus, Math.min(...due));
+  const show = !state.stopped && (offline || savedPage || waiting || state.refused || state.error);
+  const words = [];
+  if (offline) words.push("Offline · showing saved data");
+  else if (savedPage) words.push("Saved page · checking for updates");
+  if (waiting) words.push(`${waiting} ${waiting === 1 ? "edit" : "edits"} saved on this device, waiting to send`);
+  if (state.error) words.push(`Device storage: ${state.error}`);
+  const refused = state.refused ? `${state.refused} ${state.refused === 1 ? "edit needs" : "edits need"} attention` : "";
+  const label = show ? [...words, refused].filter(Boolean).join(". ") : "";
+  const announcement = document.getElementById("offline-announcement");
+  if (announcement.textContent !== label) announcement.textContent = label;
+  if (!show) closeOfflineNote();
+  for (const key of document.querySelectorAll(".offline-note-key")) {
+    if (!show && key === document.activeElement) {
+      key.parentElement.querySelector(".sidebar-add, .phone-add, .center-close")?.focus({ preventScroll: true });
+    }
+    key.classList.toggle("available", Boolean(show));
+    key.setAttribute("aria-label", label);
+    key.dataset.tip = label;
+  }
+  note.hidden = !show;
+  const status = note.firstElementChild;
+  const message = words.join(". ");
+  if (status.textContent !== message) status.textContent = message;
+  status.hidden = !message;
+  // Waiting edits can come and go while someone reads a refusal or uses its controls.
+  const print = JSON.stringify([!navigator.onLine, state.failures]);
+  if (note.dataset.print === print) return;
+  note.dataset.print = print;
+  const previous = status.nextElementSibling;
+  const focused = previous?.contains(document.activeElement) ? document.activeElement.dataset.key : null;
+  previous?.remove();
+  if (!refused) {
+    if (focused && message) status.focus({ preventScroll: true });
+    return;
+  }
+  const details = disclosure("offline-refusals", "offline-refusals", refused, [], false);
+  details.querySelector("summary").dataset.key = "offline-refusals";
+  for (const edit of state.failures) {
+    const act = (work) => work.catch((error) => { logError("handling a saved edit", error); toast(error.message, true); });
+    details.append(h("div", { class: "offline-refusal" }, h("p", { text: `${edit.label}: ${edit.error}` }),
+      h("button", { class: "button small", type: "button", "data-key": `offline-retry:${edit.id}`, disabled: !navigator.onLine,
+        onclick: () => act(window.CockpitOffline.retry(edit.id)) }, "Try again"),
+      h("button", { class: "button small quiet", type: "button", "data-key": `offline-discard:${edit.id}`,
+        onclick: () => act(window.CockpitOffline.discard(edit.id)) }, "Discard edit")));
+  }
+  note.append(details);
+  if (focused) {
+    const key = details.querySelector(`[data-key="${CSS.escape(focused)}"]:not([disabled])`);
+    (key || details.querySelector("summary")).focus({ preventScroll: true });
+  }
+}
+
+function shownOfflineNote() {
+  const note = document.getElementById("offline-note");
+  return typeof note?.hidePopover === "function" && note.matches(":popover-open") ? note : null;
+}
+
+function closeOfflineNote() {
+  shownOfflineNote()?.hidePopover();
+}
+document.addEventListener("cockpit:screen", closeOfflineNote);
+addEventListener("cockpit:offline-status", renderOfflineStatus);
+addEventListener("offline", renderOfflineStatus);
+addEventListener("online", renderOfflineStatus);
+
+addEventListener("cockpit:offline-cleared", (event) => {
+  if (event.detail?.scope && event.detail.scope !== window.CockpitOffline?.scope) return;
+  ui.offlineCleared = true;
+  ui.state = null;
+  document.body.classList.add("offline-locked");
+  for (const child of document.body.children) child.inert = child.id !== "offline-lock";
+  if (!document.getElementById("offline-lock")) document.body.append(h("div", { id: "offline-lock" },
+    h("p", { text: "Sign in and connect to reopen Cockpit." }), h("a", { href: "/", text: "Open Cockpit" })));
+});
 
 // A poll draws the warnings and the list's rows again. Every glow and pulse keeps time with the page's clock from its start, so a new
 // row or card pulses on from where the one it replaced was, without a jump, and all of them pulse together.
@@ -8960,7 +9049,6 @@ function teamAsk() {
     key: "team", tone: "question", mark: "log", tip: null,
     title: "Each morning you get a briefing on what they did",
     more: "Name your team or the colleagues you follow; you can change them on the Briefing page.",
-    fix: null, close: null,
     extra: [field, h("span", { class: "team-ask-actions" },
       h("button", {
         class: "button small ghost", type: "button", disabled: ui.busy.has("team"),
@@ -9001,6 +9089,7 @@ function setZone(answer) {
 }
 
 async function reportZone() {
+  if (!navigator.onLine) return;
   try {
     setZone(await api("POST", "/api/timezone/report", { zone: browserZone() }));
   } catch (error) {
@@ -9019,7 +9108,6 @@ function zoneAsk(answer) {
     title: `Your browser has shown ${place} time for ${span}`,
     more: `It is ${zoneClock(answer.ask.zone)} there and ${zoneClock(answer.zone)} in ${home}. Cockpit runs on ${home} time `
       + "for your morning briefing, scheduled prompts, the sweeper's work hours and the days in your time report.",
-    fix: null, close: null,
     extra: [h("span", { class: "team-ask-actions" },
       h("button", {
         class: "button small ghost", type: "button", disabled: busy,
@@ -9127,77 +9215,22 @@ function renderNext(step, state) {
   // data-parts: a poll's redraw keeps the part the user reads in place (motion.js).
   // A to-do's step takes pasted and dropped images, as the item's row did before it showed only as its steps.
   const full = stepItem(step, state);
-  fill("next", reorderButton(step, state, true), h("article", { class: `card next-card${step.left ? " left" : ""}${clockClass(step)}`,
+  fill("next", reorderButton(step, state), h("article", { class: `card next-card${step.left ? " left" : ""}${clockClass(step)}`,
     "data-step": step.id, "data-parts": true, "data-drop-item": full && full.todo ? full.id : null }, mergedNote(state), stepBody(step, state, "next"),
     !step.left && draftCorner(step)));
 }
 
-// One line on top of Next up for the items an agent closed with no finish step: their PR merged (CONTROL-15).
+// One line on top of Next up for the items an agent closed with no finish step: their PR merged (CONTROL-15), a
+// fire-and-forget to-do finished (CONTROL-24) or a recurring run ended (CONTROL-33).
 function mergedNote(state) {
   const closes = state.merged_closes;
   if (closes.length === 0) return null;
   const names = closes.map((close) => (close.pull ? `${close.pull} merged: ${close.title}` : `${close.title}: ${close.note}`));
   const lines = closes.map((close) => (close.pull
     ? `${close.pull} merged, so ${close.closed_by.replace(/^agent:/, "")} closed "${close.title}" at ${clock(close.closed_at)}`
-    : `${close.closed_by.replace(/^agent:/, "")} finished the fire-and-forget to-do "${close.title}" at ${clock(close.closed_at)}: ${close.note}`));
+    : `${close.closed_by.replace(/^agent:/, "")} finished the ${close.recurring ? "recurring run" : "fire-and-forget to-do"} "${close.title}" at ${clock(close.closed_at)}: ${close.note}`));
   return h("p", { class: "merged-note", title: `${lines.join("\n")}\nYou find ${closes.length === 1 ? "it" : "them"} under Finished this week. This line goes once you act on a step.` },
     icon("done"), h("span", { text: `Closed: ${names.join("; ")}` }));
-}
-
-// group: "queue" (The user's places), "ready" (ready next, waiting for a place) or "snoozed". Line 1: the priority,
-// the item's short title, the ask, and marks; line 2 (closed rows only): the Cockpit tag (UI-43) and, on a phone, the
-// priority. The side holds the size, the check and the age. A closed row leaves the image count and the sweeper's
-// reasons to the open step.
-function queueRow(step, state, group) {
-  const key = `step:${step.id}`;
-  const snoozed = group === "snoozed";
-  const open = ui.expanded.has(key);
-  const full = stepItem(step, state);
-  // The item's short title leads, so the ask can be the bare question (SPEC SESSION-3); an open row shows it above the step.
-  const lead = !open && h("span", { class: "row-item", title: step.item.title, text: step.item.title });
-  const title = opens(h("span", { class: "row-title", title: plainText(step.ask_html), html: step.ask_html }), key);
-  // An open row's ask is its step's ask, whose page links open beside the row (NEXT-47).
-  if (open) pageComments(title, step);
-  const tag = step.left ? null : priorityTag(step.item, "");
-  const since = group === "queue" ? step.queued_at : step.created_at;
-  // A top step's check mark rides in the age's slot, just left of the age.
-  const check = group === "queue" && isTop(step, state) ? checkedMark(step, state, "") : null;
-  const line2 = open ? [] : [!step.left && PHONE.matches && tag, cockpitChip(step.item.project)].filter(Boolean);
-  return h("div", { class: `row step-row${open ? " open" : ""}${step.left ? " left" : ""}${clockClass(step)}`, "data-step": step.id, "data-drop-item": full && full.todo ? full.id : null },
-    h("div", { class: "row-head", onclick: (event) => { if (!event.target.closest("a, button")) toggle(key); } },
-      !PHONE.matches && (tag || h("span", { class: "prio-slot" })),
-      h("div", { class: "row-main" },
-        h("div", { class: "row-line1" }, newDot(step), lead, !open && stepOf(step, state), title, quickMark(step), earlyMark(step), !open && mergedMark(full), group === "queue" && reorderButton(step, state, false), !open && !step.left && draftMark(step, false), updatedMark(step, false)),
-        line2.length > 0 && h("div", { class: "row-line2" }, line2), step.left && leftNote(step)),
-      h("div", { class: "row-side" },
-        group === "ready" && !step.left && takeButton(step),
-        !open && sentMark(step),
-        !open && sizeBar(step),
-        snoozed
-          ? (readingWords(state, `step:${step.id}`)
-            ? h("span", { class: "row-age", title: `Cockpit is reading when it comes back; until then, snoozed until ${when(new Date(step.snoozed_until))}` }, icon("clock"), "Reading")
-            : h("span", { class: "row-age", "data-time": step.snoozed_until, title: `Snoozed until ${when(new Date(step.snoozed_until))}` }, icon("clock"), when(new Date(step.snoozed_until))))
-          : h("span", { class: `row-age${check && check.classList.contains("stale") ? " overdue" : ""}`, "data-time": since, title: rankTitle(step) }, check, age(since)))),
-    open && h("div", { class: "row-body" }, h("div", { class: "step-full" }, stepBody(step, state, group))),
-    !step.left && draftCorner(step));
-}
-
-// A group's summary: its name, its count, and what the group is in the tooltip.
-function groupSummary(name, count, tip) {
-  return h("span", { class: "group-name", title: tip }, name, h("span", { class: "group-count", text: count }));
-}
-
-const CLOSED_ICONS = { done: "check", dismissed: "x" };
-
-// How a closed step was closed: the user's Done or Archive is done; an agent's done is handled, in grey,
-// since only the user's press finishes a task (SPEC CONTROL-17) and the plum check is the user's.
-function closedWord(step) {
-  if (step.status === "dismissed") return "Dismissed";
-  return step.closed_by === "user" ? "Done" : "Handled";
-}
-
-function closedClass(step) {
-  return step.status === "done" && step.closed_by !== "user" ? "handled" : step.status;
 }
 
 // Who closed something, in words: the sweeper, Cockpit, a session by its name, or an agent by the name
@@ -9209,14 +9242,6 @@ function closerWords(actor, sessions) {
   const short = /^claude-([0-9a-f]{8})$/.exec(name);
   const session = short && sessions.find((one) => one.session_id.startsWith(short[1]));
   return session && session.name ? session.name : name;
-}
-
-// A closed row's title; when an agent or Cockpit closed it, a second line says who and why (SPEC VIEW-4).
-function closedTitle(title, closedBy, note, how, state) {
-  if (closedBy === "user") return title;
-  const who = closerWords(closedBy, state.sessions);
-  return h("div", { class: "closed-words" }, title,
-    h("span", { class: "row-sub closed-by", title: note ? `${how} by ${who}\n${note}` : `${how} by ${who}`, text: note ? `${who} · ${note}` : `${how} by ${who}` }));
 }
 
 // How a finished task ended, for its row in Finished this week (SPEC VIEW-20): done or closed as not needed, who
@@ -9263,42 +9288,6 @@ function closedItemRow(entry, state) {
         h("span", { class: "row-age", "data-time": entry.closed_at, title: "Closed", text: age(entry.closed_at) }))));
 }
 
-// The steps closed in the last day, folded at the end of Finished this week. Each row: a status icon, the ask,
-// a short age; under the ask, who closed it and their note when it was not the user (SPEC VIEW-4), and Reopen.
-// The closes are newest first, the first CLOSED_TOP shown.
-function closedSteps(state) {
-  const { steps } = state.closed_recently;
-  if (!steps.length) return null;
-  const stepRows = steps.map((step) => h("li", { "data-at": step.closed_at },
-    h("span", { class: `closed-icon ${closedClass(step)}`, role: "img", "aria-label": closedWord(step).toLowerCase(), title: `${closedWord(step)} by ${closerWords(step.closed_by, state.sessions)}` },
-      icon(CLOSED_ICONS[step.status] || "check")),
-    cockpitChip(step.item_project),
-    closedTitle(h("span", { class: "row-title", title: step.item_title, html: step.ask_html }), step.closed_by, step.note, closedWord(step), state),
-    h("span", { class: "row-age", "data-time": step.closed_at, text: age(step.closed_at) }),
-    iconButton("back", "Reopen", { class: "button small ghost reopen", onclick: () => act(step, "reopen") })));
-  const shown = ui.showAllClosed ? stepRows : stepRows.slice(0, CLOSED_TOP);
-  return disclosure("closed-steps", "more closed-steps", groupSummary("Steps closed in the last day", steps.length, null),
-    h("ul", { class: "closed-list" }, shown,
-      stepRows.length > CLOSED_TOP && h("li", { class: "more-row" },
-        h("button", { class: "link-button", type: "button", onclick: () => { ui.showAllClosed = !ui.showAllClosed; render(false); } },
-          ui.showAllClosed ? "Show fewer" : `Show ${stepRows.length - shown.length} more`))), false);
-}
-
-// Finished this week (SPEC VIEW-20): the tasks that ended in the last week, done or closed as not needed, in one
-// list, newest first, each saying how it ended; then the steps closed in the last day, folded. `done`: the done
-// items it shows as rows.
-function finishedGroup(done, state, sessions) {
-  const closed = state.closed_recently.items.filter((entry) => entry.action === "archived");
-  const rows = [
-    ...done.map((item) => ({ at: endedAt(item), row: itemRow(item, state, sessions, null) })),
-    ...closed.map((entry) => ({ at: endedAt(entry), row: closedItemRow(entry, state) })),
-  ].sort((a, b) => b.at.localeCompare(a.at)).map((entry) => entry.row);
-  const steps = closedSteps(state);
-  if (!rows.length && !steps) return null;
-  return disclosure("ball:done", "group done", ["Finished this week", h("span", { class: "group-count", text: rows.length })],
-    [rows.length > 0 && h("div", { class: "list" }, rows), steps], false);
-}
-
 // What a session holding a handed-off step is doing now, by its dot's state (`sessionState`).
 const AGENT_DOING = {
   working: "working on it",
@@ -9311,76 +9300,6 @@ const AGENT_DOING = {
 
 function capitalize(words) {
   return `${words[0].toUpperCase()}${words.slice(1)}`;
-}
-
-// Steps the user handed to an agent, at the top of All work's With agents: who has each, what
-// that session is doing now, and since when; what the user wrote is in the tooltip. One that did not arrive
-// says so in red, with Retry. Its item keeps its own row in All work, which the arrow key opens; an item that
-// left All work (done more than a week ago) has no row and no key.
-function handedList(state, steps) {
-  if (!steps.length) return null;
-  const sessions = sessionMap(state);
-  const items = new Map(state.items.map((item) => [item.id, item]));
-  const rows = steps.map((step) => {
-    const handoff = step.handoff;
-    const to = handoff.session_id ? sessionLabel(sessions.get(handoff.session_id), "") : `a new session in ${repoOf(handoff.new_cwd)}`;
-    const setAside = handoff.state === "failed" && Boolean(handoff.dismissed_at);
-    const failed = handoff.state === "failed" && !setAside;
-    const waiting = messageDelivery(handoff) === "waiting";
-    const wait = waiting && waitWords(handoff);
-    // Kept back while Take back can still stop it (MSG-8): until the notice after Send is gone.
-    const kept = handoff.state === "queued" && Boolean(handoff.take_back_until);
-    const message = failed && state.messages.find((other) => other.id === step.handoff_message_id);
-    // A run the user started with this hand-off (Run hands off and starts the run together).
-    const ran = step.run && step.run.started_at >= handoff.created_at ? step.run : null;
-    const trouble = failed || (ran && ran.finished_at && ran.exit_code !== 0);
-    const session = handoff.session_id && sessions.get(handoff.session_id);
-    const doing = kept ? "your message goes shortly; Take back still stops it"
-      : waiting ? `your message waits ${wait.since} for its turn to end` : !failed && session ? AGENT_DOING[sessionState(session)] : null;
-    const sub = [ran && runWords(ran), failed ? "Not delivered" : setAside ? `reached ${to} another way` : to, doing].filter(Boolean).join(" · ");
-    return h("li", { "data-step": step.id },
-      h("span", { class: `closed-icon${failed ? " failed" : ""}`, role: "img", "aria-label": failed ? "Not delivered" : "With an agent",
-        title: failed ? `Did not arrive: ${handoff.detail}` : setAside ? setAsideWords(handoff) : `${capitalize(to)} has it` },
-        icon(failed ? "alert" : "handoff")),
-      cockpitChip(step.item.project),
-      h("span", { class: "row-title", title: `${step.item.title}\n${handoff.author === "cockpit" ? "Cockpit sent" : "You wrote"}: ${handoff.text}`, html: step.ask_html }),
-      lateMark(wait),
-      h("span", { class: `row-sub${trouble ? " fail-text" : ""}`, title: ran ? outputTail(ran) : null, text: sub }),
-      h("span", { class: "row-age", "data-time": handoff.created_at, text: ago(handoff.created_at) }),
-      message && iconButton("retry", "Retry", { class: "button small ghost", onclick: () => retryMessage(message) }),
-      (waiting || kept) && interruptButton(handoff),
-      items.has(step.item_id) && iconButton("arrow", "Open task",
-        { class: "button small ghost handed-open", onclick: () => window.openInWork(step.item_id, items.get(step.item_id).group) }),
-      iconButton("back", "Take back: to the top of your queue", { class: "button small ghost", onclick: () => takeBack(step) }));
-  });
-  return h("div", { class: "with-agents" },
-    h("p", { class: "handed-head", title: "An agent works on each; it gives it back if it needs you",
-    text: `You handed these (${steps.length})` }),
-    h("ul", { class: "closed-list" }, rows));
-}
-
-// `ready`, `snoozed`: those lists with their kept steps.
-function renderQueue(rest, readySteps, snoozedSteps, state) {
-  if (!rest.length && !readySteps.length && !snoozedSteps.length) { fill("queue"); return; }
-  const shown = ui.showAllQueue ? rest : rest.slice(0, QUEUE_TOP);
-  const hidden = rest.length - shown.length;
-  const list = rest.length
-    ? h("div", { class: "list" },
-        shown.map((step) => queueRow(step, state, "queue")),
-        rest.length > QUEUE_TOP && h("div", { class: "more-row" },
-          h("button", { class: "link-button", type: "button", onclick: () => { ui.showAllQueue = !ui.showAllQueue; render(false); } },
-            ui.showAllQueue ? "Show fewer" : `Show ${hidden} more`)))
-    : null;
-  const ready = readySteps.length
-    ? disclosure("ready-next", "group ready-next", groupSummary("Waiting next", readySteps.length,
-        "Ready, waiting for one of your four places"),
-        h("div", { class: "list" }, readySteps.map((step) => queueRow(step, state, "ready"))), false)
-    : null;
-  const snoozed = snoozedSteps.length
-    ? disclosure("snoozed", "group snoozed", groupSummary("Snoozed", snoozedSteps.length, null),
-        h("div", { class: "list" }, snoozedSteps.map((step) => queueRow(step, state, "snoozed"))), false)
-    : null;
-  fill("queue", list, ready, snoozed);
 }
 
 // Tool calls the user's permission hooks reported (PERM-1): a session's dialog
@@ -9456,7 +9375,8 @@ function ruleDraft(request, list) {
 function withoutRequest(state, id) {
   const requests = state.permission_requests.filter((other) => other.id !== id);
   const past = (state.moved_past || []).filter((other) => other.id !== id);
-  return { ...state, permission_requests: requests, moved_past: past };
+  const checker = (state.checker_refusals || []).filter((other) => other.id !== id);
+  return { ...state, permission_requests: requests, moved_past: past, checker_refusals: checker };
 }
 
 // An answer takes the card off at once; if the server refuses, the card comes back
@@ -9477,7 +9397,7 @@ function answerRequest(request, action, body, undo, words) {
     } catch (error) {
       showRequestError(request, error.message);
       // With the card back in view its notice says it, and the toast that announced the answer goes.
-      const notice = document.querySelector(`:is(#blocked, #next) [data-request="${request.id}"] .request-error`);
+      const notice = document.querySelector(`#next [data-request="${request.id}"] .request-error`);
       const box = notice && notice.getBoundingClientRect();
       if (box && box.top >= 0 && box.bottom <= window.innerHeight) {
         logError("answering a call", error);
@@ -9525,7 +9445,7 @@ function allowWithRule(request) {
   const rule = (sent || "").trim();
   if (!rule) {
     showRequestError(request, `Write the ${RULE_LISTS[list].name} first.`);
-    const field = document.querySelector(`:is(#blocked, #next) [data-key="${CSS.escape(key)}"]`);
+    const field = document.querySelector(`#next [data-key="${CSS.escape(key)}"]`);
     if (field) field.focus();
     return;
   }
@@ -9552,7 +9472,7 @@ function allowWithRule(request) {
     return;
   }
   const done = replaces ? "Rule changed" : "Rule added";
-  const undo = replaces ? () => changeRuleBack(list, rule, replaces) : () => removeRule(list, rule, false);
+  const undo = replaces ? () => changeRuleBack(list, rule, replaces) : () => removeRule(list, rule);
   const shown = toast(done, false, {
     label: "Undo",
     run: () => answering.then((answered) => { if (answered) undo(); }),
@@ -9606,7 +9526,7 @@ function toggleNote(request) {
     ui.expanded.add(`note:${request.id}`);
   }
   render(false);
-  if (!open) document.querySelector(`:is(#blocked, #next) [data-key="${CSS.escape(noteKey(request))}"]`)?.focus();
+  if (!open) document.querySelector(`#next [data-key="${CSS.escape(noteKey(request))}"]`)?.focus();
 }
 
 // PERM-13: the user asks for a blocked call in their own words, which auto mode counts as a request. The card's
@@ -9621,7 +9541,7 @@ function tellSession(request) {
   const text = sent.trim();
   if (!text) {
     showRequestError(request, "Write the message first.");
-    document.querySelector(`:is(#blocked, #next) [data-key="${CSS.escape(key)}"]`)?.focus();
+    document.querySelector(`#next [data-key="${CSS.escape(key)}"]`)?.focus();
     return;
   }
   clearDraft(key, sent);
@@ -9668,7 +9588,7 @@ function startRuleEdit(request, list, rule) {
   ui.closedRules.delete(`rule:${request.id}`);
   ui.expanded.add(`rule:${request.id}`);
   render(false);
-  const field = document.querySelector(`:is(#blocked, #next) [data-key="${CSS.escape(key)}"]`);
+  const field = document.querySelector(`#next [data-key="${CSS.escape(key)}"]`);
   if (field) field.focus();
 }
 
@@ -9754,7 +9674,7 @@ function ruleEditor(request, sessions, close) {
       ui.replacing.delete(key);
       saveDrafts();
       render(false);
-      const field = document.querySelector(`:is(#blocked, #next) [data-key="${CSS.escape(key)}"]`);
+      const field = document.querySelector(`#next [data-key="${CSS.escape(key)}"]`);
       if (field) field.focus();
     },
   }, icon("pencil"), "Write my own");
@@ -9797,6 +9717,14 @@ function shellCall(command) {
 // Cockpit asks once the card comes; until the answer is in, the card says Claude is reading. When the run failed,
 // the server's one sentence says why and when Cockpit tries again (PERM-17).
 function callExplanation(request) {
+  if (request.asked_again_at) {
+    return [
+      h("p", { class: "explain-note" }, h("span", {
+        text: `Auto mode's checker gave no verdict; Cockpit asked the session to try it again at ${clock(request.asked_again_at)}.`,
+      })),
+      callExplanation({ ...request, asked_again_at: null, moved_past: false }),
+    ];
+  }
   const explanation = request.explanation;
   if (explanation === null) {
     return request.state === "open" && h("p", { class: "explain-note" }, h("span", { text: "Reading the call…" }));
@@ -9862,16 +9790,6 @@ function requestIcon(request) {
     icon(asked ? "shield" : "ban"), request.count > 1 && h("b", { class: "badge", text: request.count }));
 }
 
-// A request as one line: its icon, the call, the session and the age. A click opens the card.
-function blockedLine(request, sessions) {
-  const key = `req:${request.id}`;
-  return h("div", { class: `blocked-line ${request.kind}`, "data-request": request.id, "data-session": request.session_id, onclick: () => toggle(key) },
-    requestIcon(request),
-    opens(h("code", { class: "call-line", title: request.summary, text: request.summary }), key),
-    sessionName(sessions.get(request.session_id), request.session_id, request.cwd, "who"),
-    h("span", { class: "row-age", "data-time": request.last_at, text: age(request.last_at) }));
-}
-
 // The folder the call runs in, under the call (PERM-26): a relative path such as `rm .venv` means
 // something only with it. The user's home folder shows as `~`.
 function callFolder(cwd) {
@@ -9911,7 +9829,7 @@ function blockedCard(request, sessions, top) {
     ui.closedRules.delete(ruleKey);
     ui.expanded.add(ruleKey);
     render(false);
-    const field = document.querySelector(`:is(#blocked, #next) [data-key="${CSS.escape(key)}"]`);
+    const field = document.querySelector(`#next [data-key="${CSS.escape(key)}"]`);
     if (field) field.focus();
   };
   // A draft started from a rule's Edit changes that rule (PERM-11).
@@ -10009,6 +9927,70 @@ function blockedCard(request, sessions, top) {
     h("div", { class: "actions" }, buttons));
 }
 
+// Auto mode's checker gave no verdict on these calls, and Cockpit's tries to have the sessions make them again did not get
+// past it (PERM-32): one card for the outage, with the calls named under it. A rule or sentence would not help, as the
+// checker did not judge the calls, so the card offers only Try again, which asks each session once more now, and Dismiss.
+const CHECKER_SHOWN = 5;
+
+function checkerTitle(requests) {
+  return requests.length === 1 ? "Auto mode's checker gave no verdict" : `Auto mode's checker gave no verdict on ${requests.length} calls`;
+}
+
+function checkerCard(requests, sessions) {
+  const since = requests.reduce((first, request) => (request.created_at < first ? request.created_at : first), requests[0].created_at);
+  const latest = requests.reduce((last, request) => (request.last_at > last ? request.last_at : last), requests[0].last_at);
+  const many = requests.length > 1;
+  const shown = requests.slice(0, CHECKER_SHOWN);
+  const error = ui.requestErrors.get("checker");
+  return h("div", { class: "card blocked-card checker-card", "data-checker": "" },
+    h("div", { class: "blocked-head" },
+      h("span", { class: "kind denied", role: "img", "aria-label": "Checker not answering", title: "Auto mode's checker gave no verdict" },
+        icon("alert"), many && h("b", { class: "badge", text: requests.length })),
+      h("b", { class: "what", text: checkerTitle(requests) }),
+      h("span", { class: "row-age", "data-time": latest, title: `Last at ${clock(latest)}`, text: age(latest) })),
+    h("p", { class: "explain" }, h("span", {
+      text: `Since ${clock(since)} it failed on ${many ? "these calls" : "this call"} without judging ${many ? "them" : "it"}, so`
+        + ` ${many ? "they" : "it"} did not run. Cockpit asked the session${many ? "s" : ""} to try again, and the checker still gave no verdict.`,
+    })),
+    h("ul", { class: "checker-calls" },
+      shown.map((request) => h("li", {},
+        h("span", { class: "checker-call", title: request.description || request.summary, text: request.explanation?.heading || request.description || request.summary }),
+        sessionName(sessions.get(request.session_id), request.session_id, request.cwd, "who"))),
+      requests.length > shown.length && h("li", { class: "checker-more", text: `and ${requests.length - shown.length} more` })),
+    error && h("p", { class: "request-error", role: "alert" }, icon("alert"), h("span", { text: error })),
+    h("div", { class: "actions" },
+      h("button", { class: "button primary", type: "button",
+        title: `Asks the session${many ? "s" : ""} to make ${many ? "these calls" : "the call"} again now`,
+        onclick: () => checkerAnswer(requests, () => api("POST", "/api/permissions/checker/retry", {}), true) },
+        icon("retry"), h("span", { class: "label", text: "Try again" })),
+      iconButton("x", "Dismiss: the sessions are not told", {
+        class: "button ghost push",
+        onclick: () => checkerAnswer(requests,
+          () => Promise.all(requests.map((request) => api("POST", `/api/permissions/requests/${request.id}/dismiss`, undefined))), false),
+      })));
+}
+
+// Try again or Dismiss on the checker card: the card goes at once; on a refusal it comes back with the reason on it.
+// Tried again, the calls wait off the page until the message reaches their sessions, as Cockpit's own tries do.
+function checkerAnswer(requests, work, retried) {
+  ui.requestErrors.delete("checker");
+  const ids = new Set(requests.map((request) => request.id));
+  return run("perm:checker", async () => {
+    try {
+      await optimistic((state) => ({
+        ...state,
+        checker_refusals: (state.checker_refusals || []).filter((request) => !ids.has(request.id)),
+        held_requests: retried ? [...(state.held_requests || []), ...(state.checker_refusals || []).filter((request) => ids.has(request.id))]
+          : state.held_requests,
+      }), work, null);
+    } catch (error) {
+      ui.requestErrors.set("checker", error.message);
+      render(false);
+      throw new Error(`${retried ? "Try again" : "Dismiss"} did not go through, the calls are back: ${error.message}`, { cause: error });
+    }
+  });
+}
+
 // A dialog that closed in its session without an answer from here (PERM-23): answered in the terminal, or closed on its
 // own, as Claude Code's removal safety check does after two minutes in a background session. The card the user may be
 // reading stays a minute, with nothing to press, and fades over that minute; the server then leaves it out. The
@@ -10035,15 +10017,16 @@ function settledCard(request, sessions) {
 
 // A session at a dialog in its terminal that Cockpit cannot answer (its hook gave up, or it came before
 // the hooks): one line that says where to answer it, and Reply opens its last message and a box. A session
-// that stopped to ask the user something is a step in the queue instead (PERM-8).
-function waitingCard(session, state) {
+// that stopped to ask the user something is a step in the queue instead (PERM-8). A warning snoozed while the
+// session reported setup keeps its menu here, so Unsnooze stays in reach when the session moves on to another dialog.
+function waitingCard(session, state, warning) {
   const key = `msg:session:${session.session_id}`;
   const open = ui.expanded.has(key);
   const restarting = restartUnderWay(session, state);
   const { heading: needs, command } = dialogAsk(session);
   const kind = h("span", { class: "kind asked", role: "img", "aria-label": "A dialog in its terminal", title: "Terminal dialog" }, icon("shield"));
   return h("div", { class: `card waiting-card${open ? " open" : ""}`, "data-session": session.session_id },
-    h("div", { class: "blocked-head", onclick: (event) => { if (!event.target.closest("a, button")) toggle(key); } },
+    h("div", { class: "blocked-head", onclick: (event) => { if (!event.target.closest("a, button, details")) toggle(key); } },
       kind,
       h("span", { class: "what", title: needs, text: needs }),
       sessionName(session, session.session_id, session.cwd, "who"),
@@ -10055,7 +10038,9 @@ function waitingCard(session, state) {
           title: "The session makes the call again; you answer it here",
         }, icon("retry"), "Restart"),
       itermLink(session, { class: "button small" }, icon("terminal"), "iTerm2"),
-      iconButton(open ? "x" : "reply", open ? "Close" : "Reply", { class: "button small ghost", onclick: () => toggle(key) })),
+      iconButton(open ? "x" : "reply", open ? "Close" : "Reply", { class: "button small ghost", onclick: () => toggle(key) }),
+      warning.snoozedUntil && warningMenu(warning)),
+    warning.snoozedUntil && h("p", { class: "warn-snoozed-note" }, icon("clock"), `Snoozed until ${when(new Date(warning.snoozedUntil))}`),
     command && clampedText(`call:session:${session.session_id}`, [shellCall(command)], command),
     h("p", {
       class: "dialog-note",
@@ -10065,6 +10050,35 @@ function waitingCard(session, state) {
     open && session.last_message_html && prose(`${key}:last`, "prose last-message", session.last_message_html),
     open && linkList(key, session.links, session.last_message_html || ""),
     open && composer(key, { session, context: {}, project: null, step: null, handOff: false, toSession: false }));
+}
+
+// These are Claude's startup reports; a shell command mentioning setup is still a permission dialog.
+function startupDialog(session) {
+  return session.detail === "stuck on a startup dialog" || session.needs === "open this session to continue setup";
+}
+
+// A startup report has the warning's menu and message box (UI-72, UI-82), as Cockpit cannot answer it: the user
+// snoozes it, or hands it to a new session that checks the reporting session and settles it.
+function startupDialogCard(session, state, warning) {
+  const terminal = itermAnchor(session, { class: "button primary" }, icon("terminal"), "Open terminal");
+  return h("div", { class: "card waiting-card startup-dialog", "data-session": session.session_id },
+    h("div", { class: "blocked-head" },
+      h("span", { class: "kind asked", role: "img", "aria-label": "Setup reported", title: "Startup setup" }, icon("shield")),
+      h("h2", { class: "what words", text: "Claude reported a setup problem" }),
+      warningMenu(warning)),
+    h("p", { class: "startup-task", text: sessionLabel(session, session.cwd) }),
+    h("p", { class: "startup-explain", text: "Claude reported a startup block without sharing the setup prompt. This status may be out of date." }),
+    h("p", { class: "startup-explain", text: terminal
+      ? "Open the terminal to check this session, or restart the session to retry."
+      : "Restart the session to retry. If setup still waits, open this session on a computer." }),
+    h("div", { class: "actions" },
+      terminal,
+      restartUnderWay(session, state)
+        ? h("span", { class: "restarting", role: "status", text: "Restarting…" })
+        : h("button", { class: `button${terminal ? "" : " primary"}`, type: "button",
+          onclick: () => restartSession(session) }, icon("retry"), "Restart session")),
+    warning.snoozedUntil && h("p", { class: "warn-snoozed-note" }, icon("clock"), `Snoozed until ${when(new Date(warning.snoozedUntil))}`),
+    warningMessageBox(warning));
 }
 
 // What a dialog in a session's terminal asks, as a heading in words, with the shell command apart: Claude Code's own
@@ -10087,8 +10101,7 @@ function restartUnderWay(session, state) {
   return message.state !== "failed";
 }
 
-// A dialog Cockpit cannot answer (PERM-8): the server stops the session and resumes it with a message,
-// and the call the session makes again comes here as a permission request.
+// A dialog Cockpit cannot answer: the server stops the session and resumes it with a message.
 function restartSession(session) {
   ui.restarts.set(session.session_id, null);
   render(false);
@@ -10103,12 +10116,14 @@ function restartSession(session) {
       if (error.status === 409 && error.message.includes("no longer waits at a dialog")) {
         gone = true;
         ui.dialogsGone.set(session.session_id, Date.now());
+        render(false);
         return;
       }
       throw refused("Not restarted", error);
     }
   }, () => toast(gone
     ? `Nothing to restart: ${session.name || session.id} no longer waits at a dialog`
+    : startupDialog(session) ? `Restarting ${session.name || session.id}`
     : `Restarting ${session.name || session.id}: when it makes the call again, it comes here`));
 }
 
@@ -10117,10 +10132,6 @@ function dialogGone(session) {
   const at = ui.dialogsGone.get(session.session_id);
   return at !== undefined && Date.now() - at < RESTART_SETTLE_MS;
 }
-
-// Blocked tool calls and waiting sessions, above Next up: an agent stops on each. The first
-// request is open; past three the rest are behind "+N more".
-const BLOCKED_TOP = 3;
 
 // A secret answer to Codex while the user types it: in memory only, so a redraw keeps it and no storage holds it.
 const secretAnswers = new Map();
@@ -10241,12 +10252,10 @@ function openOnSentence(request) {
   }
 }
 
-// On the page with the rail, each blocked call, dialog, Codex question and session at a terminal dialog is a warning,
-// like other sign-in warnings (SPEC PERM-25, UI-52): a dark red row at the top of Inbox, above the step the user
-// is on, which opens its card on Next up. A dialog that closed in its session stays only while its card is open there
-// (PERM-23). The classic page keeps the Blocked and waiting panel above Next up.
+// Each blocked call, dialog, Codex question and session at a terminal dialog is a warning, like other sign-in warnings
+// (SPEC PERM-25, UI-52): a dark red row at the top of Inbox, above the step the user is on, which opens its card on
+// Next up. A dialog that closed in its session stays only while its card is open there (PERM-23).
 function blockedWarnings(state) {
-  if (!SIDEBAR) return [];
   const sessions = cardSessions(state);
   const named = sessionMap(state);
   const who = (session, id) => (session && session.name) || id.slice(0, 8);
@@ -10277,51 +10286,22 @@ function blockedWarnings(state) {
     };
   });
   const waiting = state.waiting_sessions.filter((session) => !dialogGone(session)).map((session) => {
-    const needs = dialogAsk(session).heading;
+    const needs = startupDialog(session) ? `${sessionLabel(session, session.cwd)}: Claude reported a setup problem` : dialogAsk(session).heading;
     return {
       key: `session:${session.session_id}`, tone: "fail", mark: "shield", tip: `${needs}\n${who(session, session.session_id)}`,
-      short: needs, title: needs, more: null, fix: null, close: null, extra: null, row: { "data-session": session.session_id },
-      card: () => waitingCard(session, state),
+      short: startupDialog(session) ? `Setup: ${sessionLabel(session, session.cwd)}` : needs, title: needs, more: null, fix: null, close: null, extra: null, row: { "data-session": session.session_id },
+      // What a session handed this warning needs to find the reporting session.
+      detail: `Claude session ${session.session_id} in ${session.cwd} reports: ${session.needs || session.detail}`,
+      card: (shown) => (startupDialog(session) ? startupDialogCard(session, state, shown) : waitingCard(session, state, shown)),
     };
   });
-  return [...codex, ...requests, ...waiting];
-}
-
-function renderBlocked(state) {
-  // The page with the rail shows these as warnings in Inbox (blockedWarnings).
-  if (SIDEBAR) { fill("blocked"); return; }
-  const requests = state.permission_requests;
-  const waiting = state.waiting_sessions.filter((session) => !dialogGone(session));
-  const codex = state.codex_requests || [];
-  // Refusals the sessions got past without the user fold under one line at the end (PERM-18).
-  const past = state.moved_past || [];
-  const settled = state.settled_requests || [];
-  if (!requests.length && !waiting.length && !codex.length && !past.length && !settled.length) { fill("blocked"); return; }
-  // The sentence options mark the ones already allowed, from the rules as last read.
-  if ((requests.length || past.length) && ui.permissions === null && !ui.permissionsError) loadPermissions();
-  const sessions = cardSessions(state);
-  const top = requests[0];
-  if (top) openOnSentence(top);
-  const shown = ui.showAllBlocked ? requests : requests.slice(0, BLOCKED_TOP);
-  const hidden = requests.length - shown.length;
-  // One panel; its heading, "Blocked and waiting", is the panel's ::after (marks.css).
-  fill("blocked",
-    h("div", { class: "blocked-list" },
-      codex.map(codexRequestCard),
-      inPlace(shown, settled).map((request) => (request.settled ? settledCard(request, sessions)
-        : request === top || ui.expanded.has(`req:${request.id}`) ? blockedCard(request, sessions, request === top)
-          : blockedLine(request, sessions))),
-      requests.length > BLOCKED_TOP && h("button", {
-        class: "link-button more-row", type: "button", onclick: () => { ui.showAllBlocked = !ui.showAllBlocked; render(false); },
-      }, ui.showAllBlocked ? "Show fewer" : `+${hidden} more`),
-      waiting.map((session) => waitingCard(session, state)),
-      past.length > 0 && h("button", {
-        class: "link-button more-row", type: "button", onclick: () => { ui.showMovedPast = !ui.showMovedPast; render(false); },
-      }, ui.showMovedPast ? "Hide the calls sessions got past"
-        : `${past.length} blocked ${past.length === 1 ? "call" : "calls"} the sessions got past without you`),
-      ui.showMovedPast && past.map((request) => (ui.expanded.has(`req:${request.id}`)
-        ? blockedCard(request, sessions, false)
-        : blockedLine(request, sessions)))));
+  const refusals = state.checker_refusals || [];
+  const checker = refusals.length ? [{
+    key: "checker", tone: "fail", mark: "alert", tip: checkerTitle(refusals), short: "Checker gave no verdict", title: checkerTitle(refusals),
+    more: null, fix: null, close: null, extra: null, row: { "data-checker": "" },
+    card: () => checkerCard(refusals, sessions),
+  }] : [];
+  return [...codex, ...requests, ...checker, ...waiting];
 }
 
 // An item's controls in its open row: priority tag, Priorities and stage menus, whose goal it blocks, archive.
@@ -10387,9 +10367,8 @@ function sessionList(linked, item, step, state) {
     const talks = Boolean(home) && home.item.id === item.id && (home.step?.id ?? null) === (step?.id ?? null) && !ui.heldKeys.has(key);
     const name = sessionName(session, sessionId, "", "name");
     if (talks) { opens(name, key); name.addEventListener("click", () => toggle(key)); }
-    // The page with the list of items opens any session's conversation by its id, also one no longer listed in
-    // the state's sessions, as the list at the left did before its sessions moved to the card.
-    else if (session || SIDEBAR) {
+    // Any session's conversation opens by its id, also one no longer listed in the state's sessions.
+    else {
       name.setAttribute("role", "button");
       name.tabIndex = 0;
       name.addEventListener("click", () => openKeyboardSession(sessionId));
@@ -10403,7 +10382,7 @@ function sessionList(linked, item, step, state) {
       h("span", { class: "session-entry" }, sessionBot(), stateDot(session ? sessionState(session) : "stopped", session ? sessionState(session) : "not running"),
         name,
         session && sessionMarks(session),
-        session && session.detail && h("span", { class: "meta", title: session.detail, text: clip(session.detail, 80) }),
+        session && session.detail && h("span", { class: "meta", title: plainSummary(session.detail), text: clip(plainSummary(session.detail), 80) }),
         session && sessionSpend(session),
         session && h("span", { class: "row-age", "data-time": session.updated_at, text: age(session.updated_at) })),
       talks && ui.expanded.has(key) && composer(key, { session, context: {}, project: null, step: null, handOff: false, toSession: false }));
@@ -10473,7 +10452,9 @@ function historyOf(itemId, version) {
 function warmHistory(itemId, state) {
   const version = historyVersion(itemId, state);
   const known = ui.histories.get(itemId);
-  const fresh = known && known.version === version && Date.now() - known.at < HISTORY_STALE_MS;
+  // Upcoming cards keep their first fetch until their state changes; opening one refreshes an old history
+  // through historyOf. Only histories already on the page need the regular transcript checks.
+  const fresh = known && known.version === version && (!known.error || Date.now() - known.at < HISTORY_STALE_MS);
   if (!fresh && !(known && known.loading)) loadHistory(itemId, known, version, true);
 }
 
@@ -10866,7 +10847,7 @@ function historyDrawn(item, data, stepId, key, quoted) {
   return h("section", { class: "history", "aria-label": "History", "data-item": item.id }, h("ol", { class: "hist-list" }, rows));
 }
 
-// `line`: the sweep's line on an item under Matters most, which stands in for its summary in the closed row, or null.
+// `line`: the sweep's line on the item, which stands in for its summary in the closed row, or null.
 function itemRow(item, state, sessions, line) {
   const key = `item:${item.id}`;
   const open = ui.expanded.has(key);
@@ -10948,8 +10929,8 @@ function pinKey(item, cls) {
 }
 
 // The Pinned list (CONTROL-13), at the top of the side on both views: the items the user pinned, the
-// first pinned first, each with its open steps and stage. A click opens the item in All work.
-// An archived item leaves it with the rest of All work.
+// first pinned first, each with its open steps and stage. A click opens the item (openInWork).
+// An archived item leaves it.
 function renderPinned(state) {
   const items = state.items.filter((item) => item.pinned_at).sort((a, b) => a.pinned_at.localeCompare(b.pinned_at));
   if (!items.length) { fill("pinned"); return; }
@@ -10957,7 +10938,7 @@ function renderPinned(state) {
   fill("pinned", sectionHead("Pinned"), h("ul", { class: "side-list pin-list" }, items.map((item) => h("li", { "data-pinned": item.id },
     h("button", {
       class: "pin-open", type: "button", title: item.title,
-      onclick: () => window.openInWork(item.id, item.group),
+      onclick: () => openInWork(item.id, item.group),
     },
       h("span", { class: "pin-title", text: item.title }),
       h("span", { class: "pin-line2" },
@@ -10968,83 +10949,21 @@ function renderPinned(state) {
     pinKey(item, "button small ghost reveal")))));
 }
 
-// The one list of work and sessions (VIEW-3, VIEW-18), the board the Sessions tab scrolls to. It continues the queue's
-// list under no heading of its own; its head holds Sort, Group and New session (VIEW-21). Each session shows once: in
-// the row of the item that lists it, or in a row of its own when no item does. Grouped by who moves next, as it was
-// before Sessions joined it, each item shows once on the page: an item with a step on Next up, in the queue, Ready next
-// or Snoozed shows as that step, so no group here repeats it, also when its session works on and its step is a result
-// to read. Matters most comes first: the sweep's pick of the 3–5 that matter most among what waits on someone else
-// (VIEW-17), each with the sweep's line. Then the groups by who has the next move. With agents starts with the steps
-// the user handed an agent, the asks themselves; each one's item keeps its own row in its group. Each group says in a
-// line what it holds. Sessions on no item come next, the first ten until Show all. Finished this week ends the list:
-// the tasks done or closed as not needed in the last week, with the last day's closed steps folded at its end
-// (VIEW-20). Every other grouping shows all the open work and the sessions on no item, with nothing left out for
-// showing above.
+// Below the card: a search's matches (VIEW-21), or the new session's composer while it is open.
 function renderWork(state) {
-  // On the page with the list of items, the list lives in the sidebar; below the card stay only a search's matches
-  // and the new session's composer. The steps closed in the last day stay on the classic page.
-  if (SIDEBAR && !ui.find) {
-    const newKey = "msg:new-session";
-    fill("work", ui.expanded.has(newKey) && h("div", { class: "new-session-box" },
-      composer(newKey, { session: null, context: {}, project: null, step: null, handOff: false, toSession: false })));
-    return;
-  }
-  const sessions = sessionMap(state);
-  if (ui.find) { renderFoundWork(state, sessions); return; }
-  const sort = storedChoice("cockpit:work-sort", WORK_SORTS, "recent");
-  const group = storedChoice("cockpit:work-group", WORK_GROUPS, "next");
-  if (sort === "messages") { renderMessageWork(state, sessions, group); return; }
-  const entries = (items) => items.map((item) => workEntry(item, null, sessions)).sort(workSorter(sort));
-  const loose = looseSessions(state).map((session) => workEntry(null, session, sessions)).sort(workSorter(sort));
-  const row = (entry) => entry.item ? itemRow(entry.item, state, sessions, null) : sessionRow(entry.session, state);
-  const count = (number) => h("span", { class: "group-count", text: number });
-  const head = workHead(state, sort, group, WORK_GROUPS);
-  if (group !== "next") {
-    const all = [...entries(state.items.filter((item) => !item.archived && item.ball !== "done")), ...loose].sort(workSorter(sort));
-    const list = !all.length ? h("p", { class: "note", text: "Add work or start a session" })
-      : group === "none" ? h("div", { class: "list" }, all.map(row))
-        : groupEntries(group, all).map((part) => disclosure(`view:${group}:${part.name}`, "group view", [part.name, count(part.entries.length)],
-          h("div", { class: "list" }, part.entries.map(row)), true));
-    // The steps handed to an agent keep their list, with Take back, as at the top of With agents.
-    fill("work", head, state.with_agents.length > 0 && handedList(state, state.with_agents), list);
-    return;
-  }
-  const cut = !ui.showAllSessions && loose.length > SESSIONS_TOP;
-  const looseGroup = loose.length > 0 && disclosure("ball:loose", "group loose", [LOOSE_NAME, count(loose.length)],
-    [h("div", { class: "list" }, (cut ? loose.slice(0, SESSIONS_TOP) : loose).map(row),
-        loose.length > SESSIONS_TOP && h("div", { class: "more-row" },
-          h("button", { class: "link-button", type: "button", onclick: () => { ui.showAllSessions = !ui.showAllSessions; render(false); } },
-            cut ? `Show all ${loose.length}` : "Show fewer")))], true);
-  const items = new Map(state.items.map((item) => [item.id, item]));
-  const asSteps = new Set([...state.queue, ...state.ready_next, ...state.snoozed].map((step) => step.item_id));
-  const focus = state.in_progress.filter((entry) => items.has(entry.item_id) && !asSteps.has(entry.item_id));
-  const focusIds = new Set(focus.map((entry) => entry.item_id));
-  const mattersMost = focus.length > 0 && disclosure("in-progress", "group in-progress",
-    [h("span", { class: "group-name" }, "Matters most"),
-      h("span", { class: "group-count", text: focus.length })],
-    [h("div", { class: "list" }, focus.map(({ item_id: id, line }) => itemRow(items.get(id), state, sessions, line)))], true);
-  const groups = GROUPS.filter(([group]) => group !== "you").map(([group, label]) => {
-    // A handed step shows in its item's group: in Waiting once its agent stopped more than an hour ago.
-    const handedSteps = state.with_agents.filter((step) => (items.get(step.item_id)?.group === "waiting") === (group === "waiting"));
-    const handed = group === "done" ? null : handedList(state, handedSteps);
-    const shown = state.items.filter((item) => item.group === group && !focusIds.has(item.id) && !asSteps.has(item.id));
-    if (group === "done") return [looseGroup, finishedGroup(shown, state, sessions)];
-    const total = shown.length + (handed ? handedSteps.length : 0);
-    if (!total) return null;
-    return disclosure(`group:${group}`, `group ${group}`, [label, count(total)],
-      [handed, h("div", { class: "list" }, entries(shown).map(row))],
-      !GROUPS_COLLAPSED.has(group));
-  });
-  fill("work", head, mattersMost, groups);
+  if (ui.find) { renderFoundWork(state, sessionMap(state)); return; }
+  const newKey = "msg:new-session";
+  fill("work", ui.expanded.has(newKey) && h("div", { class: "new-session-box" },
+    composer(newKey, { session: null, context: {}, project: null, step: null, handOff: false, toSession: false })));
 }
 
 // Search's filter on the page (VIEW-21): search jumps to the matches and filters the list, with closed work as
 // an option. The command menu's "Show matches on the page"
 // (keyboard.js) sets `ui.find` to {text, closed, target, found, error}, also through #find/<words> and
-// #find-closed/<words> from another page. The list of work then shows every task holding all the words or with a
-// session that holds them, also one whose step shows above, in its group by who moves next, and every session on
-// no item that holds them. With `closed` the server adds the closed work it still keeps (`found`), in a Closed
-// group. A bar at the top of the list holds the words, the switch, the counts and Clear. The filter lives in this
+// #find-closed/<words> from another page. Below the card the page then shows every task holding all the words or
+// with a session that holds them, also one whose step shows above, in its group by who moves next, and every
+// session on no item that holds them. With `closed` the server adds the closed work it still keeps (`found`), in a
+// Closed group. A bar at the top of the matches holds the words, the switch, the counts and Clear. The filter lives in this
 // tab until Clear.
 function wordsOf(text) {
   const words = text.toLowerCase().split(/\s+/).filter(Boolean);
@@ -11095,7 +11014,7 @@ function setFind(text, closed, target, jump) {
   history.replaceState(history.state, "", words ? `#find${closed ? "-closed" : ""}/${encodeURIComponent(words)}` : `${location.pathname}${location.search}`);
   if (closed && changed && findWords()) loadClosedWork();
   // The matches show on a phone's item screen.
-  if (SIDEBAR && jump) phoneOpen(true);
+  if (jump) phoneOpen(true);
   render(false);
   if (jump) jumpToFound();
 }
@@ -11115,21 +11034,37 @@ function dropFind() {
   if (location.hash.startsWith("#find")) history.replaceState(history.state, "", `${location.pathname}${location.search}`);
 }
 
-// Opening one task or session the filter hides, from the command menu, a link or a lamp, drops the filter first,
-// so the task or session shows. The caller draws the page.
-function revealSession(sessionId) {
-  const words = findWords();
-  const session = words && ui.state?.sessions.find((one) => one.session_id === sessionId);
-  if (words && !(session && sessionMatches(session, words, ui.state))) dropFind();
-}
-
-window.revealItem = (itemId) => {
+// A search's filter that hides the item goes, so the item shows.
+function revealItem(itemId) {
   const words = findWords();
   if (!words || !ui.state) return;
   const item = ui.state.items.find((one) => one.id === itemId);
   const ids = new Set(ui.state.sessions.filter((session) => sessionMatches(session, words, ui.state)).map((session) => session.session_id));
   if (!(item && itemFound(item, words, ids))) { dropFind(); render(false); }
-};
+}
+
+// Opens an item from the Pinned list, a mention or the keys: its row among a search's matches, opened, else its row
+// in the list at the left, which puts it on the card (VIEW-18). `inGroup`: the item's group, whose matches open
+// when its row is not drawn yet. Resolves with the row, or null when the page shows neither.
+async function openInWork(itemId, inGroup) {
+  revealItem(itemId);
+  if (!document.querySelector(`#work .row[data-item="${itemId}"]`)) {
+    const row = showInSidebar(itemId);
+    if (row) return row;
+  }
+  const listed = document.querySelector(`#work .row[data-item="${itemId}"]`);
+  const group = listed ? listed.closest("details.group") : document.querySelector(`#work details.group.${inGroup}`);
+  if (group && !group.open) {
+    group.open = true;
+    // The page records the open group on its toggle event, which fires after this task.
+    await new Promise((resolve) => setTimeout(resolve));
+  }
+  const row = document.querySelector(`#work .row[data-item="${itemId}"]`);
+  if (row && !row.classList.contains("open")) row.querySelector(".row-head").click();
+  const shown = document.querySelector(`#work .row[data-item="${itemId}"]`);
+  if (shown) shown.scrollIntoView({ block: "center" });
+  return shown;
+}
 
 // An open task the filter shows: it holds the words, or lists a session that does (`ids`).
 function itemFound(item, words, ids) {
@@ -11281,8 +11216,8 @@ function figureImages(step) {
 }
 
 // The item images a step's card shows besides the figures its text places: the user's own images, those on
-// their way up and the agents' images added in this step's round (since the item's step before it was put,
-// `round_from`) stay in the strip; the agents' images from earlier rounds wait under a closed "Other images"
+// their way up and the agents' images added in this step's round (`round_from`, including a new reply on the
+// same step) stay in the strip; the agents' images from earlier rounds wait under a closed "Earlier images"
 // (NEXT-17).
 function stepImages(key, item, size, step) {
   const figures = figureImages(step);
@@ -11291,7 +11226,7 @@ function stepImages(key, item, size, step) {
   const strip = rest.filter((image) => !earlier(image));
   const other = rest.filter(earlier);
   return [thumbs(strip, size),
-    other.length > 0 ? disclosure(`${key}:other-images`, "detail", `Other images on this task (${other.length})`, thumbs(other, size), false) : null];
+    other.length > 0 ? disclosure(`${key}:other-images`, "detail", `Earlier images (${other.length})`, thumbs(other, size), false) : null];
 }
 
 // `size`: "large" (Next up, about 96 px high) or "small" (rows and the editor, about 48 px).
@@ -11522,7 +11457,7 @@ function unsentAddMore(state) {
   return state.items.find((item) => (ui.drafts.get(addMoreKey(item.id)) || "").trim()) || null;
 }
 
-// Opens a to-do the user added in All work, or its step, once the Add box is out of the way. Until a state from
+// Opens a to-do the user added, or its step, once the Add box is out of the way. Until a state from
 // the server replaces it, the page draws a new to-do under its local id; Open waits for the server's, up to 10 s.
 async function openAdded(itemId) {
   if (ui.adding) closeAddBox();
@@ -11550,7 +11485,7 @@ function closeAddBox() {
   // focus moved from the text box shows the focus ring, and + would stay outlined.
   // The flag stays, so a box that comes back after a refused Add closes the same way.
   if (inside && ui.addByPointer) document.activeElement.blur();
-  else if (inside) (SIDEBAR ? document.querySelector(".sidebar-add") : document.getElementById("add"))?.focus();
+  else if (inside) [...document.querySelectorAll(".sidebar-add, .phone-add")].find((add) => add.checkVisibility())?.focus();
 }
 
 // Feedback: what + does, with the part picked first. The pick bar shows while the user points at the
@@ -11617,6 +11552,48 @@ function stageImages(files) {
   renderAddBox();
 }
 
+// Fixed menus stay inside their details (and the dialog's focus trap), but escape the panel's scroll clip.
+// Follow only while a menu is open: docking can move the panel without a scroll or resize event.
+function followAddMenus(panel) {
+  let frame = 0;
+  const place = () => {
+    frame = 0;
+    if (!panel.isConnected) return;
+    const menus = [...panel.querySelectorAll(".start-pick[open], .add-ways[open]")];
+    if (!menus.length) return;
+    const view = window.visualViewport;
+    const left = (view?.offsetLeft || 0) + 8;
+    const top = (view?.offsetTop || 0) + 8;
+    const right = left + (view?.width || innerWidth) - 16;
+    const bottom = top + (view?.height || innerHeight) - 16;
+    const set = (list, name, value) => {
+      const px = `${Math.round(value)}px`;
+      if (list.style[name] !== px) list.style[name] = px;
+    };
+    for (const menu of menus) {
+      const anchor = menu.querySelector(":scope > summary").getBoundingClientRect();
+      const list = menu.querySelector(":scope > .menu-list");
+      const above = Math.max(0, Math.min(bottom, anchor.top - 6) - top);
+      const below = Math.max(0, bottom - Math.max(top, anchor.bottom + 6));
+      // Direction depends only on the anchor, so wrapping and scrollbars cannot flip it back and forth.
+      const up = above > below;
+      set(list, "maxWidth", right - left);
+      set(list, "minWidth", Math.min(menu.classList.contains("add-ways") ? 260 : 180, right - left));
+      set(list, "maxHeight", up ? above : below);
+      // Layout sizes ignore the menu's opening scale animation, keeping its position steady throughout it.
+      const width = list.offsetWidth;
+      const height = list.offsetHeight;
+      const x = menu.classList.contains("add-ways") ? anchor.right - width : anchor.left;
+      set(list, "left", Math.max(left, Math.min(x, right - width)));
+      const y = up ? anchor.top - 6 - height : anchor.bottom + 6;
+      set(list, "top", Math.max(top, Math.min(y, bottom - height)));
+    }
+    frame = requestAnimationFrame(place);
+  };
+  // toggle does not bubble; capture also catches menus replaced by a staged selection or a redraw.
+  panel.addEventListener("toggle", () => { if (!frame) place(); }, true);
+}
+
 // While the user picks a part to attach, the dialog steps aside so the page can be clicked, and comes back
 // with the part once it is picked or the pick stops.
 function renderAddBox() {
@@ -11679,6 +11656,7 @@ function renderAddBox() {
   let panel = box.querySelector(".add-panel");
   if (!panel) {
     panel = h("div", { class: "add-panel" });
+    followAddMenus(panel);
     // Tab stays within the panel while it is open, and goes to the full-size image while one is open over it.
     panel.addEventListener("keydown", (event) => {
       if (event.key !== "Tab" || lightboxOpen()) return;
@@ -11822,9 +11800,9 @@ function addedItemIn(state, sent) {
   return null;
 }
 
-// The new to-do shows at once under Busy: on the page with the list at the left, the Add box flies into its row,
-// which is an Undo button for UNDO_ADD_MS, its bar running down; on the classic page, and on a phone's
-// item screen, which hides the list, the notice offers Undo. Only then does the Add go to the server, so Undo leaves nothing behind: the words, images and part go back
+// The new to-do shows at once under Busy in the list at the left: the Add box flies into its row, which is an Undo
+// button for UNDO_ADD_MS, its bar running down; a phone's item screen holds the Undo in its bar (sidebar.js
+// `buildPhoneBar`). Only then does the Add go to the server, so Undo leaves nothing behind: the words, images and part go back
 // into the box, as they do when the server refuses the Add. The server's item replaces the local one. Once the images
 // are up, a new session starts on it with the user's words (CONTROL-8), so its first message lists them; it starts
 // where a new session for an item without a project does. If the start is refused, a red toast says so, and the
@@ -11937,38 +11915,21 @@ function addItem(fireAndForget) {
     ui.pending.delete(holdKey);
     return true;
   };
-  // `row`: the Undo is the to-do's row in Busy, as the list at the left shows (on a phone's item screen, which hides
-  // the list, it sits on the bar's Your items); else it is the notice's button.
+  // The Undo is the to-do's row in Busy, as the list at the left shows (on a phone's item screen, which hides the
+  // list, it sits on the bar's Your items).
   const hold = {
-    at: Date.now(), timer: null, row: undoHeldInList(), notice: null,
-    send: () => {
-      if (!release()) return;
-      settle({ adding: send() });
-      // Sent while its notice still offers Undo (the page went to the background): the notice offers Open instead.
-      if (hold.notice !== null && (hold.notice === ui.toastShown || hold.notice === ui.toastWaiting?.id)) noticeSent();
-    },
+    at: Date.now(), timer: null,
+    send: () => { if (!release()) return; settle({ adding: send() }); },
     undo: () => { if (!release()) return; settle(null); putBack(); render(false); },
   };
   ui.addsHeld.set(local.id, hold);
-  // Open and Add more wait for the whole Add: the row then has its id, and Add more's words reach the session's
-  // first message rather than a text that message no longer reads.
-  added.known = settled.then((sent) => sent && sent.adding.then(() => { ui.addsRunning.delete(added.id); return typeof added.id === "number"; }));
+  settled.then((sent) => sent && sent.adding.then(() => { ui.addsRunning.delete(added.id); }));
   // Leaving the page while the Undo is on offer asks first, as the Add has not gone out yet.
   holdLeave(settled.then((sent) => sent && sent.adding));
-  if (hold.row) {
-    ui.arrived = { sent: outgoing, id: local.id, scrolled: false };
-    hold.timer = setTimeout(hold.send, UNDO_ADD_MS);
-    render(false);
-    flyToRow(from, local.id, local.title);
-    return;
-  }
-  // The classic page draws no list: the notice offers Undo, and the Add goes out once the notice leaves without it.
-  const words = fireAndForget ? `Fire and forget: ${clip(local.title, 60)}. Back only if it needs you.` : `Added: ${clip(local.title, 60)}. A session starts on it.`;
-  // The notice offers Add more too, so one sent too soon is finished (CONTROL-18).
-  const noticeSent = () => offerAddMore(toast(words, false, { label: "Open", run: () => whenAdded(added, openAdded) }), added);
-  hold.notice = toast(words, false, { label: "Undo", run: hold.undo, gone: hold.send });
-  offerAddMore(hold.notice, added);
+  ui.arrived = { sent: outgoing, id: local.id, scrolled: false };
+  hold.timer = setTimeout(hold.send, UNDO_ADD_MS);
   render(false);
+  flyToRow(from, local.id, local.title);
 }
 
 // A page hidden while an Add waits for its Undo time sends it now: a phone may stop the page's timers in the
@@ -11979,12 +11940,6 @@ document.addEventListener("visibilitychange", () => {
   render(false);
 });
 
-// Runs `then` with the new item's id once the server made it; a refused Add has none, and its words are back in
-// the Add box.
-function whenAdded(added, then) {
-  added.known.then((known) => { if (known) then(added.id); });
-}
-
 // A row whose Add is on its way to the server has no item to open yet: a click on it opens the item as soon as the
 // server made it, unless the user went to an item or a session meanwhile, or clicked another such row.
 function openWhenMade(localId) {
@@ -11992,19 +11947,6 @@ function openWhenMade(localId) {
   if (!sent) return;
   const at = ++ui.navigations;
   sent.added.made.then((id) => { if (id !== null && ui.navigations === at) selectItem(id); });
-}
-
-function offerAddMore(shown, added) {
-  // A notice that waits behind an open follow-up box gets its button once it shows.
-  const waiting = ui.toastWaiting;
-  if (waiting && waiting.id === shown) {
-    waiting.setups.push(() => offerAddMore(shown, added));
-    return;
-  }
-  const el = document.getElementById("toast");
-  if (shown !== ui.toastShown || el.hidden) return;
-  el.insertBefore(h("button", { type: "button", class: "toast-more",
-    onclick: () => { closeToast(); whenAdded(added, (id) => openAddMore({ id, title: added.title })); } }, "Add more"), el.querySelector(".toast-time"));
 }
 
 function addMoreKey(itemId) {
@@ -12326,7 +12268,12 @@ function drawSettings(inbox, inboxError) {
   const goalsRecovered = goalsRecoveredBody && storedEntries(goalsRecoveredBody);
   const goalsKept = goalsDraft(state);
   const entries = structuredClone(goalsKept?.goals ?? ui.goalsUnsaved ?? goalsRecovered ?? goalEntries(state.goals));
-  const goalsChanged = () => !sameEntries(entries, goalEntries(drawn(ui.state).goals));
+  // Each part counts as edited against the settings the view opened on, so priorities changed elsewhere while it is
+  // open (in another tab, or by an agent) are not saved back over by an edit of the inbox alone.
+  const goalsOpened = goalEntries(state.goals);
+  const goalsChanged = () => !sameEntries(entries, goalsOpened);
+  // A refused save is sent again by Save, as an edit is.
+  const goalsToSave = () => goalsChanged() || Boolean(ui.goalsUnsaved || goalsRecoveredBody);
   // The inbox's words: null when they did not load.
   const draft = inbox ? structuredClone(inbox) : null;
   const inPage = ui.inboxUnsaved || ui.inboxNext || ui.inboxSaving;
@@ -12346,12 +12293,14 @@ function drawSettings(inbox, inboxError) {
     const now = new Date().toISOString();
     writeStored(GOALS_DRAFT_KEY, goalsChanged() ? { goals: entries, at: readStored(GOALS_DRAFT_KEY, null)?.at ?? now } : null);
     if (draft) writeStored(INBOX_DRAFT_KEY, inboxChanged() ? { rules: draft.rules.points, sources: draft.sources.text, at: inboxDraft()?.at ?? now } : null);
-    discard.hidden = !(goalsChanged() || ui.goalsUnsaved || goalsRecoveredBody || inboxToSave());
+    discard.hidden = !(goalsToSave() || inboxToSave());
   };
   const back = () => slideView("back", () => closeSettings(true));
   const save = () => {
-    writeStored(GOALS_DRAFT_KEY, null);
-    saveGoals(entries);
+    if (goalsToSave()) {
+      writeStored(GOALS_DRAFT_KEY, null);
+      saveGoals(entries);
+    }
     if (inboxToSave()) {
       writeStored(INBOX_DRAFT_KEY, null);
       saveInboxSettings(draft);
@@ -12632,26 +12581,7 @@ function spendWords(spend) {
   ].join("\n");
 }
 
-function sessionOrder(session) {
-  return { blocked: 0, working: 1, idle: 2, failed: 3, done: 4, stopped: 5 }[sessionState(session)] ?? 6;
-}
-
-// How the one list of work sorts and groups (VIEW-3, VIEW-21), as the user last picked in this browser. Who moves next
-// is the list as it was, its groups by who has the next move; every other grouping shows all the open work, also the
-// work whose steps show above.
-const WORK_SORTS = { recent: "Most recent", messages: "Your latest message", active: "Active first", use: "Most Claude use", name: "Name" };
-const WORK_GROUPS = { next: "Who moves next", state: "By session state", stage: "By stage", priority: "By priority",
-  repo: "By repo", account: "By account", none: "No groups" };
-// Claude Code can list a session with no state; it groups and shows as not known.
-const SESSION_STATE_GROUPS = { blocked: "Waiting for a permission", working: "Working", idle: "Waiting on a background task",
-  failed: "Failed", done: "Finished their turn", stopped: "Stopped", "": "State not known" };
-const PRIORITY_GROUPS = [["urgent", "Urgent"], ["high", "High priority"], ["normal", "Normal priority"], ["low", "Low priority"]];
 const LOOSE_NAME = "Sessions on no item";
-
-function storedChoice(key, choices, fallback) {
-  const value = readStored(key, fallback);
-  return Object.hasOwn(choices, value) ? value : fallback;
-}
 
 // The sessions of the last day that no open item lists: Cockpit's own sweep, sessions of finished tasks,
 // and work not on Cockpit. Each has a row of its own in the list; every other session shows in its item's row.
@@ -12673,107 +12603,19 @@ function listingItem(state, sessionId) {
 }
 
 // An open item's sessions: those it lists, then the sessions that ask or answer its steps (`step_sessions`), as
-// the overview and the server's lamp count them (VIEW-2).
+// the server's lamp counts them (VIEW-2).
 function itemSessions(item) {
   return [...item.sessions, ...item.step_sessions.filter((id) => !item.sessions.includes(id))];
 }
 
 // Where a session's composer lives: the first place the page draws its open item, which is the item's step on Next
-// up, in the queue, Ready next or Snoozed (in that order, as openItemStep finds it), else the item's row in the list.
+// up, in the queue, Ready next or Snoozed (in that order), else the item's row in the list.
 // Null for a session on no open item, whose own row holds its composer.
 function sessionHome(state, sessionId) {
   const item = listingItem(state, sessionId);
   if (!item) return null;
   const step = [ui.next, ...state.queue, ...state.ready_next, ...state.snoozed].find((one) => one && one.item_id === item.id);
   return { item, step: step || null };
-}
-
-// A row of the list: an item with the sessions of the last day it lists (`live`, its first session first), or a
-// session no item lists.
-function workEntry(item, session, sessions) {
-  return { item, session, live: item ? itemSessions(item).map((id) => sessions.get(id)).filter(Boolean) : [session] };
-}
-
-// When the row last changed: the item, or the latest turn of a session on it.
-function entryTime(entry) {
-  return [entry.item ? entry.item.updated_at : "", ...entry.live.map((session) => session.updated_at || "")]
-    .reduce((latest, at) => at > latest ? at : latest, "");
-}
-
-function entryLabel(entry) {
-  return entry.item ? entry.item.title : sessionLabel(entry.session, entry.session.cwd);
-}
-
-// The row's most active session: the one Active first puts first.
-function entryLead(entry) {
-  return [...entry.live].sort((a, b) => sessionOrder(a) - sessionOrder(b))[0];
-}
-
-function workSorter(sort) {
-  const recent = (a, b) => entryTime(b).localeCompare(entryTime(a));
-  const use = (entry) => entry.live.reduce((sum, session) => sum + (session.spend ? session.spend.usd : 0), 0);
-  const order = (entry) => entryLead(entry) ? sessionOrder(entryLead(entry)) : 6;
-  if (sort === "active") return (a, b) => order(a) - order(b) || recent(a, b);
-  if (sort === "use") return (a, b) => use(b) - use(a) || recent(a, b);
-  if (sort === "name") return (a, b) => entryLabel(a).localeCompare(entryLabel(b), undefined, { sensitivity: "base" }) || recent(a, b);
-  return recent;
-}
-
-// A row's group's name, and its place among the groups: by session state in the order Active first uses, stages
-// and priorities in their own order, the others in the order of their first row, with the rows that belong
-// nowhere last. An item goes by its most active session's state, and by its first session's repo and account.
-function entryGroup(group, entry) {
-  const { item } = entry;
-  const lead = entryLead(entry);
-  const first = entry.session || entry.live[0];
-  if (group === "state") return lead ? { name: SESSION_STATE_GROUPS[sessionState(lead)] || sessionState(lead), rank: sessionOrder(lead) } : { name: "No session in the last day", rank: 7 };
-  if (!item && (group === "stage" || group === "priority")) return { name: LOOSE_NAME, rank: 9 };
-  if (group === "stage") return item.stage ? { name: capitalize(STAGE_LABELS[item.stage] || item.stage), rank: Object.keys(STAGE_LABELS).indexOf(item.stage) }
-    : { name: "No stage yet", rank: 8 };
-  if (group === "priority") {
-    const at = PRIORITY_GROUPS.findIndex(([priority]) => priority === item.priority);
-    return at < 0 ? { name: "Normal priority", rank: 2 } : { name: PRIORITY_GROUPS[at][1], rank: at };
-  }
-  if (group === "repo") {
-    const repo = (item && item.project) || repoOf(first && first.cwd);
-    return repo ? { name: repo, rank: 0 } : { name: "No repo known", rank: 1 };
-  }
-  if (!first) return { name: "No session in the last day", rank: 2 };
-  if (first.provider === "codex") return { name: "Codex", rank: 0 };
-  return first.account ? { name: `${capitalize(first.account)} account`, rank: 0 } : { name: "Account not known", rank: 1 };
-}
-
-// The rows in their groups: [{name, entries}] in the groups' order, the sorted order inside each.
-function groupEntries(group, entries) {
-  const groups = new Map();
-  entries.forEach((entry, at) => {
-    const { name, rank } = entryGroup(group, entry);
-    if (!groups.has(name)) groups.set(name, { name, rank, first: at, entries: [] });
-    groups.get(name).entries.push(entry);
-  });
-  return [...groups.values()].sort((a, b) => a.rank - b.rank || a.first - b.first);
-}
-
-function listPicker(label, key, choices, value, pick) {
-  return h("label", { class: "list-pick" }, h("span", { text: label }),
-    h("select", { "data-key": key, onchange: (event) => pick(event.target.value) },
-      Object.entries(choices).map(([id, words]) => h("option", { value: id, selected: id === value }, words))));
-}
-
-// The list's head: Sort and Group, and New session with its composer under it once pressed.
-function workHead(state, sort, group, groups) {
-  const newKey = "msg:new-session";
-  const starting = ui.expanded.has(newKey);
-  return [
-    h("div", { class: "list-picks work-picks" },
-      listPicker("Sort", "work:sort", WORK_SORTS, sort, (value) => { writeStored("cockpit:work-sort", value); render(false); }),
-      listPicker("Group", "work:group", groups, group, (value) => { writeStored("cockpit:work-group", value); render(false); }),
-      h("button", {
-        class: "button small ghost new-session", type: "button", "aria-expanded": String(starting),
-        onclick: () => toggle(newKey),
-      }, icon(starting ? "x" : "plus"), h("span", { class: "label", text: starting ? "Close" : "New session" }))),
-    starting && composer(newKey, { session: null, context: {}, project: null, step: null, handOff: false, toSession: false }),
-  ];
 }
 
 // What marks a session beside its name: Codex, the sweeper, the move to another account it waits for, the user's
@@ -12802,7 +12644,7 @@ function sessionSpend(session) {
 
 // Where a session on no item came from and what is left to do with it, in one line, so the user sees whether to
 // close it or give it an item: Cockpit's own sweep needs no item made for it; a session
-// waiting on a dialog or request is answered under Blocked and waiting; a stopped session needs no closing; a running
+// waiting on a dialog or request is answered on its blocked card; a stopped session needs no closing; a running
 // background Claude session Cockpit stops once idle (delivery.idle_stop_after).
 function sessionOrigin(session, ended) {
   if (session.standing) return session.standing_description;
@@ -12812,7 +12654,7 @@ function sessionOrigin(session, ended) {
   const by = !start ? "Started outside Cockpit"
     : `Started by ${start.author === "cockpit" ? "Cockpit" : start.author === "user" ? "you" : `agent ${actorWords(start.author)}`}`
       + (day === "today" ? " today" : ` on ${day}`);
-  if (session.waits_on_dialog) return `${by}. It waits on you: answer it ${SIDEBAR ? "from its red row in Inbox" : "under Blocked and waiting"}.`;
+  if (session.waits_on_dialog) return `${by}. It waits on you: answer it from its red row in Inbox.`;
   if (!session.alive) return `${by}. ${ended ? "Stopped, with its task finished" : "Stopped"}: nothing to close.`;
   if (session.provider === "codex") return `${by}. A Codex thread, still open.`;
   // Cockpit stops only a background session (one with a job file) once it is idle.
@@ -12822,13 +12664,13 @@ function sessionOrigin(session, ended) {
 }
 
 // A session no item lists (VIEW-3), as a row of the list like an item's: its name, what it does now, its marks,
-// Claude use, state and age; a press opens a composer to it. A session with a card under Blocked and waiting
+// Claude use, state and age; a press opens a composer to it. A session with a blocked card
 // shows its dialog there, not twice.
 function sessionRow(session, state) {
   const key = `msg:side:${session.session_id}`;
   const open = ui.expanded.has(key) && !ui.heldKeys.has(key);
   const carded = state.waiting_sessions.some((one) => one.session_id === session.session_id);
-  const detail = !carded && (session.needs || session.detail);
+  const detail = !carded && (session.needs || (session.detail && plainSummary(session.detail)));
   // Cockpit's own sweep goes by what it is. A session whose task is done or closed goes by the task's
   // title, marked so. Either way the session's own name shows on hover.
   const own = session.is_sweep ? "Cockpit sweep" : null;
@@ -12871,242 +12713,7 @@ function retryMessage(message) {
   }, null);
 }
 
-// Interrupt and send on a message that waits for its session's turn (MSG-3): the session stops at once and
-// resumes with it. Send now on one that waits for a place (SESSION-23): it goes past the limit. Either shows as
-// sending at once; if the server refuses, it shows as waiting again.
-function sendNow(message) {
-  return run(`send-now:${message.id}`, async () => {
-    const sending = (other) => other.id === message.id
-      ? { ...other, state: "sending", waits_since: null, take_back_until: null, capacity_since: null } : other;
-    try {
-      await optimistic((shown) => ({
-        ...shown,
-        messages: shown.messages.map(sending),
-        with_agents: shown.with_agents.map((step) => step.handoff && step.handoff.id === message.id ? { ...step, handoff: sending(step.handoff) } : step),
-      }), () => api("POST", `/api/messages/${message.id}/send-now`), null);
-    } catch (error) {
-      throw refused("Not sent now", error);
-    }
-  }, null);
-}
-
-// A failed message set aside (MSG-5): its work was done another way or is no longer needed.
-// It turns quiet at once; Undo restores it first, because the server refuses a retry of a dismissed
-// message.
-function dismissMessage(message) {
-  const dismissing = run(`message:dismiss:${message.id}`, async () => {
-    try {
-      await optimistic((shown) => ({
-        ...shown,
-        messages: shown.messages.map((other) => other.id === message.id ? { ...other, dismissed_at: new Date().toISOString(), dismissed_by: "user" } : other),
-      }), () => api("POST", `/api/messages/${message.id}/dismiss`, { reason: null }), null);
-    } catch (error) {
-      throw refused("Not dismissed", error);
-    }
-  }, null);
-  toast("Dismissed", false, { label: "Undo", run: () => dismissing.then(() => restoreMessage(message)) });
-}
-
-function restoreMessage(message) {
-  return run(`message:restore:${message.id}`, async () => {
-    try {
-      await optimistic((shown) => ({
-        ...shown,
-        messages: shown.messages.map((other) => other.id === message.id ? { ...other, dismissed_at: null, dismissed_by: null, dismiss_reason: null } : other),
-      }), () => api("POST", `/api/messages/${message.id}/restore`), null);
-    } catch (error) {
-      throw refused("Not restored", error);
-    }
-  }, null);
-}
-
-// Where a message went: a session by its name, or a new session (a plus and its name).
-function messageTarget(message, sessions) {
-  if (message.session_id) return sessionName(sessions.get(message.session_id), message.session_id, "", "to");
-  const repo = repoOf(message.new_cwd);
-  const name = message.new_name || `a new session in ${repo}`;
-  // The name sits in its own span: a flex box clips its text without the ellipsis.
-  return h("span", { class: "to new", title: `New session in ${repo || "a checkout"}: ${name}` },
-    icon("plus"), h("span", { class: "to-name", text: name }));
-}
-
-function messageRow(message, sessions, named) {
-  const failed = message.state === "failed" && !message.dismissed_at;
-  const dismissed = message.state === "failed" && Boolean(message.dismissed_at);
-  const wait = messageDelivery(message) === "waiting" && waitWords(message);
-  const why = message.failure || (message.detail || "").split("\n")[0] || "Did not arrive";
-  const sentBy = `Sent by ${message.author === "user" ? "you" : actorWords(message.author)}`;
-  const dismissedWords = dismissed && setAsideWords(message);
-  return h("li", { class: `msg ${dismissed ? "dismissed" : messageDelivery(message)}${named ? "" : " inline"}`, "data-message": message.id },
-    h("div", { class: "msg-head" },
-      dismissed
-        ? h("span", { class: "state-dot dismissed", role: "img", "aria-label": "Set aside", title: dismissedWords })
-        : deliveryMark(messageDelivery(message), failed ? "" : message.detail),
-      named ? messageTarget(message, sessions) : h("span", { class: "to" }),
-      dismissed && iconButton("back", "Restore: show it as failed again", { class: "button small ghost reveal", onclick: () => restoreMessage(message) }),
-      h("span", { class: "row-age", title: sentBy, "data-time": message.created_at, text: ago(message.created_at) })),
-    hasQuote(message.text)
-      ? h("div", { class: "msg-text", title: message.text }, quotedWords(linkWords(message.text), true).nodes)
-      : h("div", { class: "msg-text", title: message.text, text: linkWords(message.text) }),
-    failed && h("div", { class: "msg-error" },
-      h("span", { class: "msg-error-text", title: message.detail || why, text: why }),
-      iconButton("retry", "Retry", { class: "button small ghost", onclick: () => retryMessage(message) }),
-      iconButton("x", "Clear it: the work was done another way or is no longer needed", { class: "button small ghost", onclick: () => dismissMessage(message) })),
-    wait && h("div", { class: "msg-wait" },
-      h("span", { class: "msg-wait-text" }, lateMark(wait), `Waits ${wait.since} for the session's turn to end`),
-      interruptButton(message)),
-    messageDelivery(message) === "place" && h("div", { class: "msg-wait" },
-      h("span", { class: "msg-wait-text", text: placeWords(message) }),
-      sendNowButton(message)));
-}
-
-// The messages a row of the list shows: the user's own, and from anyone the failed ones, which need their Retry and
-// Clear (or Restore, once cleared), and the waiting ones, which need their Interrupt and send or Send now.
-function shownMessage(message) {
-  return message.author === "user" || message.state === "failed" || needsUser(message) || ui.retried.has(message.id);
-}
-
-// A message with a control the user may want: a failed one, or one that waits for its session's turn or for a place.
-function needsUser(message) {
-  return (message.state === "failed" && !message.dismissed_at) || ["waiting", "place"].includes(messageDelivery(message));
-}
-
-// The work list sorted by Your latest message puts the work and sessions the user wrote to in the last day first, open
-// or closed, the latest message first, each with its messages under it: the newest ROW_MESSAGES until More, and any
-// older one that failed or waits. The rest of the open work follows as Most recent sorts it, so opening any task or
-// session still finds its row. A message belongs to the task it names, else to the first row that holds its session:
-// open tasks, then closed ones, then sessions on no task. Messages no row holds (to an archived task, or a session that
-// never started) end the list. Who moves next means nothing here, so the view offers the other groupings.
-const ROW_MESSAGES = 3;
-
-function renderMessageWork(state, sessions, group) {
-  const groups = Object.fromEntries(Object.entries(WORK_GROUPS).filter(([id]) => id !== "next"));
-  const shownGroup = group === "next" ? "none" : group;
-  const open = state.items.filter((item) => !item.archived && item.ball !== "done");
-  const closed = state.items.filter((item) => item.archived || item.ball === "done");
-  const holders = [...open, ...closed].map((item) => workEntry(item, null, sessions))
-    .concat(looseSessions(state).map((session) => workEntry(null, session, sessions)))
-    .map((entry) => ({ entry, ids: new Set(entry.item ? itemSessions(entry.item) : [entry.session.session_id]), messages: [] }));
-  const loose = [];
-  const listed = new Set(state.items.map((item) => item.id));
-  for (const message of state.messages.filter(shownMessage)) {
-    // A message to a task the page no longer lists (archived) goes with the other messages, not under another
-    // task that shares its session.
-    const holder = holders.find(({ entry }) => entry.item && message.item_id === entry.item.id)
-      || (!message.item_id || listed.has(message.item_id) ? holders.find(({ ids }) => ids.has(message.session_id)) : null);
-    if (holder) holder.messages.push(message);
-    else loose.push(message);
-  }
-  const written = holders.filter((holder) => holder.messages.length)
-    .map(({ entry, messages }) => ({ ...entry, messages }))
-    .sort((a, b) => b.messages[0].created_at.localeCompare(a.messages[0].created_at));
-  const quiet = holders.filter(({ entry, messages }) => !messages.length && (!entry.item || (!entry.item.archived && entry.item.ball !== "done")))
-    .map(({ entry }) => ({ ...entry, messages: [] })).sort(workSorter("recent"));
-  const rows = [...written, ...quiet];
-  const row = (entry) => {
-    const el = entry.item ? itemRow(entry.item, state, sessions, null) : sessionRow(entry.session, state);
-    if (entry.messages.length) el.append(rowMessages(entry, sessions));
-    return el;
-  };
-  const count = (number) => h("span", { class: "group-count", text: number });
-  const list = !rows.length && !loose.length ? h("p", { class: "note", text: "Add work or start a session" })
-    : shownGroup === "none" ? h("div", { class: "list" }, rows.map(row))
-      : groupEntries(shownGroup, rows).map((part) => disclosure(`view:${shownGroup}:${part.name}`, "group view", [part.name, count(part.entries.length)],
-        h("div", { class: "list" }, part.entries.map(row)), true));
-  // The steps handed to an agent keep their list, with Take back, as in every other view.
-  fill("work", workHead(state, "messages", shownGroup, groups), state.with_agents.length > 0 && handedList(state, state.with_agents),
-    !written.length && h("p", { class: "note group-caption", text: "You sent no messages in the last day; the open work follows, the most recent first." }),
-    list,
-    loose.length > 0 && disclosure("msgs:loose", "group loose", ["Messages to closed or no work", count(loose.length)],
-      h("ul", { class: "side-list msg-list" }, loose.map((message) => messageRow(message, sessions, true))), true));
-}
-
-// A row's messages, newest first. The session each went to shows only when the task has more than one, or for an
-// agent's failed message, whose sender then shows in its tooltip.
-function rowMessages(entry, sessions) {
-  const key = `msgs:${entry.item ? `item:${entry.item.id}` : entry.session.session_id}`;
-  const all = ui.expanded.has(key);
-  const named = Boolean(entry.item && itemSessions(entry.item).length > 1);
-  const shown = all ? entry.messages : entry.messages.filter((message, at) => at < ROW_MESSAGES || needsUser(message));
-  return h("div", { class: "row-msgs" },
-    h("ul", { class: "side-list msg-list" }, shown.map((message) => messageRow(message, sessions, named || message.author !== "user"))),
-    entry.messages.length > shown.length || (all && entry.messages.length > ROW_MESSAGES) ? h("button", { class: "link-button", type: "button", onclick: () => toggle(key) },
-      all ? "Fewer" : `${entry.messages.length - shown.length} more`) : null);
-}
-
-// Patterns load when the user opens the panel, and again only on Reload: they move slowly.
-function loadPatterns() {
-  ui.patterns = "loading";
-  ui.patternsError = "";
-  renderPatterns();
-  api("GET", `/api/patterns?days=${PATTERN_DAYS}`)
-    .then((report) => { ui.patterns = report; }, (error) => { ui.patterns = null; ui.patternsError = error.message; })
-    .finally(renderPatterns);
-}
-
-// The columns of the steps-by-kind table: the outcome's key in the report, its icon and its words.
-const PATTERN_COLUMNS = [
-  ["created", "plus", "Made"],
-  ["done", "check", "Done or archived by you"],
-  ["closed by agents", "bolt", "Closed by agents"],
-  ["dismissed", "x", "Dismissed by you"],
-  ["withdrawn", "back", "Withdrawn before you got to them"],
-  ["snoozed", "clock", "Snoozed"],
-  ["taken to the top", "up", "Taken to the top by you"],
-  ["handed off", "handoff", "Given to agents"],
-];
-
-function kindTable(rows) {
-  const columns = PATTERN_COLUMNS.filter(([key]) => rows.some((row) => row[key]));
-  return h("table", { class: "pattern-table" },
-    h("thead", {}, h("tr", {}, h("th", { scope: "col", text: "Kind" }),
-      columns.map(([, name, words]) => h("th", { scope: "col", title: words, "aria-label": words }, icon(name))))),
-    h("tbody", {}, rows.map((row) => h("tr", {}, h("th", { scope: "row", text: row.name }),
-      columns.map(([key]) => h("td", { text: row[key] || "" }))))));
-}
-
-// Recent sweeps as bars, oldest first: the height is how long the sweep took, red when it failed.
-function sweepBars(sweeps) {
-  const longest = Math.max(1, ...sweeps.map((sweep) => sweep.minutes || 0));
-  return h("div", { class: "sweep-bars", role: "list", "aria-label": "Recent sweeps" }, [...sweeps].reverse().map((sweep) => {
-    const failed = Boolean(sweep.error) && sweep.minutes !== null;
-    const words = [
-      [sweep.minutes === null ? "not finished" : `${sweep.minutes} min`, plural(sweep.steps_put, "step", "steps"),
-        sweep.minutes_to_first_step !== null && `first after ${sweep.minutes_to_first_step} min`].filter(Boolean).join(" · "),
-      failed && sweep.error,
-    ].filter(Boolean).join("\n");
-    const bar = h("span", { class: `sweep-bar${failed ? " fail" : ""}${sweep.minutes === null ? " open" : ""}`, role: "listitem", title: words, "data-time": sweep.started_at });
-    bar.style.height = `${Math.max(8, Math.round(((sweep.minutes || 0) / longest) * 100))}%`;
-    return bar;
-  }));
-}
-
-function patternsBody(report) {
-  return [
-    h("h3", { text: "Repeats" }),
-    report.repeats.length
-      ? h("ul", { class: "pattern-list" }, report.repeats.map((repeat) => h("li", { text: repeat })))
-      : h("p", { class: "note", text: "No repeated issues" }),
-    report.by_kind.length > 0 && [h("h3", { text: "Steps by kind" }), kindTable(report.by_kind)],
-    report.median_minutes_to_done !== null && h("p", { class: "note", text: `Median to done: ${span(report.median_minutes_to_done)}` }),
-    report.sweeps.length > 0 && [h("h3", { text: "Recent sweeps" }), sweepBars(report.sweeps)],
-  ];
-}
-
-function renderPatterns() {
-  let body;
-  if (ui.patternsError) body = h("p", { class: "note fail-text", text: `Could not load patterns: ${ui.patternsError}` });
-  else if (ui.patterns === null || ui.patterns === "loading") body = Loading.waiting("patterns", Loading.ghost("w-80|w-60|w-70", "Loading the patterns"));
-  else body = Loading.arrive("patterns", patternsBody(ui.patterns));
-  const reload = (ui.patternsError || (ui.patterns && ui.patterns !== "loading"))
-    && iconButton("retry", "Reload", { class: "button small ghost head-action", onclick: (event) => { event.preventDefault(); loadPatterns(); } });
-  const el = disclosure("patterns", "more", [h("span", { class: "summary-text", title: `Last ${PATTERN_DAYS} days`, text: "Patterns" }), reload], body, false);
-  // Redraws set `open` too, which fires toggle again: load only what has not been asked for.
-  el.addEventListener("toggle", () => { if (el.open && ui.patterns === null && !ui.patternsError) loadPatterns(); });
-  fill("patterns", el);
-}
-
-// The user's time (TRACK-3) loads when the user opens the panel, and again only on Reload, like Patterns. The
+// The user's time (TRACK-3) loads when the user opens the panel, and again only on Reload. The
 // days are the user's, in the browser's time zone.
 const TIME_DAYS = 14;
 
@@ -13154,8 +12761,8 @@ function macBar(summary) {
   }));
 }
 
-function macKeyButton(words, tip) {
-  return h("button", { class: "button small ghost", type: "button", title: tip, onclick: () =>
+function macKeyButton(words, tip, look) {
+  return h("button", { class: `button small${look === "quiet" ? " ghost" : ""}`, type: "button", title: tip, onclick: () =>
     macAction("POST", "/api/activity/key", {}, "make the Terminal line for the Mac").then((reply) => {
       if (!reply) return;
       ui.macInstall = reply.install;
@@ -13166,16 +12773,21 @@ function macKeyButton(words, tip) {
 function macInstallLine() {
   if (!ui.macInstall) return null;
   return h("div", { class: "mac-install" },
-    h("p", { class: "note", text: "Paste this line into Terminal on your Mac within 15 minutes; it works once. macOS asks you to Allow it once per browser." }),
     h("pre", {}, h("code", { text: ui.macInstall })),
-    h("button", { class: "button small", type: "button", onclick: (event) => copy(ui.macInstall, event.currentTarget) }, "Copy line"));
+    h("ol", { class: "note mac-steps" },
+      h("li", {}, "Press ",
+        h("button", { class: "button small", type: "button", onclick: (event) => copy(ui.macInstall, event.currentTarget) }, "Copy line")),
+      h("li", {}, "On your Mac, open ", h("b", {}, "Terminal"), ": press ⌘ Space, type Terminal, press Return."),
+      h("li", {}, "Paste with ⌘ V and press Return. The line works once, within 15 minutes."),
+      h("li", {}, "When macOS asks whether ", h("b", {}, "Cockpit Recorder"), " may control your browser, press ", h("b", {}, "Allow"), ".")));
 }
 
 function macBody(summary) {
   const mac = summary.mac;
-  if (!mac.connected) {
-    return [h("p", { class: "note", text: "Connect your Mac to see which apps and sites your time went to, and how much of it was outside any task's timer." }),
-      macKeyButton("Connect a Mac", "Makes the Terminal line that installs the recorder"), macInstallLine()];
+  // Until the Mac's first minute arrives, installing is the one thing to do here.
+  if (!mac.connected || !mac.last_seen) {
+    return [h("p", { class: "note", text: "Install the recorder on your Mac to see which apps and sites your time went to, and how much of it was outside any task's timer." }),
+      macKeyButton("Install on your Mac", "Makes the Terminal line that installs the recorder", "plain"), macInstallLine()];
   }
   const seen = mac.last_seen ? `Last heard from ${ago(mac.last_seen)}` : "Not heard from yet";
   const pause = h("button", { class: "button small ghost", type: "button", onclick: () =>
@@ -13192,7 +12804,7 @@ function macBody(summary) {
     MAC_CATEGORIES.find(([key]) => key === row.category)[1]),
     h("span", { class: "time-value", text: timerTotal(row.minutes * 60) })));
   return [
-    h("p", { class: "note mac-state" }, mac.paused ? "Paused. " : "", seen, " ", pause, " ", macKeyButton("New key", "Makes a new Terminal line; the Mac's old key stops once you run it")),
+    h("p", { class: "note mac-state" }, mac.paused ? "Paused. " : "", seen, " ", pause, " ", macKeyButton("New key", "Makes a new Terminal line; the Mac's old key stops once you run it", "quiet")),
     macInstallLine(),
     summary.minutes + summary.away > 0
       ? [macBar(summary),
@@ -13264,7 +12876,7 @@ function progressWords(report) {
 const TIME_CORRECTION_FROM = "8 estimates on 3 finished tasks";
 
 // [key, name, what it counts, the icon heading the column in place of the name or null]. Feedback gets
-// an icon so the table fits the side column.
+// an icon so the table fits.
 const TIME_COLUMNS = [
   ["worked", "Worked", "Active time, step timers and feedback", null],
   ["on_steps", "On steps", "Time tracked on steps", null],
@@ -13304,8 +12916,7 @@ function timeBody(report) {
   ];
 }
 
-// On the sidebar page "Your time" is a view in the center layer (center.js), opened from the logo menu or a #time link;
-// on /classic it is the folded panel below the card.
+// "Your time" is a view in the center layer (center.js), opened from the logo menu or a #time link.
 function renderTime() {
   let body;
   if (ui.timeError) body = h("p", { class: "note fail-text", text: `Could not load your time: ${ui.timeError}` });
@@ -13313,37 +12924,22 @@ function renderTime() {
   else body = Loading.arrive("time", timeBody(ui.time));
   const reload = (ui.timeError || (ui.time && ui.time !== "loading"))
     && iconButton("retry", "Reload", { class: "button small ghost head-action", onclick: (event) => { event.preventDefault(); loadTime(); } });
-  if (SIDEBAR) {
-    const view = document.querySelector(".center-layer:not([hidden]) .center-body.center-time");
-    if (!view) return;
-    view.replaceChildren(h("div", { class: "center-time-page" }, body));
-    view.closest(".center-layer").querySelector(".center-tools").replaceChildren(...[reload].filter(Boolean));
-    return;
-  }
-  const el = disclosure("time", "more", [h("span", { class: "summary-text", title: `Last ${TIME_DAYS} days`, text: "Your time" }), reload], body, false);
-  // Redraws set `open` too, which fires toggle again: load only what has not been asked for.
-  el.addEventListener("toggle", () => { if (el.open && ui.time === null && !ui.timeError) loadTime(); });
-  fill("time", el);
-  const estimates = document.getElementById("estimates");
-  if (ui.toEstimates && (estimates || ui.timeError)) {
-    ui.toEstimates = false;
-    if (estimates) estimates.scrollIntoView({ behavior: "smooth", block: "start" });
-  }
+  const view = document.querySelector(".center-layer:not([hidden]) .center-body.center-time");
+  if (!view) return;
+  view.replaceChildren(h("div", { class: "center-time-page" }, body));
+  view.closest(".center-layer").querySelector(".center-tools").replaceChildren(...[reload].filter(Boolean));
 }
 
-// Permission rules live in the user's Claude Code settings file, not on the board: they load when
-// The user opens the panel or a blocked card needs them, and each change answers with the new lists.
-// Blocked cards mark the sentences already allowed from them, so a load with cards redraws those.
-// Resolves once the load settled.
+// Permission rules live in the user's Claude Code settings file, not on the board: they load when a blocked card
+// needs them, and each change answers with the new lists. Blocked cards mark the sentences already allowed from
+// them, so a load with cards redraws those. Resolves once the load settled.
 function loadPermissions() {
   ui.permissions = "loading";
   ui.permissionsError = "";
-  renderPermissions();
   return bootOr("permissions", "/api/permissions")
     .then((rules) => { ui.permissions = rules; }, (error) => { ui.permissions = null; ui.permissionsError = error.message; })
     .finally(() => {
       if (ui.state && (ui.state.permission_requests.length || (ui.state.moved_past || []).length)) safeRender();
-      else renderPermissions();
     });
 }
 
@@ -13352,31 +12948,22 @@ const RULE_LISTS = {
   auto: { name: "auto-mode sentence", placeholder: "Running the Tasks tests in ~/dev/app is fine." },
 };
 
-// Rule changes show in the lists at once; if the settings file refuses one, the
-// lists go back, `undo` (or null) puts back what else changed, and the toast says why.
+// Rule changes show in the lists at once; if the settings file refuses one, the lists go back and the toast says why.
 let ruleChanges = Promise.resolve();
 
-function changeRules(list, rule, change, words, undo) {
+// Undo of a rule added from a blocked call's card (PERM-11).
+function removeRule(list, rule) {
   const changing = ruleChanges.then(() => {
     const before = ui.permissions;
     const loaded = before && before !== "loading";
-    if (loaded) {
-      const rules = change === "add" ? [...before[list].filter((other) => other !== rule), rule] : before[list].filter((other) => other !== rule);
-      ui.permissions = { ...before, [list]: rules };
-      renderPermissions();
-    }
-    return run(`perm:${change}:${list}:${++ui.sendCount}`, async () => {
+    if (loaded) ui.permissions = { ...before, [list]: before[list].filter((other) => other !== rule) };
+    return run(`perm:remove:${list}:${++ui.sendCount}`, async () => {
       try {
-        const path = change === "add" ? "/api/permissions/rules" : "/api/permissions/rules/remove";
-        const answer = await (words ? apiWritten("POST", path, { list, rule }, words) : api("POST", path, { list, rule }));
-        ui.permissions = answer;
+        ui.permissions = await api("POST", "/api/permissions/rules/remove", { list, rule });
         ui.pendingRender = true;
-        if (change === "add" && !answer.added) toast(`Already there: ${answer.rule}`);
       } catch (error) {
         if (loaded) ui.permissions = before;
-        if (undo) undo();
-        renderPermissions();
-        throw new Error(`${change === "add" ? "Not added" : "Not removed"}: ${error.message}`, { cause: error });
+        throw new Error(`Not removed: ${error.message}`, { cause: error });
       }
     }, null);
   });
@@ -13385,32 +12972,18 @@ function changeRules(list, rule, change, words, undo) {
   return changing;
 }
 
-// The new rule shows in its list in place; an empty box adds nothing (its Add is hidden).
-function addRule(list) {
-  const key = `perm:add:${list}`;
-  const sent = ui.drafts.get(key) || "";
-  const rule = sent.trim();
-  if (!rule) return;
-  clearDraft(key, sent);
-  changeRules(list, rule, "add", { key, text: sent }, () => restoreDraft(key, sent));
-}
-
 // Undo of a rule changed from a blocked call's card (PERM-11): the server changes it back where it stands.
 function changeRuleBack(list, rule, old) {
   const changing = ruleChanges.then(() => {
     const before = ui.permissions;
     const loaded = before && before !== "loading";
-    if (loaded) {
-      ui.permissions = { ...before, [list]: before[list].map((other) => other === rule ? old : other) };
-      renderPermissions();
-    }
+    if (loaded) ui.permissions = { ...before, [list]: before[list].map((other) => other === rule ? old : other) };
     return run(`perm:edit:${list}:${++ui.sendCount}`, async () => {
       try {
         ui.permissions = await api("POST", "/api/permissions/rules/edit", { list, old: rule, rule: old });
         ui.pendingRender = true;
       } catch (error) {
         if (loaded) ui.permissions = before;
-        renderPermissions();
         throw new Error(`Not changed back: ${error.message}`, { cause: error });
       }
     }, null);
@@ -13420,80 +12993,14 @@ function changeRuleBack(list, rule, old) {
   return changing;
 }
 
-// `announce`: a toast with Undo (× in the panel), or none (Undo of a toast that added the rule).
-function removeRule(list, rule, announce) {
-  const removing = changeRules(list, rule, "remove", null, null);
-  if (announce) toast("Removed", false, { label: "Undo", run: () => removing.then(() => changeRules(list, rule, "add", null, null)) }, rule);
-}
-
-function ruleList(list, rules) {
-  if (!rules.length) return h("p", { class: "note", text: "Add a rule below" });
-  return h("ul", { class: "rule-list" }, rules.map((rule) => h("li", {},
-    list === "allow" ? h("code", { text: rule }) : h("span", { class: "rule-sentence", title: rule, text: rule }),
-    iconButton("x", "Remove rule", { class: "button small ghost reveal", onclick: () => removeRule(list, rule, true) }))));
-}
-
-function ruleAdder(list) {
-  const key = `perm:add:${list}`;
-  const box = list === "allow"
-    ? h("input", { class: "field", type: "text", "data-key": key, placeholder: RULE_LISTS[list].placeholder, spellcheck: "false", "aria-label": `New ${RULE_LISTS[list].name}` })
-    : h("textarea", { class: "field", rows: 1, "data-key": key, placeholder: RULE_LISTS[list].placeholder, "aria-label": `New ${RULE_LISTS[list].name}` });
-  box.value = ui.drafts.get(key) || "";
-  const adder = h("div", { class: `rule-adder${box.value.trim() ? " filled" : ""}` });
-  box.addEventListener("input", () => {
-    ui.drafts.set(key, box.value);
-    saveDrafts();
-    adder.classList.toggle("filled", Boolean(box.value.trim()));
-  });
-  box.addEventListener("keydown", (event) => {
-    const adds = list === "allow" ? event.key === "Enter" : event.key === "Enter" && (event.ctrlKey || event.metaKey);
-    if (adds) { event.preventDefault(); addRule(list); }
-  });
-  adder.append(box, iconButton("plus", "Add rule", {
-    class: "button small add-rule", "data-key": list === "allow" ? "Enter" : "Ctrl+Enter", onclick: () => addRule(list),
-  }));
-  return adder;
-}
-
-function permissionsBody(rules) {
-  return [
-    h("h3", { title: "Matching calls run without asking", text: "Tool rules" }),
-    ruleList("allow", rules.allow),
-    ruleAdder("allow"),
-    h("h3", {
-      title: rules.auto_keeps_defaults ? "Auto mode weighs these beside Claude Code's own" : "Auto mode weighs these",
-      text: "Auto-mode sentences",
-    }),
-    !rules.auto_keeps_defaults && h("p", { class: "note fail-text", text: "These sentences replace Claude Code's built-in rules" }),
-    ruleList("auto", rules.auto),
-    ruleAdder("auto"),
-  ];
-}
-
-function renderPermissions() {
-  let body;
-  if (ui.permissionsError) {
-    body = [h("p", { class: "note fail-text", text: `Could not read the rules: ${ui.permissionsError}` }),
-      h("div", { class: "panel-foot" }, iconButton("retry", "Retry", { class: "button small", onclick: loadPermissions }))];
-  } else if (ui.permissions === null || ui.permissions === "loading") {
-    body = Loading.waiting("permissions", Loading.ghost("w-60|w-80|w-70", "Loading the permission rules"));
-  } else {
-    body = Loading.arrive("permissions", permissionsBody(ui.permissions));
-  }
-  const loaded = ui.permissions && ui.permissions !== "loading";
-  const summary = h("span", { class: "summary-text", title: loaded ? `Mode: ${ui.permissions.mode}` : null, text: "Permissions" });
-  const el = disclosure("permissions", "more", summary, body, false);
-  el.addEventListener("toggle", () => { if (el.open && ui.permissions === null && !ui.permissionsError) loadPermissions(); });
-  fill("permissions", el);
-}
-
 // The page's link to the server: a dot in the header, grey while polls work, red when one failed,
 // with the time in its tooltip. A newer server (UI-13) shows Reload; drafts live in the browser's
 // storage, so a reload keeps them.
 function renderStatus() {
   const live = document.getElementById("live");
   const when = (date) => date.toLocaleTimeString([], { ...TIME_FORMAT, second: "2-digit" });
-  if (ui.error) {
+  // The saved copy drawn while the first fresh state loads is no failure; the offline note names it if it lasts.
+  if (ui.error && ui.error !== SAVED_PAGE_NOTE) {
     live.className = "live-dot fail";
     live.title = `Not updated since ${ui.lastOk ? when(ui.lastOk) : "the page loaded"}: ${ui.error}`;
     live.setAttribute("aria-label", "Not updating");
@@ -13505,8 +13012,9 @@ function renderStatus() {
   document.getElementById("reload").hidden = !newerVersion();
 }
 
+// A saved copy carries the version that ran when it was saved, which says nothing of the one running now.
 function newerVersion() {
-  return Boolean(ui.version && ui.state && ui.state.version && ui.state.version !== ui.version);
+  return Boolean(!ui.savedState && ui.version && ui.state && ui.state.version && ui.state.version !== ui.version);
 }
 // errors.js marks the errors of a page older than the running Cockpit.
 window.pageOutdated = newerVersion;
@@ -13515,7 +13023,7 @@ window.pageOutdated = newerVersion;
 // itself, since the user may be reading it or working on a step in another tab. Reload brings back the
 // open rows, toggles, the steps placed in the queue and the scroll position; drafts live in
 // storage anyway.
-function reloadKeepingPlace() {
+async function reloadKeepingPlace() {
   try {
     sessionStorage.setItem(REOPEN_KEY, JSON.stringify({
       expanded: [...ui.expanded], open: [...ui.open], closed: [...ui.closed], y: window.scrollY,
@@ -13523,6 +13031,18 @@ function reloadKeepingPlace() {
     }));
   } catch {
     // Blocked storage: the page comes back with its default rows open.
+  }
+  // The offline worker waits longer for the running Cockpit on a reload; Safari's reload carries no mark it can read.
+  const worker = navigator.serviceWorker?.controller;
+  try {
+    if (worker) await new Promise((resolve) => {
+      const pipe = new MessageChannel();
+      pipe.port1.onmessage = resolve;
+      setTimeout(resolve, 500);
+      worker.postMessage({ cockpitOffline: "reloading" }, [pipe.port2]);
+    });
+  } catch {
+    // The message failed: the reload goes ahead with the ordinary wait.
   }
   location.reload();
 }
@@ -13607,18 +13127,11 @@ function restoreFocus(focus) {
 // Each entry: the page sections one renderer fills.
 const SECTIONS = [
   [["pinned"], renderPinned],
-  [["blocked"], renderBlocked],
-  [["next", "queue"], renderSteps],
+  [["next"], renderSteps],
   // After the steps, which set the queue's order and the item the card shows.
-  ...(SIDEBAR ? [[["sidebar"], renderSidebar]] : []),
+  [["sidebar"], renderSidebar],
   [["work"], renderWork],
   [["goals"], renderGoals],
-  // The sidebar page leaves out the panels below the card: Patterns, Your time and Permissions.
-  ...(SIDEBAR ? [] : [
-    [["patterns"], renderPatterns],
-    [["time"], renderTime],
-    [["permissions"], renderPermissions],
-  ]),
 ];
 
 function renderSteps(state) {
@@ -13628,9 +13141,7 @@ function renderSteps(state) {
   const snoozed = withLeft(state.snoozed, "snoozed");
   seeWords([...queue, ...ready, ...snoozed], queue.length && !queue[0].left ? queue[0].id : null);
   holdSteps({ queue, ready, snoozed });
-  if (SIDEBAR) { renderSelected(state, { queue, ready, snoozed }); fill("queue"); return; }
-  renderNext(queue[0], state);
-  renderQueue(queue.slice(1), ready, snoozed, state);
+  renderSelected(state, { queue, ready, snoozed });
 }
 
 // The user's press took Next up's step away, so they have moved on from the steps they opened before it: those give up
@@ -13675,9 +13186,12 @@ function holdsPick(ids) {
 }
 
 // Whether the user is pressing: from the press until its click has landed, or the press ended without one
-// (releasePress), for at most PRESS_HOLD_MS.
+// (releasePress), for at most PRESS_HOLD_MS. A press on a slider is a drag that may last longer, and a redraw would
+// take the slider from under the pointer, so it holds for up to SLIDER_HOLD_MS.
 function pressHeld() {
-  return ui.pressedAt !== null && performance.now() - ui.pressedAt < PRESS_HOLD_MS;
+  if (ui.pressedAt === null) return false;
+  const most = ui.pressedOn?.matches?.('input[type="range"]') ? SLIDER_HOLD_MS : PRESS_HOLD_MS;
+  return performance.now() - ui.pressedAt < most;
 }
 
 // A redraw the user's press did not cause waits while a press is held or text is selected, as a poll's does
@@ -13736,6 +13250,7 @@ function render(keepFocused) {
   Icons.setProjects(state.projects || []);
   const focus = captureFocus();
   keepFieldHeights();
+  const scrolls = fieldScrolls();
   // The composers in sections this poll leaves alone, which no other section draws again (sessionList, sessionRow).
   ui.heldKeys = new Set(SECTIONS.filter(([ids]) => holdsPick(ids) || (keepFocused && holdsField(ids)))
     .flatMap(([ids]) => ids.flatMap((id) => [...document.querySelectorAll(`#${id} textarea[data-key]`)].map((field) => field.dataset.key))));
@@ -13748,7 +13263,6 @@ function render(keepFocused) {
     renderCounts(state);
     renderUsage(state);
     renderSweep(state);
-    fitHeader();
     renderBanner(state);
     for (const [ids, draw] of SECTIONS) {
       if (holdsPick(ids) || (keepFocused && holdsField(ids))) { ui.pendingRender = true; held.push(...ids); redrawAskBlocks(ids, state); continue; }
@@ -13765,11 +13279,12 @@ function render(keepFocused) {
   holdFollowing(took, ui.next);
   askLaterHolds();
   keepPulses();
-  // views.js redraws the overview's lights on it.
+  // Scripts that follow the page's redraws (sidebar.js, keyboard.js, flashes.js) listen for it.
   document.dispatchEvent(new Event("cockpit:redraw"));
   warmNext(state);
   renderStatus();
   markTopCardsSeen(state);
+  restoreFieldScrolls(scrolls);
   restoreFocus(focus);
   ui.renderedAt = Date.now();
   if (!held.some(catchingUp)) caughtUp(ui.stateAskedAt);
@@ -13786,9 +13301,39 @@ function keepFieldHeights() {
   }
 }
 
+// A box the user scrolled keeps its place when a redraw draws it again, also when the user scrolled it without
+// clicking into it: the "Ask for it yourself" box holds a long message under its height limit. Two boxes can share a
+// draft's key (the same task in Next up and in search). A box the redraw held keeps its own place; the boxes it drew
+// anew take the places of the boxes they replaced, in page order. Copies fading out of a redraw (.motion-ghost) count
+// as gone.
+function shownFields(selector) {
+  return [...document.querySelectorAll(selector)].filter((area) => !area.closest(".motion-ghost"));
+}
+
+function fieldScrolls() {
+  const scrolls = new Map();
+  for (const area of shownFields("textarea[data-key]")) {
+    const key = area.dataset.key;
+    if (!scrolls.has(key)) scrolls.set(key, []);
+    scrolls.get(key).push({ area, top: area.scrollTop });
+  }
+  return scrolls;
+}
+
+function restoreFieldScrolls(scrolls) {
+  for (const [key, boxes] of scrolls) {
+    const shown = shownFields(`textarea[data-key="${CSS.escape(key)}"]`);
+    const held = new Set(boxes.map((box) => box.area).filter((area) => shown.includes(area)));
+    const tops = boxes.filter((box) => !held.has(box.area)).map((box) => box.top);
+    if (!tops.some((top) => top > 0)) continue;
+    shown.filter((area) => !held.has(area))
+      .forEach((area, index) => { if (index < tops.length) area.scrollTop = tops[index]; });
+  }
+}
+
 // A command clamped to its lines fades at the bottom; the class says it is cut.
 function markClippedCalls() {
-  for (const call of document.querySelectorAll(":is(#blocked, #next) pre.call")) {
+  for (const call of document.querySelectorAll("#next pre.call")) {
     call.classList.toggle("clipped", !call.classList.contains("expanded") && call.scrollHeight > call.clientHeight + 1);
   }
 }
@@ -13844,11 +13389,11 @@ function nextStepAction(key) {
     toast("Keys paused: click the page", true);
     return;
   }
-  // A reason typed in Close item's box counts too: E would otherwise finish the task past it. On the
-  // item's last step E is Task done, which sends the reply box's text as the last message, as its key says.
+  // Keep unfinished replies and close reasons safe when focus leaves their box. Sending a last message with
+  // Task done remains an explicit button press, so a letter typed outside the box cannot send it and close the task.
   const finishing = key === "e" && finishesItem(step, drawn(ui.state));
   const reply = `msg:step:${step.id}`;
-  const unsent = [...(finishing ? [] : [reply]), `close:${step.id}`].some((draft) => (ui.drafts.get(draft) || "").trim());
+  const unsent = [reply, `close:${step.id}`].some((draft) => (ui.drafts.get(draft) || "").trim());
   if (unsent) {
     toast("Keys paused: unsent text on this step", true, null, "Send or clear the reply or close reason on this step first.");
     return;
@@ -13864,7 +13409,7 @@ function nextStepAction(key) {
 
 document.addEventListener("keydown", (event) => {
   if (event.defaultPrevented || event.isComposing || event.keyCode === 229) return;
-  if (document.querySelector("dialog[open]")) return;
+  if (window.shownOfflineNote?.() || document.querySelector("dialog[open]")) return;
   if (event.metaKey || event.ctrlKey || event.altKey || event.repeat) return;
   if (event.key === "Escape" && ui.picking) { stopPicking(); return; }
   if (event.key === "Escape" && ui.pick) { closePick(); return; }
@@ -13904,7 +13449,7 @@ document.addEventListener("keydown", (event) => {
     toast("R, E, X and Z act on Next up: close this view first", false);
     return;
   }
-  // Next up's keys act on its card only while some of it is on screen: lower on the page, in the list of work or below
+  // Next up's keys act on its card only while some of it is on screen: lower on the page, among a search's matches or below
   // (VIEW-3), they would close a step the user cannot see.
   const card = document.getElementById("next")?.getBoundingClientRect();
   if (!card || card.bottom <= header.getBoundingClientRect().bottom || card.top >= window.innerHeight) {
@@ -13931,7 +13476,7 @@ for (const type of ["pointerdown", "focusin"]) {
 // A press or keyboard focus on a step in the user's lists clears its Updated mark.
 function pressedStep(event) {
   if (ui.picking || ui.refocusing || !event.target.closest) return null;
-  const card = event.target.closest("#next [data-step], #queue [data-step]");
+  const card = event.target.closest("#next [data-step]");
   return card ? Number(card.dataset.step) : null;
 }
 for (const type of ["pointerdown", "focusin"]) {
@@ -13965,7 +13510,7 @@ for (const type of ["pointerdown", "keydown", "focusin", "input"]) {
     if (ui.refocusing || ui.picking || !event.isTrusted || !event.target.closest || event.target.closest(".reorder, .take")) return;
     if (type === "keydown" && event.key !== "Enter" && event.key !== " ") return;
     if (type === "focusin" && !event.target.matches("textarea, input, select, [contenteditable]")) return;
-    const card = event.target.closest("#next [data-step], #queue [data-step]");
+    const card = event.target.closest("#next [data-step]");
     if (card) holdPlace(Number(card.dataset.step));
   }, true);
 }
@@ -13973,7 +13518,7 @@ for (const type of ["pointerdown", "keydown", "focusin", "input"]) {
 // Pressing, typing or focusing on a permission card is working on it.
 for (const type of ["pointerdown", "focusin", "input"]) {
   document.addEventListener(type, (event) => {
-    const card = !ui.refocusing && !ui.picking && event.target.closest && event.target.closest(":is(#blocked, #next) [data-request], #sidebar li.warn-row[data-request]");
+    const card = !ui.refocusing && !ui.picking && event.target.closest && event.target.closest("#next [data-request], #sidebar li.warn-row[data-request]");
     if (card) markRequestActive(Number(card.dataset.request));
   }, { passive: true });
 }
@@ -13990,11 +13535,6 @@ markScrolled();
 // The header's height as --top-h: it wraps to two lines on a narrow screen and grows with the Add box, and
 // a section scrolled into view, the pick bar and toasts placed under the header use it (UI-20).
 new ResizeObserver(() => document.documentElement.style.setProperty("--top-h", `${header.offsetHeight}px`)).observe(header);
-// The header fits again when the window or a font changes its room; in the next frame, as a fit resizes
-// what it observes.
-let fitFrame = 0;
-const headerRoom = new ResizeObserver(() => { cancelAnimationFrame(fitFrame); fitFrame = requestAnimationFrame(fitHeader); });
-headerRoom.observe(document.querySelector(".top-inner"));
 
 // While picking, a click picks the part instead of acting on it: it runs
 // first (capture) and stops the click before any button, link or row sees it.
@@ -14111,7 +13651,7 @@ document.addEventListener("click", () => releasePress(0), true);
 // Back from the background, the cards the page shows may have left meanwhile: the state takes seconds to come, and
 // they would show until it does. When the state the page holds is older than a poll, the page asks the quick check
 // which of its cards still stand, and catches up until a state asked after the return is drawn (SPEC UI-60). Meanwhile
-// the open card, Blocked and waiting and the queue stay as drawn and in use: a yes from the quick check ends the
+// the open card and the list on the left stay as drawn and in use: a yes from the quick check ends the
 // catch-up unseen. A no veils the cards it names as gone, and only those: blurred, faded and inert under a thin
 // moving line over each part, so a card that left cannot be read or pressed before it goes. Next up is veiled whole,
 // and its keys wait, when its card left or the queue's top changed. When the quick check fails, or has not answered
@@ -14119,30 +13659,31 @@ document.addEventListener("click", () => releasePress(0), true);
 // the answer or the state came. A part with a box the user types in stays in view; a state that fails to come shows
 // the cards under the banner. The sidebar part is its queue group's list (sidebar.css). Throughout, the page's
 // redraws are still (motion.js), so no card that left plays its exit.
-const CATCH_UP_SECTIONS = ["next", "blocked", "queue", "sidebar"];
+const CATCH_UP_SECTIONS = ["next", "sidebar"];
 
 function startCatchUp() {
+  if (!navigator.onLine) { endCatchUp(); return; }
   if (!ui.state || Date.now() - ui.stateAskedAt < POLL_MS) return;
   // A return during a catch-up starts it again, with its own grace and parts.
   clearCatchUpMarks();
   ui.catchUpFrom = Date.now();
   ui.catchUpAll = false;
   ui.catchUpListed = null;
-  // A box keeps every part its section redraws with (SECTIONS): Next up's box keeps the queue on the classic page.
+  // A box keeps every part its section redraws with (SECTIONS).
   ui.catchUpKept = SECTIONS.map(([ids]) => ids).filter((ids) => ids.some((id) => CATCH_UP_SECTIONS.includes(id))
     && ids.every((id) => document.getElementById(id)) && holdsField(ids)).flat();
   document.body.dataset.catchUpKept = ui.catchUpKept.join(" ");
   document.body.classList.add("catching-up");
   ui.catchUpVeil = setTimeout(veilCatchUp, CATCH_UP_GRACE_MS);
-  checkListed(ui.catchUpFrom, ui.state);
+  checkListed(ui.catchUpFrom);
 }
 
-// Veils every part that waits: the page cannot say which of its cards still stand.
+// A slow catch-up check shows its progress while the page stays usable.
 function veilCatchUp() {
   if (ui.catchUpFrom === null) return;
-  ui.catchUpAll = true;
-  document.body.classList.add("catch-up-noted", "catch-up-veiled");
-  markCatchUp();
+  // A slow check keeps navigation and ordinary actions available. Only cards the server
+  // has actually reported gone become inert; sensitive actions always require a connection.
+  document.body.classList.add("catch-up-noted");
 }
 
 // The element that holds a catch-up part's cards: the section, or the sidebar's queue list.
@@ -14167,7 +13708,7 @@ function markCatchUp() {
   }
   if (!ui.catchUpListed) return;
   const { gone, topMoved } = goneCards(ui.state, ui.catchUpListed);
-  const partOf = (el) => ["next", "blocked", "queue"].find((id) => el.closest(`#${id}`)) || "sidebar";
+  const partOf = (el) => (el.closest("#next") ? "next" : "sidebar");
   const left = gone.filter((el) => catchingUp(partOf(el)));
   const next = document.getElementById("next");
   const nextWhole = Boolean(next) && catchingUp("next") && (topMoved || left.some((el) => next.contains(el)));
@@ -14201,8 +13742,9 @@ document.addEventListener("cockpit:redraw", () => { if (ui.catchUpFrom !== null)
 // The quick answer to "is all this still there?": the ids the page lists, without the rest of the state, which takes
 // seconds on a busy host. When nothing the page shows has gone and Next up shows the same step, the catch-up ends at
 // once; the state follows and draws what is new. Otherwise the cards that left are veiled until the state came, and
-// the others show again when the grace had veiled every part.
-async function checkListed(from, shown) {
+// the others show again when the grace had veiled every part. The answer is held against the state drawn when it
+// comes, which a state asked before the return may have replaced meanwhile.
+async function checkListed(from) {
   let listed;
   try {
     listed = await api("GET", withOpened("/api/listed", {}));
@@ -14211,7 +13753,7 @@ async function checkListed(from, shown) {
     return;
   }
   if (ui.catchUpFrom !== from) return;
-  if (stillListed(shown, listed)) {
+  if (stillListed(ui.state, listed)) {
     endCatchUp();
     return;
   }
@@ -14247,12 +13789,12 @@ async function checkHidden() {
 
 // Whether every card the page draws in the parts that wait still stands as drawn, by the quick answer `listed`: a
 // step in the same group (a row the user kept after its step left, in ui.left, stays whatever the state says), a
-// blocked call in the same list, a session still at its dialog, a Codex question still open, an item on All work or
-// off it as before; the handed step Next up shows still with its agent; and Next up's queue top the same. A warning
+// blocked call in the same list, a session still at its dialog, a Codex question still open, an item in the state or
+// out of it as before; the handed step Next up shows still with its agent; and Next up's queue top the same. A warning
 // the quick answer does not cover (a sign-in, a wrong model, an account problem), a redraw the page put
-// off, or a refusal the classic page counts under "got past without you" that went, keeps the wait for the whole
+// off, keeps the wait for the whole
 // state.
-const REQUEST_LISTS = ["permission_requests", "settled_requests", "moved_past", "held_requests"];
+const REQUEST_LISTS = ["permission_requests", "settled_requests", "moved_past", "held_requests", "checker_refusals"];
 
 function stillListed(shown, listed) {
   const { gone, topMoved, other } = goneCards(shown, listed);
@@ -14273,7 +13815,7 @@ function goneCards(shown, listed) {
   const codex = new Set(listed.codex_requests.map(String));
   const items = new Set(listed.items);
   const itemsWere = new Set(shown.items.map((item) => item.id));
-  const drawn = (selector) => [...document.querySelectorAll(`:is(#next, #blocked, #queue, #sidebar .sidebar-group.queue) ${selector}`)]
+  const drawn = (selector) => [...document.querySelectorAll(`:is(#next, #sidebar .sidebar-group.queue) ${selector}`)]
     .filter((el) => !el.closest(".motion-ghost, .close-copy"));
   const stepStands = (id) => ui.left.has(id) || (stepIs.has(id) && stepIs.get(id) === stepWas.get(id));
   const requestStands = (id) => requestIs.has(id) && requestIs.get(id) === requestWas.get(id);
@@ -14283,6 +13825,7 @@ function goneCards(shown, listed) {
     if (kind === "request") return requestStands(Number(id));
     if (kind === "session") return waiting.has(id);
     if (kind === "codex") return codex.has(id);
+    if (kind === "checker") return listed.checker_refusals.length > 0;
     return null;
   };
   const warnings = drawn("[data-warning]").map((el) => [el, warningStands(el.dataset.warning)]);
@@ -14293,12 +13836,12 @@ function goneCards(shown, listed) {
       ...warnings.filter(([, stands]) => stands === false).map(([el]) => el),
       ...drawn(".waiting-card[data-session]").filter((el) => !waiting.has(el.dataset.session)),
       ...drawn("[data-codex]").filter((el) => !codex.has(el.dataset.codex)),
+      ...drawn(".checker-card").filter(() => !listed.checker_refusals.length),
       ...drawn("[data-item]").filter((el) => items.has(Number(el.dataset.item)) !== itemsWere.has(Number(el.dataset.item))),
       ...drawn("[data-handed]").filter((el) => stepIs.get(Number(el.dataset.handed)) !== "with_agents"),
     ],
     topMoved: (shown.queue[0]?.id ?? null) !== (listed.steps.queue[0] ?? null),
-    other: Boolean(ui.pendingRender) || warnings.some(([, stands]) => stands === null)
-      || !(SIDEBAR || ids(shown.moved_past).every((id) => requestIs.get(id) === "moved_past")),
+    other: Boolean(ui.pendingRender) || warnings.some(([, stands]) => stands === null),
   };
 }
 
@@ -14312,8 +13855,12 @@ function nextVeiled() {
   return catchingUp("next") && Boolean(document.getElementById("next")?.inert);
 }
 
+// The page is current once it drew a state asked after the return, or a state that agrees with the quick list's
+// answer, which was asked after it: a state already on its way when the tab came back then ends the wait, rather
+// than the next one, which takes as long again on a busy host.
 function caughtUp(askedAt) {
-  if (ui.catchUpFrom !== null && askedAt >= ui.catchUpFrom) endCatchUp();
+  if (ui.catchUpFrom === null) return;
+  if (askedAt >= ui.catchUpFrom || (ui.catchUpListed && stillListed(ui.state, ui.catchUpListed))) endCatchUp();
 }
 
 function endCatchUp() {
@@ -14353,7 +13900,7 @@ window.addEventListener("cockpit:not-sent", (event) => {
     return;
   }
   event.preventDefault();
-  // Feedback from the side column's box, gone since FEEDBACK-9, comes back in the pick box.
+  // Feedback from the old general box, gone since FEEDBACK-9, comes back in the pick box.
   const key = words.key === "fb:general" ? PICK_KEY : words.key;
   // A pick box open on another part, or closed with words kept for the next part, keeps its own words and part;
   // these wait for it to close empty. They name no part.
@@ -14471,14 +14018,7 @@ window.addEventListener("resize", () => {
   resizeFrame = requestAnimationFrame(markClippedCalls);
 });
 
-document.getElementById("update").addEventListener("click", update);
 document.getElementById("resume-sweeps").addEventListener("click", resumeSweeps);
-// Update's arrow turns once when the user presses it, then rests (UI-23).
-document.getElementById("update").addEventListener("click", (event) => {
-  if (event.currentTarget.disabled || matchMedia("(prefers-reduced-motion: reduce)").matches) return;
-  const arrow = event.currentTarget.querySelector(".icon");
-  if (arrow) arrow.animate([{ transform: "rotate(0)" }, { transform: "rotate(360deg)" }], { duration: 640, easing: "cubic-bezier(0.23, 1, 0.32, 1)" });
-});
 document.getElementById("feedback-mode").addEventListener("click", openAddWithPart);
 // On a phone the header has no room for the feedback button; the brand menu holds it instead (UI-20).
 document.getElementById("feedback-menu").addEventListener("click", (event) => {
@@ -14545,70 +14085,15 @@ document.addEventListener("drop", (event) => {
 
 async function openKeyboardItem(itemId) {
   const item = ui.state?.items.find((entry) => entry.id === itemId);
-  const shown = await window.openInWork?.(itemId, item?.group);
+  const shown = await openInWork(itemId, item?.group);
   if (shown) window.CockpitKeys?.highlight(shown);
 }
 
-// Work that waits for the user shows as its steps, not as a row (VIEW-18). This shows the item's first step: Next
-// up, or its row in the queue, Ready next or Snoozed, opened. Null when the item has no step there.
-function openItemStep(itemId) {
-  if (SIDEBAR) return showInSidebar(itemId);
-  if (!ui.state) return null;
-  const state = drawn(ui.state);
-  // Opening a step from search or the pinned list holds its place (NEXT-16).
-  if (ui.next && ui.next.item_id === itemId) {
-    holdPlace(ui.next.id);
-    document.getElementById("next").scrollIntoView({ block: "start" });
-    return document.querySelector(`#next [data-step="${ui.next.id}"]`);
-  }
-  for (const [steps, group] of [[state.queue, null], [state.ready_next, "ready-next"], [state.snoozed, "snoozed"]]) {
-    const step = steps.find((one) => one.item_id === itemId);
-    if (!step) continue;
-    if (group) { ui.open.add(group); ui.closed.delete(group); } else ui.showAllQueue = true;
-    ui.expanded.add(`step:${step.id}`);
-    holdPlace(step.id);
-    render(false);
-    const row = document.querySelector(`#queue .row[data-step="${step.id}"]`);
-    if (row) row.scrollIntoView({ block: "center" });
-    return row;
-  }
-  return null;
-}
-window.openItemStep = openItemStep;
-
-// A session's own composer (VIEW-3), where sessionHome puts it: under Task details on its item's step card, in its
-// item's row in the list of work, or in the session's own row when no open item lists it.
+// A session's conversation in the session view, with its message box focused.
 async function openKeyboardSession(sessionId) {
   if (!ui.state) return;
-  if (SIDEBAR) {
-    await openSessionView(sessionId, openedFrom(null, sessionId));
-    focusDraft(document.querySelector("#session-composer textarea"), { preventScroll: true });
-    return;
-  }
-  revealSession(sessionId);
-  const home = sessionHome(drawn(ui.state), sessionId);
-  const key = `msg:side:${sessionId}`;
-  ui.expanded.add(key);
-  ui.showAllSessions = true;
-  let place;
-  if (home?.step) {
-    ui.open.add(`task:${home.step.id}`);
-    ui.closed.delete(`task:${home.step.id}`);
-    render(false);
-    place = openItemStep(home.item.id);
-  } else if (home) {
-    ui.expanded.add(`item:${home.item.id}`);
-    render(false);
-    place = await window.openInWork?.(home.item.id, home.item.group);
-  } else {
-    render(false);
-    place = document.querySelector(`#work .row[data-session="${CSS.escape(sessionId)}"]`);
-    for (let group = place?.closest("details"); group; group = group.parentElement.closest("details")) group.open = true;
-  }
-  const field = place?.querySelector(`textarea[data-key="${CSS.escape(key)}"]`);
-  if (!field) return;
-  field.closest(".composer").scrollIntoView({ block: "center" });
-  focusDraft(field, { preventScroll: true });
+  await openSessionView(sessionId, openedFrom(null, sessionId));
+  focusDraft(document.querySelector("#session-composer textarea"), { preventScroll: true });
 }
 
 function keyboardReply(row) {
@@ -14616,7 +14101,7 @@ function keyboardReply(row) {
   // A warning takes no reply: it has only its fix and close buttons.
   if (row.dataset.warning) return;
   // A line in the sidebar: its item's card takes the reply.
-  if (SIDEBAR && row.closest("#sidebar")) {
+  if (row.closest("#sidebar")) {
     phoneOpen(true);
     selectItem(Number(row.dataset.item));
     const card = document.querySelector("#next .next-card");
@@ -14640,7 +14125,7 @@ function keyboardReply(row) {
 // New session sits in the list's head, which the filter's bar takes the place of, so it clears the filter.
 function startKeyboardSession() {
   // The new-session box is on a phone's item screen.
-  if (SIDEBAR) phoneOpen(true);
+  phoneOpen(true);
   if (ui.find) dropFind();
   ui.expanded.add("msg:new-session");
   render(false);
@@ -14663,11 +14148,9 @@ window.CockpitKeys?.connect({
     const found = foundWork(ui.state, words);
     return { tasks: found.items.length, sessions: found.sessions };
   },
-  // G P opens Priorities and inbox; G M sorts the work list by Your latest message.
+  // G P opens Priorities and inbox.
   showSection: (id) => {
     if (id === "goals") openSettings("goals");
-    else if (id === "messages") showMessages();
-    else if (id === "failed") openFailures();
   },
   reply: keyboardReply,
   // T on a highlighted ready-next row (NEXT-36); false leaves the key alone on any other row.
@@ -14704,7 +14187,8 @@ async function openMention(itemId) {
     while (ui.tick === asked || ui.refreshing) await new Promise((resolve) => setTimeout(resolve, 50));
     listed = ui.state.items.find((item) => item.id === itemId);
   }
-  const shown = await window.openInWork?.(itemId, listed?.group);
+  if (center.view && listed) { selectItem(itemId); return; }
+  const shown = await openInWork(itemId, listed?.group);
   if (shown) { window.CockpitKeys?.highlight(shown); return; }
   setFind(`#${itemId}`, true, itemId, true);
 }
@@ -14734,20 +14218,18 @@ function followItem() {
   if (ui.state) open(); else document.addEventListener("cockpit:redraw", open, { once: true });
 }
 
-if (SIDEBAR) {
-  registerCenterView("time", {
-    title: "Your time",
-    draw: () => { if (ui.time === null && !ui.timeError) loadTime(); else renderTime(); },
-  });
-}
+registerCenterView("time", {
+  title: "Your time",
+  draw: () => { if (ui.time === null && !ui.timeError) loadTime(); else renderTime(); },
+});
 
-// #time: "Your time" from the logo menu or a link, such as the one on the step that connects a Mac. The sidebar page
-// opens it in the center layer; /classic opens its panel below the card.
+// #time: "Your time" from the logo menu or a link, such as the one on the step that connects a Mac, opens it in the
+// center layer.
 function followTime() {
   if (location.hash !== "#time") return;
   history.replaceState(history.state, "", `${location.pathname}${location.search}`);
   document.querySelector(".brand-menu")?.removeAttribute("open");
-  const open = SIDEBAR ? () => openCenter("time") : openEstimates;
+  const open = () => openCenter("time");
   if (ui.state) open(); else document.addEventListener("cockpit:redraw", open, { once: true });
 }
 
@@ -14779,8 +14261,16 @@ window.addEventListener("cockpit:choice-saved", () => {
     if (!document.querySelector("dialog.page-overlay[open]:not(.page-overlay-beside)")) refresh();
   }, 1000);
 });
-refresh();
-setInterval(() => { if (!document.hidden) refresh(); }, POLL_MS);
+(async () => {
+  try {
+    const saved = await window.CockpitOffline?.peek("/api/state");
+    if (saved && !ui.state) await refresh(saved.data);
+  } catch (error) { logError("opening the saved board", error); }
+  refresh();
+})();
+// A slow periodic read already checks for changes; let it finish before the next interval. Explicit refreshes
+// after an action or returning to the tab still queue a follow-up through refreshAgain.
+setInterval(() => { if (!document.hidden && !ui.refreshing) refresh(); }, POLL_MS);
 document.querySelector(".brand-menu .menu-list form")?.before(zoneEntry);
 reportZone();
 setInterval(() => { if (!document.hidden) reportZone(); }, ZONE_REPORT_MS);

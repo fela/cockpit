@@ -49,10 +49,12 @@ from cockpit import (
     sidechat,
     snooze_words,
     spend,
+    spend_worker,
     store,
 )
 from cockpit.accounts import Problem
 from cockpit.app import Settings, create_app
+from cockpit.views import read as read_view
 from tests.conftest import (
     CLAUDE_SETTINGS_TEXT,
     COOKIE_KEY,
@@ -350,8 +352,8 @@ def serve(work: Path) -> None:
     )
     sidechat.ask_copy = fake_copy
     snooze_words.read = fake_snooze_read
-    threading.Thread(target=spend.refresh_forever, args=(spend_index, codex_index), daemon=True).start()
-    app = SlowWrites(create_app(settings, deliverer, cache, spend_index, codex_index, build_parts()))
+    threading.Thread(target=spend.refresh_codex_forever, args=(codex_index,), daemon=True).start()
+    app = SlowWrites(create_app(settings, deliverer, cache, spend_index, codex_index, build_parts(), read_view))
     cookie = auth.session_cookie_value(COOKIE_KEY, EMAIL, int(time.time()) + 86400)
     # Written whole and then renamed, so a test that polls for the file never reads it half written.
     # And a visitor cookie for someone a page isn't shared with, as Google sign-in on the public address would set it.
@@ -362,7 +364,11 @@ def serve(work: Path) -> None:
     }))
     (work / "cookie.json.part").replace(work / "cookie.json")
     server = uvicorn.Server(uvicorn.Config(app, log_level="warning"))
-    server.run(sockets=[sock])
+    worker = spend_worker.start(spend_index)
+    try:
+        server.run(sockets=[sock])
+    finally:
+        worker.stop()
 
 
 if __name__ == "__main__":

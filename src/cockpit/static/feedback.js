@@ -202,6 +202,7 @@
     key.classList.add("on");
     renderBar();
     bar.hidden = false;
+    dockPick();
   }
 
   // Once a part is picked, the bar says that a click on the same spot tries the next guess there.
@@ -222,6 +223,7 @@
     document.body.classList.remove("picking");
     key.classList.remove("on");
     bar.hidden = true;
+    dockPick();
     markHover(null);
     // Leaving feedback mode without a part ends the feedback's time.
     if (!ui.pick) ui.since = null;
@@ -415,7 +417,24 @@
     box.hidden = false;
     // The chosen part keeps its mark while the user writes, and the box stands beside it, the page not darkened.
     Pick.mark("chosen", pick.el, pick.target.replace(/^page:/, ""));
-    Pick.dock(box, pick.el, Math.max(16, (bar.hidden ? document.querySelector("header.top") : bar).getBoundingClientRect().bottom + 8));
+    dockPick();
+  }
+
+  function dockPick() {
+    const top = dockTop();
+    box.style.setProperty("--pick-top", `${top}px`);
+    Pick.dock(box, ui.pick?.el || null, top);
+  }
+
+  addEventListener("resize", dockPick);
+
+  // How high the docked box may stand: below the pick bar while it shows, else below the header where the header
+  // is a bar across the top. In the sidebar layout a side page's header is a rail down the left edge, which leaves
+  // the top of the window free.
+  function dockTop() {
+    const header = document.querySelector("header.top").getBoundingClientRect();
+    const above = !bar.hidden ? bar.getBoundingClientRect() : header.width >= innerWidth / 2 ? header : null;
+    return Math.max(16, above ? above.bottom + 8 : 0);
   }
 
   // What a hover over the pick's name or copy shows: everything the feedback sends to find the part.

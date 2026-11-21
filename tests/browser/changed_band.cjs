@@ -95,9 +95,9 @@ async function main() {
       const errors = [];
       page.on("pageerror", (error) => errors.push(error.message));
       page.on("console", (message) => { if (message.type() === "error") errors.push(message.text()); });
-      await page.goto(`${info.origin}/classic`);
-      // The Next up card; its row in the queue below carries the same data-step.
-      const card = page.locator(`article.next-card[data-step="${id}"]`);
+      await page.goto(`${info.origin}/`);
+      // The step is the queue's only open one, so it is Next up.
+      const card = page.locator(`#next article.next-card[data-step="${id}"]`);
       const band = card.locator(".changed-banner");
       await band.waitFor();
 

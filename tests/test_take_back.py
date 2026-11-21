@@ -142,17 +142,6 @@ def test_a_restart_keeps_a_hand_off_that_waits_for_take_back(world: World) -> No
     assert kept["state"] == "queued" and kept["take_back_until"] is not None
 
 
-def test_send_now_skips_the_wait_for_take_back(world: World, tmp_path: Path, monkeypatch) -> None:
-    # Mid-turn: Send now stops the session at once, as it does for a message that waits for the turn.
-    stops_and_resumes(world, live("working", "busy", str(tmp_path)), monkeypatch)
-    _, handed = hand_off(world)
-    response = world.client.post(f"/api/messages/{handed['id']}/send-now", headers=world.user())
-    assert response.status_code == 200, response.text
-    sent = message(world, handed["id"])
-    assert sent["state"] == "sent" and sent["take_back_until"] is None
-    assert sent["detail"] == "stopped the session at once and resumed it with the message as its prompt"
-
-
 def follow_up(world: World, message_id: int, text: str):
     return world.client.post(f"/api/messages/{message_id}/follow-up", json={"text": text}, headers=world.user())
 

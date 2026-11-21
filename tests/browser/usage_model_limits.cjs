@@ -72,7 +72,7 @@ async function main() {
       const page = await context.newPage();
       await routeMachine(page, LOW_MACHINE);
       page.on("pageerror", (error) => pageErrors.push(error.message));
-      await page.goto(`${info.origin}/classic`);
+      await page.goto(`${info.origin}/`);
       await page.waitForSelector("#usage .lane.claude .wk.over", { state: "attached", timeout: 30e3 });
       const said = await page.getAttribute("#usage .usage.caps", "aria-label");
       await page.hover("#usage .lane.claude");

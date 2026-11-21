@@ -1,5 +1,4 @@
-/* The page with the list of items at its left (VIEW-26, sidebar.js). The list takes the place of the status lights
-   above the card and of the queue and the list of work below it; the card stays as it is. */
+/* The page with the list of items at its left (VIEW-26, sidebar.js), and the card beside it. */
 
 .sidebar:empty { display: none; }
 
@@ -14,9 +13,8 @@ body[data-layout="sidebar"] .layout {
   column-gap: 0;
   min-height: 100vh;
 }
-/* Patterns, Your time and Permissions stay on the classic page; Priorities and Pinned moved into the rail. */
+/* Priorities and Pinned move from the side column into the rail, so the side column stays out. */
 body[data-layout="sidebar"] .layout > .side { display: none; }
-body[data-layout="sidebar"] #overview { display: none; }
 
 .rail {
   position: sticky;
@@ -134,7 +132,7 @@ body[data-layout="sidebar"] .toast > span { flex: 1 1 auto; }
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) { --group-band: color-mix(in oklab, var(--margin) 55%, var(--bg)); }
 }
-.sidebar-groups { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.sidebar-groups { flex: none; display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 
 /* Motion in the list (motion.js): a row that changes group glides there over the rows between, on the page's colour;
    what a poll changed lights up in the accent's tint; a group's count that changed turns amber for a moment. */
@@ -474,8 +472,7 @@ body[data-layout="sidebar"] .session-card > .session-log { flex: 1 0 auto; }
 .phone-bar { display: none; }
 @media (max-width: 1000px) {
   body[data-layout="sidebar"] .layout > .primary { padding: 0 16px 8px; }
-  /* The page is the card here, under the bar's line: no hairlines of a card of its own (look.css draws them on the
-     classic page), and no gap for warnings while there are none. */
+  /* The page is the card here, under the bar's line: no hairlines of a card of its own, and no gap for warnings while there are none. */
   :root body[data-layout="sidebar"] #next > .next-card { padding: 4px 16px 8px; box-shadow: none; }
   body[data-layout="sidebar"] .phone-bar + .banner-area:empty { display: none; }
   body[data-layout="sidebar"] .phone-bar {
@@ -499,15 +496,15 @@ body[data-layout="sidebar"] .session-card > .session-log { flex: 1 0 auto; }
   .phone-items > .busy-undo { flex: none; min-height: 32px; white-space: nowrap; }
   .phone-items.close.holding { background: var(--complete-bg); box-shadow: inset 0 0 0 1px var(--complete-line); animation-name: hold-light-close; }
   .phone-items.close.holding > .phone-back { color: var(--complete-text); }
-  .phone-items.close.holding > .phone-back > .icon { color: var(--complete); }
+  .phone-items.close.holding > .phone-back > .icon { color: var(--complete-text); }
   .phone-items.close > .busy-undo {
     background: color-mix(in oklab, var(--complete-bg), var(--complete) 8%); color: var(--complete-text);
     box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--complete-line), var(--complete) 30%);
   }
   .phone-items.close > .busy-undo:hover { background: color-mix(in oklab, var(--complete-bg), var(--complete) 16%); }
-  .phone-items.close > .busy-undo > .busy-undo-fill { background: color-mix(in oklab, var(--complete-bg), var(--complete) 34%); }
-  .phone-items.close > .busy-undo:focus-visible { outline-color: var(--complete); }
-  .phone-items.close > .busy-undo > .icon { color: var(--complete); }
+  .phone-items.close > .busy-undo > .busy-undo-fill { background: var(--complete-drain); }
+  .phone-items.close > .busy-undo:focus-visible { outline-color: var(--complete-text); }
+  .phone-items.close > .busy-undo > .icon { color: var(--complete-text); }
   .phone-items.landing > .busy-undo { visibility: hidden; }
   @media (prefers-reduced-motion: reduce) { .phone-items.holding { animation: none; } }
   .phone-back > .icon { width: 16px; height: 16px; }
@@ -641,12 +638,14 @@ body[data-layout="sidebar"] #next > .resorted-pin { padding-right: 22px; }
 @media (max-width: 1000px) {
   body[data-layout="sidebar"] #next > .resorted-pin { top: 56px; padding-right: 16px; }
   body[data-layout="sidebar"] #next > .resorted-pin > .reorder { width: 24px; height: 24px; transform: translateY(calc(-50% + 16px)); }
-  body[data-layout="sidebar"] #next:has(> .resorted-pin) > .next-card > .step-context > .context-marks::after { content: ""; flex: none; width: 40px; }
+  body[data-layout="sidebar"] #next:has(> .resorted-pin) > .next-card .context-marks::after { content: ""; flex: none; width: 40px; }
   .warn-pin > .warn-peek { right: 16px; top: 28px; }
 }
 @media (max-width: 640px) {
+  /* The marks' 44 px tap areas rise into the card's top padding (look.css), so the phone card keeps its 20 px. */
+  :root body[data-layout="sidebar"] #next > .next-card { padding-top: 20px; }
   body[data-layout="sidebar"] #next > .resorted-pin { padding-right: 0; }
-  body[data-layout="sidebar"] #next:has(> .resorted-pin) > .next-card > .step-context > .context-marks::after { width: 38px; }
+  body[data-layout="sidebar"] #next:has(> .resorted-pin) > .next-card .context-marks::after { width: 38px; }
   .warn-pin > .warn-peek { right: 0; }
 }
 
@@ -663,8 +662,10 @@ body[data-layout="sidebar"] #next > .resorted-pin { padding-right: 22px; }
 /* Its ⋯ menu sits at the card's top right, where a step's sits (SPEC UI-72). A snooze asks once more inside the menu. */
 .warn-step > .warn-step-head { position: absolute; top: 18px; right: 18px; }
 .warn-step > .warn-step-head + .ask { padding-right: 28px; }
-.warn-step > .warn-snoozed-note { display: flex; align-items: center; gap: 6px; margin: 8px 0 0; color: var(--accent-text); font-size: var(--fs-meta); }
-.warn-step > .warn-snoozed-note .icon { width: 14px; height: 14px; }
+.warn-step > .warn-snoozed-note, .waiting-card > .warn-snoozed-note { display: flex; align-items: center; gap: 6px; margin: 8px 0 0; color: var(--accent-text); font-size: var(--fs-meta); }
+.warn-step > .warn-snoozed-note .icon, .waiting-card > .warn-snoozed-note .icon { width: 14px; height: 14px; }
+/* A dialog's card indents its lines under the heading's words, past the mark. */
+.waiting-card:not(.startup-dialog) > .warn-snoozed-note { margin-left: 24px; }
 .sidebar-list li.warn-snoozed .sidebar-lead { color: var(--text-3); }
 .warn-menu .warn-snooze-confirm { display: flex; flex-direction: column; gap: 8px; padding: 6px 4px 8px; max-width: 300px; }
 .warn-menu .warn-snooze-confirm > .menu-note { margin: 0; padding: 0 4px; color: var(--text-2); font-size: var(--fs-meta); line-height: 18px; }
@@ -752,19 +753,19 @@ body[data-layout="sidebar"] #next > .resorted-pin { padding-right: 22px; }
 /* A close's Undo in Finished this week: the same row and heading as an Add's Undo, in the close's plum. */
 .sidebar-list .side-row.undo-close { background: var(--complete-bg); box-shadow: inset 0 0 0 1px var(--complete-line); color: var(--complete-text); }
 .sidebar-list .side-row.undo-close:hover { background: color-mix(in oklab, var(--complete-bg), var(--complete) 10%); }
-.sidebar-list .side-row.undo-close:focus-visible { outline-color: var(--complete); }
+.sidebar-list .side-row.undo-close:focus-visible { outline-color: var(--complete-text); }
 .undo-close > .undo-add-fill { background: color-mix(in oklab, var(--complete-bg), var(--complete) 24%); }
-.undo-close .sidebar-lead .icon { color: var(--complete); }
+.undo-close .sidebar-lead .icon { color: var(--complete-text); }
 .undo-close .undo-add-secs { color: var(--complete-text); }
 .sidebar-group.done:not([open]) > summary.holding {
   background: var(--complete-bg); box-shadow: inset 0 0 0 1px var(--complete-line); color: var(--complete-text);
   animation-name: hold-light-close;
 }
-.sidebar-group.done:not([open]) > summary.holding > .icon { color: var(--complete); }
-@keyframes hold-light-close { from { background: color-mix(in oklab, var(--complete-bg), var(--complete) 45%); } }
+.sidebar-group.done:not([open]) > summary.holding > .icon { color: var(--complete-text); }
+@keyframes hold-light-close { from { background: var(--complete-flash); } }
 /* After a close the new count pulses once, up and back, then stays bold in plum while the Undo lasts. */
 .sidebar-group.done .count-roll > .count-now {
-  color: var(--complete); animation-name: count-in, count-pulse-close; animation-iteration-count: 1, 2;
+  color: var(--complete-text); animation-name: count-in, count-pulse-close; animation-iteration-count: 1, 2;
 }
 @keyframes count-pulse-close {
   from { transform: scale(1); text-shadow: none; }
@@ -775,9 +776,9 @@ body[data-layout="sidebar"] #next > .resorted-pin { padding-right: 22px; }
   box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--complete-line), var(--complete) 30%);
 }
 .sidebar-group.done .busy-undo:hover { background: color-mix(in oklab, var(--complete-bg), var(--complete) 16%); }
-.sidebar-group.done .busy-undo > .busy-undo-fill { background: color-mix(in oklab, var(--complete-bg), var(--complete) 34%); }
-.sidebar-group.done .busy-undo:focus-visible { outline-color: var(--complete); }
-.sidebar-group.done .busy-undo > .icon { color: var(--complete); }
+.sidebar-group.done .busy-undo > .busy-undo-fill { background: var(--complete-drain); }
+.sidebar-group.done .busy-undo:focus-visible { outline-color: var(--complete-text); }
+.sidebar-group.done .busy-undo > .icon { color: var(--complete-text); }
 .sidebar-group.done .busy-undo > .undo-add-secs { color: var(--complete-text); }
 /* The heading keeps one line in the list's width: the Undo keeps its words together, and the group's name gives up
    its end first ("Finished this w…"). */

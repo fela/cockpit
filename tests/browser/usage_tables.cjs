@@ -19,6 +19,7 @@ function report(period) {
     sessions: [{ session_id: "session-1", name: `Session for ${period}`, title: "", first_prompt: "Fix parser",
       cwd: "/example/parser", kind: "terminal", first: stamp, last: stamp, turns: 1, use }],
     skills: [], origins: [], session_kinds: [], models: [], top_turns: [], miss_turns: [], unpriced_models: [],
+    other_models: { calls: 0, tokens: { fresh: 0, cached: 0, output: 0 }, sessions: [] },
     week_list_usd: 4000, plan_usd_per_percent: 0.5,
     limits: { accounts: [], error: null },
     codex: { calls: 0, sessions: [], accounts: [], total: { fresh: 0, cached: 0, output: 0, reasoning: 0 },
@@ -44,7 +45,7 @@ async function main() {
         return route.fulfill({ contentType: type || "application/octet-stream", body: fs.readFileSync(file) });
       });
       await page.goto("http://localhost/usage");
-      await page.waitForSelector(".spend-readout");
+      await page.waitForSelector("button.spend-readout");
       assert.match(await page.locator("#spend-lede").textContent(), /Updating usage from session files/);
       refreshing = false;
       await page.waitForFunction(() => !document.querySelector("#spend-lede").textContent.includes("Updating usage"), null,
@@ -63,8 +64,8 @@ async function main() {
       await page.locator("#spend-more > summary").click();
       await page.getByRole("button", { name: "7 days", exact: true }).click();
       await page.waitForFunction(() => document.querySelector("#spend-lede").textContent.startsWith("The last 7 days"));
-      // A rank card opens its table and scrolls there on the same click.
-      await page.locator("#spend-where .spend-card").filter({ hasText: "Sessions" }).first().locator(".card-more").click();
+      // A rank list opens its table and scrolls there on the same click.
+      await page.locator("#spend-where .rank-list").filter({ hasText: "Sessions" }).first().locator(".rank-head button").click();
       assert.equal(await page.locator("#spend-more").evaluate((el) => el.open), true);
       assert.match(await page.locator(".sessions-table").textContent(), /Session for 7/);
       const numbers = await page.evaluate(() => [dollars(4.2), dollars(138), percent(0.04), percent(4.3), tokens(175000), axisFigure(2000)]);

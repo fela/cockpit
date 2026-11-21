@@ -79,7 +79,7 @@ async function main() {
         page.on("pageerror", (error) => errors.push(error.message));
         page.on("console", (message) => { if (message.type() === "error") errors.push(message.text()); });
         await page.clock.install();
-        await page.goto(`${info.origin}/classic`);
+        await page.goto(`${info.origin}/`);
         await page.locator(`#next [data-step="${id}"]`).waitFor({ timeout: 60000 });
         return { context, page, errors };
       };
@@ -88,7 +88,7 @@ async function main() {
         const page = await context.newPage();
         page.setDefaultTimeout(30000);
         page.on("pageerror", (error) => errors.push(error.message));
-        await page.goto(`${info.origin}/classic`);
+        await page.goto(`${info.origin}/`);
         await page.locator(`#next [data-step="${id}"]`).waitFor({ timeout: 60000 });
         return page;
       };
@@ -165,6 +165,8 @@ async function main() {
       // way to its button.
       const toastBox = page.locator("#toast:not([hidden])");
       const offered = await toastBox.waitFor().then(() => toastBox.innerText(), () => "");
+      // The page's next one-second check closes the box once the answer is in, here and after Add below.
+      await box(page).waitFor({ state: "detached", timeout: 3000 }).catch(() => {});
       const boxAfterReturn = await box(page).count();
       check(`${width}: Return closes the box`, !boxAfterReturn, `box still open; toast: ${JSON.stringify(offered)}`);
       await toastBox.hover({ timeout: 5000 }).catch(() => {});
@@ -200,6 +202,7 @@ async function main() {
 
       await box(page).getByRole("button", { name: /^Add/ }).click();
       const added = await timerUntil((timer) => timer && timer.step_id === id);
+      await box(page).waitFor({ state: "detached", timeout: 3000 }).catch(() => {});
       check(`${width}: Add closes the box`, !(await box(page).count()), "still open");
       check(`${width}: Add runs the stopped timer on, so the time without activity counts`,
         added && added.started_at === running.started_at, `${JSON.stringify(added)} after ${running.started_at}`);
@@ -217,18 +220,100 @@ async function main() {
         if (!refused) break;
         if (tries >= 3) throw refused;
       }
+      // Cockpit's whole state is slow to come on a busy host: the test holds it until the question showed.
+      let releaseState = null;
+      const stateHeld = new Promise((resolve) => { releaseState = resolve; });
+      await page.route(/\/api\/state(\?|$)/, async (route) => {
+        await stateHeld;
+        await route.continue();
+      });
       await page.clock.setSystemTime(now + 10 * 60 * 1000);
       await page.mouse.move(120, 500);
       await page.clock.resume();
       const woke = await box(page).waitFor().then(() => true, () => false);
       check(`${width}: an input after a gap asks about the gap`, woke, "no box");
+      check(`${width}: without waiting for the whole state`, woke && !(await veiled(page)), "veil stays");
+      if (shots) await page.screenshot({ path: path.join(shots, `woke-${width}.png`) });
+      releaseState();
+      await page.unrouteAll({ behavior: "wait" });
       await timerUntil((timer) => timer === null);
       await page.reload({ timeout: 60000 });
       const reloaded = await box(page).waitFor({ timeout: 60000 }).then(() => true, () => false);
       check(`${width}: a reload asks the same question again`, reloaded, "no box after the reload");
       await box(page).getByRole("button", { name: "Return" }).click();
-      const back = await timerUntil((timer) => timer && timer.step_id === id);
+      let back = await timerUntil((timer) => timer && timer.step_id === id);
       check(`${width}: Return after the reload runs the timer on`, back && back.step_id === id, JSON.stringify(back));
+
+      // Another page stops the timer and asks while this one sleeps: back, this page shows that question, also while
+      // Cockpit's whole state is slow to come.
+      {
+        const counted = (await user("GET", "/api/state")).input.count;
+        await page.waitForFunction((count) => ui.state.input.count >= count && ui.state.timer, counted);
+        let now = 0;
+        for (let tries = 0; ; tries += 1) {
+          now = await page.evaluate(() => Date.now());
+          const refused = await page.clock.pauseAt(now + 30000).then(() => null, (error) => error);
+          if (!refused) break;
+          if (tries >= 3) throw refused;
+        }
+        let releaseState = null;
+        const stateHeld = new Promise((resolve) => { releaseState = resolve; });
+        await page.route(/\/api\/state(\?|$)/, async (route) => {
+          await stateHeld;
+          await route.continue();
+        });
+        const elsewhere = await user("POST", `/api/steps/${id}/timer/away`, { since: new Date().toISOString(), seen: counted });
+        check(`${width}: another page's stop asks`, Boolean(elsewhere.away), JSON.stringify(elsewhere));
+        await page.clock.setSystemTime(now + 10 * 60 * 1000);
+        await page.mouse.move(140, 520);
+        await page.clock.resume();
+        const asked = await box(page).waitFor().then(() => true, () => false);
+        const held = asked ? "" : await page.evaluate(() => JSON.stringify({
+          now: Date.now(), gap: ui.gap, check: ui.timerCheck, stateAskedAt: ui.stateAskedAt, back: ui.back,
+          timer: ui.state.timer, away: ui.state.away, input: ui.state.input, idle: Boolean(ui.idle),
+        }));
+        check(`${width}: back, the question another page asked shows without waiting for the whole state`,
+          asked && !(await veiled(page)), asked ? "veil stays" : `no box: ${held}`);
+        releaseState();
+        await page.unrouteAll({ behavior: "wait" });
+        if (asked) await box(page).getByRole("button", { name: "Return" }).click();
+        back = await timerUntil((timer) => timer && timer.step_id === id);
+        check(`${width}: Return to the other page's question runs the timer on`, back && back.step_id === id, JSON.stringify(back));
+      }
+
+      // The same after more than an hour: the question is not asked here, and the next input answers it with Return,
+      // also while Cockpit's whole state is slow to come.
+      {
+        const counted = (await user("GET", "/api/state")).input.count;
+        await page.waitForFunction((count) => ui.state.input.count >= count && ui.state.timer, counted);
+        let now = 0;
+        for (let tries = 0; ; tries += 1) {
+          now = await page.evaluate(() => Date.now());
+          const refused = await page.clock.pauseAt(now + 30000).then(() => null, (error) => error);
+          if (!refused) break;
+          if (tries >= 3) throw refused;
+        }
+        let releaseState = null;
+        const stateHeld = new Promise((resolve) => { releaseState = resolve; });
+        await page.route(/\/api\/state(\?|$)/, async (route) => {
+          await stateHeld;
+          await route.continue();
+        });
+        const elsewhere = await user("POST", `/api/steps/${id}/timer/away`, { since: new Date().toISOString(), seen: counted });
+        await page.clock.setSystemTime(now + 2 * 60 * 60 * 1000);
+        await page.mouse.move(160, 540);
+        await page.clock.resume();
+        const learned = await page.waitForFunction(() => ui.timerCheck && ui.timerCheck.answer.away && !ui.gap)
+          .then(() => true, () => false);
+        await page.mouse.move(180, 560);
+        const resumed = await timerUntil((timer) => timer && timer.step_id === id);
+        check(`${width}: after more than an hour the next input answers the other page's question with Return`,
+          Boolean(elsewhere.away) && learned && resumed && resumed.step_id === id && !(await box(page).count()),
+          `asked ${JSON.stringify(elsewhere.away)}, learned ${learned}, timer ${JSON.stringify(resumed)}`);
+        releaseState();
+        await page.unrouteAll({ behavior: "wait" });
+        back = resumed || back;
+      }
 
       // A Cockpit page opened from the step counts as the step: beside its card at laptop width, over the whole
       // window (a modal dialog) at phone width.
@@ -292,9 +377,13 @@ async function main() {
           await sleep(300);
         }
         const before = await veiled(page);
+        const held = before ? "" : await page.evaluate(() => JSON.stringify({
+          now: Date.now(), gap: ui.gap, check: ui.timerCheck, stateAskedAt: ui.stateAskedAt, lastInput: ui.lastInput,
+          lastSeen: ui.lastSeen, timer: ui.state.timer, away: ui.state.away, input: ui.state.input, idle: Boolean(ui.idle),
+        }));
         await setFocus(page, true);
         await page.evaluate(() => window.dispatchEvent(new FocusEvent("focus")));
-        check(`${width}: back to the window, the veil goes at once`, before && !(await veiled(page)), `veiled before: ${before}`);
+        check(`${width}: back to the window, the veil goes at once`, before && !(await veiled(page)), `veiled before: ${before} ${held}`);
         const after = await user("GET", "/api/state");
         check(`${width}: and the timer runs on`, after.timer && after.timer.started_at === back.started_at, JSON.stringify(after.timer));
         await page.keyboard.press("Escape");
@@ -316,7 +405,7 @@ async function main() {
         if (slow) await sleep(3000);
         await route.continue();
       });
-      await latePage.goto(`${info.origin}/classic`, { waitUntil: "domcontentloaded" });
+      await latePage.goto(`${info.origin}/`, { waitUntil: "domcontentloaded" });
       await latePage.mouse.move(60, 200);
       await latePage.mouse.move(90, 240);
       const lateAsked = await box(latePage).waitFor().then(() => true, () => false);
@@ -540,7 +629,7 @@ async function main() {
         if (earlySlow) await sleep(3000);
         await route.continue();
       });
-      await earlyPage.goto(`${info.origin}/classic`, { waitUntil: "domcontentloaded" });
+      await earlyPage.goto(`${info.origin}/`, { waitUntil: "domcontentloaded" });
       const earlyFrom = new Date(Date.now() - 1000).toISOString();
       await earlyPage.mouse.move(60, 200);
       await earlyPage.mouse.move(90, 240);

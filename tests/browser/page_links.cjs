@@ -44,11 +44,13 @@ async function main() {
     const run = Date.now();
     const steps = {};
     const pages = {};
+    const items = {};
     for (const name of ["next", "queued"]) {
       const key = `note:links-${run}-${name}`;
       const item = await agent("PUT", "/api/items", { key, title: `Links test: ${name}`, priority: "urgent" });
       const page = await agent("POST", `/api/items/${item.id}/pages`, { title: `Plan page ${name}`, html: "<p>plan</p>" });
       pages[name] = page;
+      items[name] = item.id;
       // the item's links name its page too, and the step's text links both.
       await agent("PUT", "/api/items", { key, links: [{ label: `Plan (page ${page.id})`, url: page.url }, { label: "app#10", url: GITHUB }] });
       const answer = await agent("POST", "/api/steps", {
@@ -68,14 +70,14 @@ async function main() {
       page.setDefaultNavigationTimeout(60000);
       const errors = [];
       page.on("pageerror", (error) => errors.push(error.message));
-      await page.goto(`${info.origin}/classic`);
-      const card = (id) => page.locator(`[data-step="${id}"]`).first();
+      await page.goto(`${info.origin}/`);
+      const card = (id) => page.locator(`#next [data-step="${id}"]`).first();
       await card(steps.next).waitFor();
       for (const name of ["next", "queued"]) {
-        const folded = card(steps[name]).locator('.row-title[aria-expanded="false"]');
-        if (await folded.count()) await folded.click();
-        // The links lie under the overlay until the step's timer runs, and in a closed list; they are in the card
-        // either way.
+        // The card shows one step; the list on the left picks each in turn.
+        await page.waitForFunction((id) => showInSidebar(id), items[name]);
+        await card(steps[name]).waitFor();
+        // The links lie under the overlay until the step's timer runs; they are in the card either way.
         const links = card(steps[name]).locator(".links-other .menu-list a");
         await links.first().waitFor({ state: "attached" });
         const hrefs = await links.evaluateAll((anchors) => anchors.map((a) => a.getAttribute("href")));

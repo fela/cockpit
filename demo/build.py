@@ -90,6 +90,7 @@ from cockpit import (
     store,
 )
 from cockpit.app import PART_PAGES, Settings, create_app, with_part_tags
+from cockpit.views import read as read_view
 from tests.conftest import CLAUDE_SETTINGS_TEXT, COOKIE_KEY, TOKEN, FakeCache, FakeRunner
 
 EMAIL = "sam@example.com"
@@ -231,7 +232,7 @@ def world():
     with db.connect(config.DB_PATH) as conn:
         seed.put_writing(conn, seeded, cache.sessions)
     # The demo shows Cockpit alone, with no parts (parts.py).
-    app = create_app(settings, deliverer, cache, spend_index, codex_index, [])
+    app = create_app(settings, deliverer, cache, spend_index, codex_index, [], read_view)
     client = TestClient(app, base_url=ORIGIN, headers={"origin": ORIGIN})
     client.cookies.set(auth.SESSION_COOKIE, auth.session_cookie_value(COOKIE_KEY, EMAIL, int(time.time()) + 86400))
     return World(client, seeded, cache, dev)
@@ -605,7 +606,6 @@ STATIC = ROOT / "src" / "cockpit" / "static"
 # The pages the demo shows, by the name demo-shell.js asks for: the file, and for the main page its layout.
 VIEWS = {
     "index-sidebar": ("index.html", "sidebar"),
-    "index-classic": ("index.html", "classic"),
     "spec": ("spec.html", None),
     "briefing": ("briefing.html", None),
     "usage": ("usage.html", None),
@@ -636,7 +636,7 @@ REWRITES = [
     ("briefing.js", "    location.replace(link.href);", "    __demo.replaceFrame(link.href);", 1),
     ("pages.js", "const kept = parent.cockpitUnfinished;", "const kept = __demo.unfinished;", 1),
     ("page-overlay.js", "frame.contentWindow?.cockpitPagesTake?.();", '__demo.reach(frame, "cockpitPagesTake");', 1),
-    ("page-overlay.js", "frame?.contentWindow?.cockpitPagesLeaving?.();", '__demo.reach(frame, "cockpitPagesLeaving");', 1),
+    ("page-overlay.js", "frame.contentWindow?.cockpitPagesLeaving?.();", '__demo.reach(frame, "cockpitPagesLeaving");', 1),
     ("app.js", "frame.src = frame.dataset.src;", "__demo.frame(frame, frame.dataset.src);", 1),
     # The center layer shows a helper page (Briefing, Pages, Usage, Spec) in a frame, and that page's Escape asks the
     # layer to close.

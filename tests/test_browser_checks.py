@@ -1,4 +1,4 @@
-"""Run the browser checks: every state check, and the control-use regression when Playwright is configured."""
+"""Run the browser state checks and the Chromium regressions when Playwright is configured."""
 
 import os
 import shutil
@@ -40,11 +40,14 @@ def test_state_check_passes(check: Path):
 
 
 @pytest.mark.skipif(not os.environ.get("PLAYWRIGHT_MODULE"), reason="set PLAYWRIGHT_MODULE to run browser checks")
-def test_control_use_failure_is_stored():
+@pytest.mark.parametrize("check", [
+    "control_use_errors.cjs", "offline_reload.cjs", "offline_shell_deadline.cjs", "sidebar_startup.cjs", "timer_overlay_recovery.cjs",
+])
+def test_chromium_check_passes(check: str):
     node = shutil.which("node")
     assert node is not None, "Node is required for browser checks"
     done = subprocess.run(
-        ["nice", "-n", "19", node, "tests/browser/control_use_errors.cjs"],
+        ["nice", "-n", "19", node, f"tests/browser/{check}"],
         cwd=ROOT, capture_output=True, text=True, check=False, timeout=300,
     )
     assert done.returncode == 0, done.stdout + done.stderr

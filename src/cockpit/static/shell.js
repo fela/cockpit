@@ -310,3 +310,19 @@
   if (typeof module !== "undefined") module.exports = api;
   else window.CockpitShell = api;
 })();
+
+// The board and every open view reserve this key's space before the first status arrives.
+function offlineNoteKey() {
+  const key = document.createElement("button");
+  key.className = "button small ghost icon-only offline-note-key";
+  key.type = "button";
+  key.setAttribute("popovertarget", "offline-note");
+  key.append(Icons.icon("alert"));
+  key.addEventListener("click", () => {
+    const note = document.getElementById("offline-note");
+    const { left, bottom } = key.getBoundingClientRect();
+    note?.style.setProperty("--offline-left", `${left}px`);
+    note?.style.setProperty("--offline-top", `${bottom + 6}px`);
+  });
+  return key;
+}
