@@ -1,19 +1,20 @@
-// Next up's marks on a phone (SPEC UI-32, UI-16): the step's marks have the card's first row to themselves, at its
-// right, above the item's line, so a crowded set (Updated and a timer running over an hour; the check and the info
-// mark sit under More) never covers that line. The card has no "Next up" label. Checks, for the step in Next up:
-// - at 390 and 360 px, with only its usual marks, they sit at the card's right above the item's line, with no label
-//   before it;
+// Next up's marks on a phone (SPEC UI-32, UI-16, VIEW-29): on a card headed by the task's name, the step's marks
+// (Updated and the ⋯ menu) end the heading's first line at the card's right, so the card's top holds no row for them
+// alone, and a crowded set (Updated and a timer running over an hour; the check and the info mark sit under More)
+// never covers that line. The card has no "Next up" label. Checks, for the step in Next up:
+// - at 390 and 360 px, with only its usual marks, they end the heading's first line at the card's right, with no
+//   label before the item's line;
 // - at 390 and 360 px, with every mark showing and the timer running, paused or held, the marks overlap neither the
 //   label nor the item's line (priority, chips, title), and their 44 px tap areas (each mark's box joined with its
 //   ::after box) stay apart and clear of the item's line's; with the timer running, the marks also stay in the card,
-//   their tap areas reach no higher than its top, and the item's line starts below them;
+//   their tap areas reach no higher than its top, and they stay on the heading's first line;
 // - from 320 to 640 px, in steps of 8 px, the ask keeps its place as the timer runs, pauses or is held and as
 //   Updated, the size bar and the check come or go, and in all six states the marks cover nothing and stay in the card;
 // - no page errors.
 // Saves a screenshot of the card at 390 and 360 px in the work folder.
 //
 // Starts serve_preview.py (this checkout's Cockpit on a synthetic database; README.md says what it needs) and drives
-// a headless Chromium on /classic. Prints one line per check and exits 1 when one failed.
+// a headless Chromium on the main page. Prints one line per check and exits 1 when one failed.
 //
 // Usage, from the checkout: node tests/browser/next_strip.cjs
 
@@ -73,7 +74,7 @@ async function main() {
     page.setDefaultNavigationTimeout(60000);
     const errors = [];
     page.on("pageerror", (error) => errors.push(error.message));
-    await page.goto(`${info.origin}/classic`);
+    await page.goto(`${info.origin}/`);
     const card = page.locator(`#next .next-card[data-step="${stepId}"]`).first();
     // The first drawing can take a while on a busy host.
     await card.waitFor({ timeout: 30e3 });
@@ -95,19 +96,23 @@ async function main() {
       render(false);
     }, [stepId, crowded, timer]);
 
-    // A label would be the head's ::before, leading the item's line: the room from the head's left edge to
-    // the line's first part, as tall as that part. A tap area is the mark's box grown to 44 px.
+    // A label would be the item's line's ::before, leading that line: the room from the line's left edge to its
+    // first part, as tall as that part. A headed card with no place or tags has no such line. A tap area is the
+    // mark's box grown to 44 px.
     const measure = () => card.evaluate((el) => {
       const head = el.querySelector(".step-context");
-      const box = head.getBoundingClientRect();
-      const style = getComputedStyle(head, "::before");
       const shown = (node) => !node.hidden && node.getBoundingClientRect().width > 0;
-      // With the task name as the card's heading, the line can hold the marks alone: the label then has no room.
-      const lead = [...head.children].find((child) => !child.matches(".context-marks") && shown(child));
-      const first = lead ? lead.getBoundingClientRect() : { left: box.left, top: box.top, bottom: box.top };
-      const label = { left: box.left, right: first.left, top: first.top, bottom: first.bottom };
-      const strip = head.querySelector(".context-marks").getBoundingClientRect();
-      const marks = [...head.querySelectorAll(".context-marks > *")].filter(shown);
+      const strip = el.querySelector(".context-marks").getBoundingClientRect();
+      let label = { left: 0, right: 0, top: 0, bottom: 0 };
+      let noLabel = true;
+      if (head) {
+        const box = head.getBoundingClientRect();
+        noLabel = ["none", "normal", '""'].includes(getComputedStyle(head, "::before").content);
+        const lead = [...head.children].find((child) => !child.matches(".context-marks") && shown(child));
+        const first = lead ? lead.getBoundingClientRect() : { left: box.left, top: box.top, bottom: box.top };
+        label = { left: box.left, right: first.left, top: first.top, bottom: first.bottom };
+      }
+      const marks = [...el.querySelectorAll(".context-marks > *")].filter(shown);
       const rects = marks.map((mark) => mark.getBoundingClientRect());
       // A tap area is the element's box joined with the box its ::after draws (the page's 44 px areas). The
       // running timer is no key itself: its pause key is.
@@ -124,18 +129,28 @@ async function main() {
         };
       };
       // The ⋯ menu (VIEW-29) takes the tap on its key.
-      const taps = [...head.querySelectorAll(".context-marks > :not(.step-menu), .context-marks > .step-menu > summary")]
+      const taps = [...el.querySelectorAll(".context-marks > :not(.step-menu), .context-marks > .step-menu > summary")]
         .filter(shown).map(tapArea);
-      // The item's line is the head's own parts and, on a card headed by the task's name, that heading with its marks.
+      // The item's line is its own parts and, on a card headed by the task's name, that heading.
       const heading = [...el.querySelectorAll(".task-heading")].filter(shown);
-      const lineTaps = [...head.querySelectorAll(":scope > .prio, :scope > .context-tags > *"),
+      const own = head ? [...head.querySelectorAll(":scope > :not(.context-marks), :scope > .context-tags > *")] : [];
+      const lineTaps = [...(head ? head.querySelectorAll(":scope > .prio, :scope > .context-tags > *") : []),
         ...heading.flatMap((node) => [...node.querySelectorAll(".chip.cockpit, .draft-mark, .quick-mark")])].filter(shown).map(tapArea);
-      const lineParts = [...head.querySelectorAll(":scope > :not(.context-marks), :scope > .context-tags > *"), ...heading]
-        .filter(shown).map((part) => part.getBoundingClientRect());
+      // The heading counts by its lines of text: on a phone its box runs under the floated marks, which its lines wrap around.
+      const textLines = (node) => {
+        const range = document.createRange();
+        range.selectNodeContents(node);
+        return [...range.getClientRects()];
+      };
+      const lineParts = [...own.filter(shown).map((part) => part.getBoundingClientRect()), ...heading.flatMap(textLines)];
       const cardBox = el.getBoundingClientRect();
       const hits = (a, b) => a.left < b.right - 0.5 && b.left < a.right - 0.5 && a.top < b.bottom - 0.5 && b.top < a.bottom - 0.5;
       const tapHits = taps.flatMap((a, i) => taps.slice(i + 1).filter((b) => hits(a, b))).length
         + taps.filter((a) => lineTaps.some((b) => hits(a, b))).length;
+      // The heading's first line: from its top, one line height down.
+      const h1 = heading[0];
+      const top = h1 ? h1.getBoundingClientRect().top : 0;
+      const lineHeight = h1 ? parseFloat(getComputedStyle(h1).lineHeight) : 0;
       return {
         count: rects.length,
         onLabel: rects.filter((rect) => hits(rect, label)).length,
@@ -143,9 +158,10 @@ async function main() {
         tapHits,
         inside: rects.every((rect) => rect.left >= cardBox.left && rect.right <= cardBox.right && rect.top >= cardBox.top)
           && taps.every((tap) => tap.top >= cardBox.top - 0.5),
-        noLabel: ["none", "normal", '""'].includes(style.content),
-        atRight: rects.length > 0 && Math.abs(Math.max(...rects.map((rect) => rect.right)) - strip.right) <= 1,
-        lineBelow: lineParts.every((part) => part.top >= strip.bottom - 1),
+        noLabel,
+        atRight: rects.length > 0 && Math.abs(Math.max(...rects.map((rect) => rect.right)) - strip.right) <= 1
+          && cardBox.right - strip.right <= 32,
+        onHeadingLine: Boolean(h1) && strip.top >= top - 1 && strip.bottom <= top + lineHeight + 1,
         headed: heading.length,
       };
     });
@@ -159,8 +175,8 @@ async function main() {
       await page.setViewportSize({ width, height: 800 });
       await show(false, "running");
       const plain = await measure();
-      check(`${width} px: with its usual marks, they sit at the card's right above the item's line, with no label`,
-        plain.count >= 1 && plain.headed === 1 && plain.noLabel && plain.atRight && plain.lineBelow && plain.onLabel === 0, JSON.stringify(plain));
+      check(`${width} px: with its usual marks, they end the heading's first line at the card's right, with no label`,
+        plain.count >= 1 && plain.headed === 1 && plain.noLabel && plain.atRight && plain.onHeadingLine && plain.onLabel === 0, JSON.stringify(plain));
 
       await show(true, "running");
       const crowded = await measure();
@@ -169,7 +185,7 @@ async function main() {
       check(`${width} px: the marks stay in the card, their tap areas no higher than its top`, crowded.inside, JSON.stringify(crowded));
       check(`${width} px: the marks' tap areas stay apart and clear of the item's line's`,
         crowded.tapHits === 0, JSON.stringify(crowded));
-      check(`${width} px: the item's line starts below the marks`, crowded.lineBelow, JSON.stringify(crowded));
+      check(`${width} px: the marks stay on the heading's first line`, crowded.onHeadingLine, JSON.stringify(crowded));
       for (const timer of ["paused", "held"]) {
         await show(true, timer);
         const other = await measure();
@@ -198,7 +214,7 @@ async function main() {
           await show(crowded, timer);
           tops.push(await askTop());
           const seen = await measure();
-          if (seen.onLabel || seen.onLine || seen.tapHits || !seen.inside || !seen.lineBelow) {
+          if (seen.onLabel || seen.onLine || seen.tapHits || !seen.inside || !seen.onHeadingLine) {
             crossed.push(`${width} px ${crowded ? "crowded" : "plain"} ${timer}: ${JSON.stringify(seen)}`);
           }
         }

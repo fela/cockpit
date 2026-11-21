@@ -1,6 +1,5 @@
 /* The emergency page (SPEC SESSION-21): self-contained, so nothing the main page's styles change can break it.
-   The same paper, ink and Inter as the classic look (UI-29), with only what this page uses. */
-@font-face { font-family: "Inter"; src: url("/static/fonts/inter-latin-wght-normal.woff2") format("woff2"); font-weight: 100 900; font-display: swap; }
+   The same paper or petrol, Georgia headings and system UI text as the classic look (UI-29), with only what this page uses. */
 
 :root {
   --bg: #f8f7f4;
@@ -15,14 +14,14 @@
 }
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: #141210;
-    --card: #1d1a17;
-    --text: #ece8e1;
-    --text-2: #a39c92;
-    --line: #34302b;
-    --accent: #e0a060;
-    --on-accent: #1a1410;
-    --refused: #f28b82;
+    --bg: #09262e;
+    --card: #0a303a;
+    --text: #f9eee4;
+    --text-2: #c4d2d4;
+    --line: #234953;
+    --accent: #f7bf91;
+    --on-accent: #09262e;
+    --refused: #f98f84;
   }
 }
 
@@ -31,11 +30,11 @@ body {
   margin: 0;
   background: var(--bg);
   color: var(--text);
-  font: 15px/1.5 "Inter", system-ui, sans-serif;
+  font: 15px/1.5 system-ui, sans-serif;
 }
 main { max-width: 760px; margin: 0 auto; padding: 24px 16px 48px; }
 header { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; }
-h1 { margin: 0; font-size: 22px; font-weight: 600; }
+h1 { margin: 0; font-family: Georgia, serif; font-size: 22px; font-weight: 600; }
 a { color: var(--accent); }
 .about { margin: 8px 0 0; color: var(--text-2); font-size: 14px; max-width: 68ch; overflow-wrap: anywhere; }
 .hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
@@ -102,3 +101,8 @@ select {
   font: inherit;
 }
 fieldset[hidden] { display: none; }
+
+/* Pages cross-fade into one another; this page opts in too, so the move from the main page is not cut short. */
+@media (prefers-reduced-motion: no-preference) {
+  @view-transition { navigation: auto; }
+}

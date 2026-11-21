@@ -1,5 +1,5 @@
 // The user's actions go through a connection that drops (SPEC CODE-5).
-// Checks, on the main page at phone width:
+// Checks, on the main page at phone width, on the card of each step in turn, picked in the list at the left:
 // - an answer pressed offline shows at once, the header says it waits to send with the hold of the step that takes
 //   its place, and nothing reaches Cockpit;
 // - back online, it reaches Cockpit once, the header note goes, and no failure shows;
@@ -61,6 +61,7 @@ async function main() {
     await Promise.all([...initial.queue, ...initial.ready_next, ...initial.snoozed].map((step) => user("POST", `/api/steps/${step.id}/snooze`, { until: "2099-01-01T08:00:00Z" })));
     const run = Date.now();
     const steps = {};
+    const items = {};
     for (const name of ["offline", "lost", "stalled", "order", "reload", "refused", "closed", "typing"]) {
       await agent("PUT", "/api/items", { key: `note:flaky-${run}-${name}`, title: `Flaky test: ${name}`, priority: "urgent" });
       const answer = await agent("POST", "/api/steps", {
@@ -68,6 +69,7 @@ async function main() {
         body: "Flaky test body.", session_id: SESSION_B, answers: [`Go ahead ${name}`],
       });
       steps[name] = answer.step.id;
+      items[answer.step.id] = answer.step.item_id;
     }
 
     browser = await chromium.launch({ executablePath: CHROMIUM });
@@ -82,11 +84,17 @@ async function main() {
     });
     const page = await context.newPage();
     page.setDefaultTimeout(5000);
-    await page.goto(`${info.origin}/classic`);
-    const card = (id) => page.locator(`[data-step="${id}"]`).first();
+    await page.goto(`${info.origin}/`);
+    const card = (id) => page.locator(`#next [data-step="${id}"]`).first();
+    // Puts the step on the card, unless it is there already: its item picked in the list at the left, which holds a
+    // queued step's place (NEXT-16).
+    const show = async (where, id) => {
+      await where.locator("#sidebar li[data-item]").first().waitFor({ state: "attached" });
+      if (!(await where.locator(`#next [data-step="${id}"]`).count())) await where.evaluate((item) => showInSidebar(item), items[id]);
+      await where.locator(`#next [data-step="${id}"]`).first().waitFor();
+    };
     const press = async (id, text) => {
-      const folded = card(id).locator('.row-title[aria-expanded="false"]');
-      if (await folded.count()) await folded.click();
+      await show(page, id);
       await card(id).locator(".answers .answer", { hasText: text }).click();
     };
     const unsent = () => page.locator("#unsent").evaluate((el) => (el.hidden ? "" : el.textContent));
@@ -108,17 +116,18 @@ async function main() {
     });
 
     // 1. Offline: the press shows at once, waits, and goes once the connection is back.
-    await card(steps.offline).waitFor();
-    // The user opened the step while online: the press on it holds its place (NEXT-16). Offline the answer waits to
-    // send, and so does the hold of the step shown in its place (holdFollowing).
+    // The user picked the step while online, which holds its place (NEXT-16). Offline the answer waits to send, and
+    // so does the hold of the step shown in its place (holdFollowing).
+    await page.locator("#sidebar li[data-item]").first().waitFor({ state: "attached" });
     const holding = page.waitForResponse((response) => response.url().endsWith(`/api/steps/${steps.offline}/hold`));
-    await card(steps.offline).locator(".ask, .row-title").first().click();
+    await page.evaluate((item) => showInSidebar(item), items[steps.offline]);
     await holding;
+    await card(steps.offline).waitFor();
     await context.setOffline(true);
     await press(steps.offline, "Go ahead offline");
     await sleep(1500);
-    check("an answer pressed offline leaves the queue at once", await card(steps.offline).count() === 0 || !(await card(steps.offline).isVisible()),
-      "the step still shows in the queue");
+    check("an answer pressed offline leaves the card at once", await card(steps.offline).count() === 0 || !(await card(steps.offline).isVisible()),
+      "the step still shows on the card");
     check("the header says it waits to send", await unsentReads("2 waiting to send"), `the header says "${await unsent()}"`);
     await sleep(5000);
     check("nothing reaches Cockpit while offline", messagesFor(work, steps.offline) === 0, `${messagesFor(work, steps.offline)} messages`);
@@ -198,7 +207,7 @@ async function main() {
     // reloaded page sends it once Cockpit answers again.
     // `choice`: the box's "To" choice when the user picked one (a new session in the first checkout), else none.
     const reply = async (id, words, choice) => {
-      await card(id).waitFor();
+      await show(page, id);
       await page.evaluate(({ id, words, choice }) => {
         const step = [...ui.state.queue, ...ui.state.ready_next].find((other) => other.id === id);
         const key = `msg:step:${id}`;
@@ -237,6 +246,7 @@ async function main() {
     check("a refused reply from the page before puts its words back in the box", back, `the box holds "${await draft(steps.refused)}"`);
     const said = (await page.evaluate(() => window.__toasts.slice())).some((text) => text.includes("Not sent from the page you left: Test refusal"));
     check("the page says the reply was not sent", said, (await page.evaluate(() => window.__toasts.slice())).join(" | "));
+    await show(page, steps.refused);
     const shown = await until(async () => (await page.locator(`textarea[data-key="msg:step:${steps.refused}"]`).count()) === 1
       && (await page.locator(`textarea[data-key="msg:step:${steps.refused}"]`).inputValue()) === "Words that come back", 10e3);
     check("the step's reply box shows the words", shown, "no reply box with the words");
@@ -258,7 +268,7 @@ async function main() {
     const owner = () => page.evaluate(() => Object.entries(localStorage).find(([key]) => key.startsWith("cockpit.outbox."))?.[1]);
     const first = JSON.parse(await owner()).page;
     const other = await context.newPage();
-    await other.goto(`${info.origin}/classic`);
+    await other.goto(`${info.origin}/`);
     await sleep(3000);
     check("a second tab leaves the first tab's reply alone", JSON.parse(await owner()).page === first && messagesFor(work, steps.closed) === 0,
       `${messagesFor(work, steps.closed)} messages`);
@@ -269,17 +279,13 @@ async function main() {
     // 9. Words another tab puts back into a reply box the user types in join it at its top, in the plain box and
     // in the Vim editor, and Send takes them.
     const key = `msg:step:${steps.typing}`;
-    await other.evaluate((id) => {
-      ui.expanded.add(`step:${id}`);
-      ui.expanded.add(`msg:step:${id}`);
-      safeRender();
-    }, steps.typing);
+    await show(other, steps.typing);
     const box = other.locator(`textarea[data-key="${key}"]`);
     await box.waitFor();
     await box.click();
     await other.keyboard.type("still typing ");
     const third = await context.newPage();
-    await third.goto(`${info.origin}/classic`);
+    await third.goto(`${info.origin}/`);
     // Another tab sees a page's writes a moment later: the third tab puts words back once it sees the box's latest text.
     const putBack = async (text) => {
       const latest = await box.inputValue();
@@ -324,7 +330,7 @@ async function main() {
     await box.fill("");
     await box.click();
     await putBack("Into an empty box");
-    const send = other.locator(`[data-step="${steps.typing}"] button.send`);
+    const send = other.locator(`#next [data-step="${steps.typing}"] button.send`);
     const sendable = await until(async () => (await box.inputValue()) === "Into an empty box" && !(await send.isDisabled()), 5e3);
     check("an empty box takes them with Send ready", sendable, `the box holds "${await box.inputValue()}"`);
   } finally {

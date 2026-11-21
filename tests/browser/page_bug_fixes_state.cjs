@@ -30,8 +30,11 @@ function world(extra = {}, storage = new Map()) {
 }
 function replayWorld(storage) {
   const w = world({ stored: new Set(), KEEP_MS: 86400e3, writesElsewhere: () => false,
+    scope: "a".repeat(64), scopeUntil: 2000000000, scoped: true, revoked: false,
+    keeping: false, recoveryByResource: new Map(),
     forget: noop, putBack: noop, throughRestart: async () => ({ response: { ok: false, status: 409 }, data: { detail: "Edit refused" } }),
     withJson: noop }, storage);
+  w.run(part("errors.js", "  function queuedAction(path, method)", "  function clearScope()"));
   w.run(part("errors.js", "  async function sendOne(action, entry)", "  // Whether the box"));
   return w;
 }
@@ -48,7 +51,7 @@ check("P1: refused settings and priorities survive replay and another reload", a
       ["Help Ana first", "Review tasks", "Check the tasks list"]],
   ]) {
     const w = replayWorld();
-    w.context.entry = { path: url, method: "PUT", body: JSON.stringify(body), at: Date.now(), words: null };
+    w.context.entry = { user: "a".repeat(64), until: 2000000000, path: url, method: "PUT", body: JSON.stringify(body), at: Date.now(), words: null };
     await w.run('sendOne("edit", entry)');
     const notice = w.events.find((event) => event.type === "cockpit:not-sent");
     assert.ok(notice, "refused replay has no notice");
@@ -200,6 +203,27 @@ check("F8: words in a session view opened without an item mark no item and stay 
   assert.deepEqual([...drafts], [["msg:view:S1", "Loose thought"]], "the view opened for the item takes the words over");
   drafts.set("msg:view:S1:5", "Item thought");
   assert.equal(w.run("itemHasDraft(5)"), true, "words in the view opened for the item show no pencil");
+});
+
+check("F9: a session view opened before the first state draws its box once the state arrives", () => {
+  const box = { children: null, replaceChildren(...nodes) { this.children = nodes; }, querySelector: () => null };
+  const listeners = [];
+  const ui = { state: null, drafts: new Map() };
+  const w = world({ ui, sessionView: { id: "S1", item: null, from: null, drawnFor: null },
+    document: { getElementById: (id) => (id === "session-composer" ? box : null), activeElement: null,
+      querySelector: () => null, addEventListener: (type, listener) => listeners.push([type, listener]) },
+    CSS: { escape: (text) => text }, drawn: (state) => state, shownOrder: () => [],
+    stepPageComments: () => [], stepPageChoices: () => [], drawSessionHead: noop, drawSessionLog: noop,
+    composer: (key, { session }) => { w.run("sessionMap(ui.state)"); return { key, session: session.session_id }; } });
+  w.run(part("app.js", "function sessionMap(state)", "// The session the user's Done"));
+  w.run(part("sidebar.js", "function viewedSession()", "// Opening a session slides"));
+  w.run(part("sidebar.js", "function viewedStep()", "// The session's name and one line"));
+  w.run(part("sidebar.js", "// The session view follows the state", "\n});") + "\n});");
+  w.run("drawSessionComposer()");
+  assert.deepEqual(box.children, [], "the box shows something before the state");
+  ui.state = { sessions: [{ session_id: "S1", name: "Planner", state: "idle" }], items: [], queue: [], ready_next: [], snoozed: [] };
+  for (const [type, listener] of listeners) if (type === "cockpit:redraw") listener();
+  assert.deepEqual(box.children.map((made) => made.session), ["S1"], "the first state leaves the box empty");
 });
 
 (async () => {

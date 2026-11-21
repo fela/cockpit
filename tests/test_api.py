@@ -19,6 +19,7 @@ from cockpit import auth, cli, db, delivery, store
 from cockpit import sessions as sessions_module
 from cockpit.app import create_app
 from cockpit.sessions import Session
+from cockpit.views import read as read_view
 from tests.conftest import COOKIE_KEY, EMAIL, ORIGIN, PUBLIC_ORIGIN, SESSION_A, SESSION_B, World, make_session
 
 LOOK_AGAIN = "2026-02-05T00:00:00Z"
@@ -845,7 +846,7 @@ def test_the_quick_list_names_what_the_state_lists(world: World) -> None:
     ids = lambda key: [entry["id"] for entry in state[key]]
     assert listed["steps"] == {key: ids(key) for key in ("queue", "ready_next", "snoozed", "with_agents")}
     assert steps[2]["id"] in listed["steps"]["snoozed"] and listed["steps"]["ready_next"]
-    for key in ("permission_requests", "settled_requests", "moved_past", "held_requests", "codex_requests"):
+    for key in ("permission_requests", "settled_requests", "moved_past", "held_requests", "checker_refusals", "codex_requests"):
         assert listed[key] == ids(key), key
     assert listed["permission_requests"] == [response.json()["id"]]
     assert listed["waiting_sessions"] == [session["session_id"] for session in state["waiting_sessions"]] == [SESSION_B]
@@ -1626,7 +1627,7 @@ def test_the_public_address_ignores_cookies_and_tokens(world: World, visitor: Te
 
 def test_public_pages_stay_off_without_a_public_address(world: World) -> None:
     app = create_app(replace(world.settings, public_origin=""), world.deliverer, world.cache, world.spend_index,
-                     world.codex_index, [])
+                     world.codex_index, [], read_view)
     browser = TestClient(app, base_url=ORIGIN, follow_redirects=False)
     browser.cookies.set(auth.SESSION_COOKIE, auth.session_cookie_value(COOKIE_KEY, EMAIL, int(time.time()) + 3600))
     item = put_item(world)
@@ -1868,7 +1869,10 @@ def test_a_step_shows_a_page_or_image_of_its_item_as_a_figure(world: World) -> N
     # Cockpit's page its height, and passes on the choices the user makes on it (SPEC NEXT-48).
     served = world.client.get(f"/pages/{page['id']}/figure")
     assert served.status_code == 200
-    assert served.text == REPORT + app_module.FIGURE_SIZE_SCRIPT + app_module.FIGURE_LINK_SCRIPT + app_module.PAGE_CHOICES_SCRIPT
+    identity = world.client.get("/api/offline/session").json()
+    root = f'<html data-offline-user="{identity["user"]}" data-offline-until="{identity["until"]}" data-offline-helper="1">'
+    scoped_report = REPORT.replace("<!doctype html>", "<!doctype html>" + root, 1)
+    assert served.text == scoped_report + app_module.FIGURE_SIZE_SCRIPT + app_module.FIGURE_LINK_SCRIPT + app_module.PAGE_CHOICES_SCRIPT
     policy = served.headers["content-security-policy"]
     assert policy == app_module.PAGE_CSP.replace("frame-ancestors 'none'", "frame-ancestors 'self'")
     assert "sandbox allow-scripts" in policy and "allow-same-origin" not in policy
@@ -1923,7 +1927,8 @@ def test_retry_is_guarded(world: World) -> None:
                              headers=world.user()).json()
     assert world.client.get(f"/api/messages/{sent['id']}").json()["state"] == "failed"
     client = agent_client(world)
-    assert client.post(f"/api/messages/{sent['id']}/retry", headers=world.agent()).status_code == 403
+    assert client.post(f"/api/messages/{sent['id']}/retry", headers={"origin": ORIGIN}).status_code == 401
+    assert client.post(f"/api/messages/{sent['id']}/retry", headers=world.agent()).status_code == 200
     assert world.client.post(f"/api/messages/{sent['id']}/retry", headers=world.user()).status_code == 200
     run_sql(world, "UPDATE messages SET state = 'sent' WHERE id = ?", (sent["id"],))
     assert world.client.post(f"/api/messages/{sent['id']}/retry", headers=world.user()).status_code == 409
@@ -2041,7 +2046,7 @@ def test_work_before_dev_is_agent_work_and_prod_with_nothing_waiting_is_no_ones(
 
 def test_busy_and_waiting_groups_say_on_hover_what_the_agent_does_or_the_work_waits_for(world: World) -> None:
     """SPEC VIEW-27: Busy holds the agents' work while it moves, its hover line the agent's goal; Waiting holds the
-    rest, its hover line what the work waits for. Agent work that stopped an hour ago or picks up later waits."""
+    rest, its hover line what the work waits for. Idle agents and future work wait."""
     def group(**fields) -> tuple[str, str, str | None]:
         if fields:
             put_item(world, **fields)
@@ -2060,17 +2065,17 @@ def test_busy_and_waiting_groups_say_on_hover_what_the_agent_does_or_the_work_wa
     world.cache.sessions = [replace(stopped, name="check reminder behaviour on shared lists")]
     assert group(doing="")[1] == "its agent stopped"
     world.cache.sessions = [working]
-    # Stopped half an hour ago is stalled but still busy; stopped an hour ago or more, it waits on its session.
+    # An idle agent waits as soon as its turn ends, including before the stall threshold.
     recent = (datetime.now(UTC) - timedelta(minutes=40)).strftime("%Y-%m-%dT%H:%M:%SZ")
     world.cache.sessions = [replace(stopped, updated_at=recent, name="Reminder fix")]
-    assert group()[0] == "busy"
+    assert group()[0] == "waiting"
     world.cache.sessions = [replace(stopped, name="Other work")]
     assert group() == ("waiting", "agent “Other work” stopped", "2026-01-04T09:00:00Z")
-    # An agent that picks up within the hour is busy; later, the work waits, named by when.
+    # An agent with a future start waits, including within the next hour.
     world.cache.sessions = [replace(stopped, name="PR 10")]
     soon = (datetime.now(UTC) + timedelta(minutes=30)).strftime("%Y-%m-%dT%H:%M:%SZ")
     later = (datetime.now(UTC) + timedelta(days=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
-    assert group(waiting_on=[{"kind": "agent", "who": SESSION_A, "until": soon, "why": "check the reminders"}])[0] == "busy"
+    assert group(waiting_on=[{"kind": "agent", "who": SESSION_A, "until": soon, "why": "check the reminders"}])[0] == "waiting"
     # The item's own session, named as the item, is "its agent".
     assert group(waiting_on=[{"kind": "agent", "who": SESSION_A, "until": later, "why": "check the reminders"}]) == ("waiting", "its agent resumes", later)
     # Two agents resting: the earlier one names the line. One of its sessions at work keeps it Busy whatever the rest.
@@ -2130,12 +2135,12 @@ def test_a_resting_agent_says_why_and_a_rest_the_user_chose_is_their_snooze(worl
     put_item(world, waiting_on=[{"kind": "agent", "who": SESSION_A, "until": later, "why": "reminder you asked for", "by_user": True}])
     shown = state_item(world, item["id"])
     assert (shown["group"], shown["wait"], shown["why"], shown["tip_at"]) == ("waiting", "snoozed", "reminder you asked for", later)
-    # It stays snoozed until its time, also in its last hour, where an agent's own rest turns Busy.
+    # Both user snoozes and agent rests stay in Waiting until work starts.
     soon = (datetime.now(UTC) + timedelta(minutes=30)).strftime("%Y-%m-%dT%H:%M:%SZ")
     put_item(world, waiting_on=[{"kind": "agent", "who": SESSION_A, "until": soon, "why": "reminder you asked for", "by_user": True}])
     assert state_item(world, item["id"])["wait"] == "snoozed"
     put_item(world, waiting_on=[{"kind": "agent", "who": SESSION_A, "until": soon, "why": "check the pending reminders"}])
-    assert state_item(world, item["id"])["group"] == "busy"
+    assert state_item(world, item["id"])["group"] == "waiting"
 
 
 def test_the_sweep_reviews_waiting_work_unchanged_for_a_day(world: World) -> None:
@@ -2318,13 +2323,14 @@ def test_a_step_whose_item_came_after_the_items_were_read_waits_for_the_next_rea
     assert [step["item_id"] for step in queue] == [first["id"]]
 
 
-def test_sweep_now_waits_for_check_in_but_not_after_a_failed_launch(world: World) -> None:
-    launched = world.client.post("/api/sweeps/run", headers=world.user())
-    assert launched.status_code == 200
+def test_a_sweep_launch_waits_for_check_in_but_not_after_a_failed_launch(world: World) -> None:
+    # With the queue empty, Update launches a full sweep.
+    launched = world.client.post("/api/update", headers=world.user())
+    assert launched.status_code == 200 and launched.json()["text"] == "run a sweep"
     assert world.client.get(f"/api/messages/{launched.json()['id']}").json()["state"] == "sent"
-    assert world.client.post("/api/sweeps/run", headers=world.user()).status_code == 409
+    assert world.client.post("/api/update", headers=world.user()).status_code == 409
     run_sql(world, "UPDATE messages SET state = 'failed' WHERE id = ?", (launched.json()["id"],))
-    assert world.client.post("/api/sweeps/run", headers=world.user()).status_code == 200
+    assert world.client.post("/api/update", headers=world.user()).status_code == 200
 
 
 def test_closed_recently_lists_closed_steps_and_archived_items(world: World) -> None:
@@ -2693,13 +2699,13 @@ def test_an_item_read_gives_the_user_s_messages_on_it(world: World) -> None:
 
 
 def test_the_page_with_the_list_of_items_is_the_cockpit_page_with_the_sidebar_on(world: World) -> None:
-    # SPEC VIEW-26: "/" is the page with the sidebar's layout flag; /classic keeps the page from before it, and the
-    # /next it was tried at sends to "/".
-    sidebar, classic = world.client.get("/"), world.client.get("/classic")
-    moved = world.client.get("/next", follow_redirects=False)
-    assert moved.status_code == 308 and moved.headers["location"] == "/"
+    # SPEC VIEW-26: "/" is the page with the sidebar's layout flag; /next, where it was tried, and /classic, the page
+    # from before it, send to "/".
+    sidebar = world.client.get("/")
+    for path in ("/next", "/classic"):
+        moved = world.client.get(path, follow_redirects=False)
+        assert moved.status_code == 308 and moved.headers["location"] == "/", path
     assert sidebar.status_code == 200 and '<body data-layout="sidebar">' in sidebar.text
-    assert '<body data-layout="classic">' in classic.text
     assert '<script src="/static/sidebar.js?v=' in sidebar.text and '<script src="/static/app.js?v=' in sidebar.text
     assert "style-src 'self' 'nonce-" in sidebar.headers["content-security-policy"]
 

@@ -1,8 +1,9 @@
 // Answers come back first on the step the user asked on, finish steps too (SPEC NEXT-37). On a synthetic database,
 // per width (1440 and 390 px), on a new item:
 // - the user hands its finish step to the agent with a message, and the agent's done with a note returns it;
-// - the returned card leads the queue, its ask is the reply's first sentence, and its text shows the user's message and
-//   the reply before the task, with where it stands as the agent's summary now and without the stale last step;
+// - the returned step has a row near the head of Your queue; on its card the ask is the reply's first sentence, and
+//   the text shows the user's message and the reply before the task, with where it stands as the agent's summary now
+//   and without the stale last step;
 // - an agent's return of another handed step it left as it was, without a note, is refused;
 // - no page errors.
 // Saves a screenshot of the returned card per width in the work dir.
@@ -94,18 +95,20 @@ async function main() {
       page.setDefaultNavigationTimeout(60000);
       const errors = [];
       page.on("pageerror", (error) => errors.push(error.message));
-      await page.goto(`${info.origin}/classic`);
+      await page.goto(`${info.origin}/`);
 
-      const card = page.locator(`[data-step="${finish}"]:visible`).first();
-      await card.waitFor({ timeout: 20000 });
-      const queue = await page.locator("[data-step]:visible").evaluateAll((cards) => cards.map((el) => Number(el.dataset.step)));
+      const row = page.locator(`#sidebar .sidebar-group.queue li[data-step="${finish}"]`).first();
+      await row.waitFor({ state: "attached", timeout: 20000 });
+      // On a phone the list is a screen of its own, which the bar's "Your items" opens.
+      if (!(await row.isVisible())) await page.locator(".phone-back").click();
+      const queue = await page.locator("#sidebar .sidebar-group.queue li[data-step]").evaluateAll((rows) => rows.map((el) => Number(el.dataset.step)));
       check(`${width} px: the returned finish step, scored 100, has a place in the queue`, queue.slice(0, 4).includes(finish), JSON.stringify(queue.slice(0, 4)));
-      // A step the user took may lead the queue, which shows the returned one as a row: open it.
-      if (await card.locator(".row-head .row-title").count()) {
-        if (!(await card.evaluate((el) => el.classList.contains("open")))) await card.locator(".row-head .row-title").click();
-      }
+      // Another step may lead the queue: the returned one's row opens it on the card.
+      await row.locator(".side-row").click();
+      const card = page.locator(`#next [data-step="${finish}"]`).first();
+      await card.waitFor({ timeout: 20000 });
       await sleep(500);
-      const ask = await card.locator(".ask > .ask-text, .row-head .row-title").innerText();
+      const ask = await card.locator(".ask > .ask-text").innerText();
       check(`${width} px: its ask is the reply's first sentence`, ask === reply.split(". ")[0], ask);
       const text = await card.innerText();
       const body = text.slice(text.indexOf("You wrote on"));

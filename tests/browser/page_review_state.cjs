@@ -58,7 +58,7 @@ check("P1", async () => {
     sessionEndWords: () => "", choicesSaved: async () => {}, uploadStaged: async () => [],
     api: async (_method, url) => { sent.push(url); if (sent.length === 1) await first.promise; return {}; },
   });
-  w.run(part("app.js", "let finishRequests =", "// The words of the notice after"));
+  w.run(part("app.js", "let finishRequests =", "// Whether a close goes to Finished this week"));
   const a = w.run('finishItem({id:1,item_id:1,item:{title:"A"}}, "complete", null, "", [], "", null, null)');
   const b = w.run('finishItem({id:2,item_id:2,item:{title:"B"}}, "complete", null, "", [], "", null, null)');
   await tick();
@@ -78,7 +78,7 @@ check("P2", async () => {
     // The declaration was added with the fix; the old function needs no such map.
     const text = source("app.js");
     const start = text.includes("const commentDeletions =") ? "const commentDeletions =" : "function deletePageComment(comment)";
-    w.run(part("app.js", start, "// A delivery state as a mark"));
+    w.run(part("app.js", start, "// Inline comments (NEXT-33)"));
     const removing = w.run("deletePageComment({id:1,step_id:7})");
     let went = false;
     const answer = w.run("choicesSaved({id:7})").then(() => { went = true; }, (e) => e);
@@ -109,7 +109,7 @@ check("P2", async () => {
       CockpitChoices: { settled: async () => {} } });
     w.run(part("app.js", "async function choicesSaved(step)", "// Hand off: like Send"));
     const start = source("app.js").includes("const commentDeletions =") ? "const commentDeletions =" : "function deletePageComment(comment)";
-    w.run(part("app.js", start, "// A delivery state as a mark"));
+    w.run(part("app.js", start, "// Inline comments (NEXT-33)"));
     w.run(part("app.js", "function pressStepButton(", "function runCommand("));
     w.run(part("app.js", "function takenByUser(id)", "// A held step missing from the state"));
     const removing = w.run("deletePageComment({id:1,step_id:7})");
@@ -144,7 +144,7 @@ check("P5", async () => {
     return { response: { ok: true }, data: {} };
   } });
   w.run(source("page-choices.js"));
-  w.run('CockpitChoices.save(1,{name:"field",chosen:"first",step_id:1},()=>{}); CockpitChoices.save(1,{name:"field",chosen:"latest",step_id:1},()=>{})');
+  w.run('CockpitChoices.save(1,{name:"field",chosen:"first",step_id:1},()=>{},false); CockpitChoices.save(1,{name:"field",chosen:"latest",step_id:1},()=>{},false)');
   await tick();
   try { assert.ok(w.context.holding.size, "queued choice has no leave guard"); }
   finally { first.resolve(); await w.run("CockpitChoices.settled(1)"); }
@@ -338,7 +338,7 @@ check("Q3: DELETE 404 counts as a deleted comment", async () => {
   const w = actionWorld({ api: async () => { throw Object.assign(new Error("already gone"), { status: 404 }); },
     CockpitChoices: { settled: async () => {} } });
   w.run(part("app.js", "async function choicesSaved(step)", "// Hand off: like Send"));
-  w.run(part("app.js", "const commentDeletions =", "// A delivery state as a mark"));
+  w.run(part("app.js", "const commentDeletions =", "// Inline comments (NEXT-33)"));
   w.context.addEventListener("cockpit:page-comments-changed", () => { changed += 1; });
   assert.equal(await w.run("deletePageComment({id:1,step_id:7})"), true);
   assert.equal(w.run("commentDeletions.size"), 0);
@@ -359,9 +359,9 @@ check("Q3: refreshed missing comments drop retained deletion failures", async ()
       logError: (label, error) => { logged.push([label, error]); },
       api: () => deletion.promise, CockpitChoices: { settled: async () => {} } });
     Object.assign(w.context.ui, { pending: new Map(), handing: new Map(), tick: 0, error: "", state, renderedAt: 0, catchUpFrom: null, openedHidden: new Set() });
-    w.run(part("app.js", "async function refresh()", "// Resolves to whether the work went through."));
+    w.run(part("app.js", "async function refresh(saved = null)", "// Resolves to whether the work went through."));
     w.run(part("app.js", "async function choicesSaved(step)", "// Hand off: like Send"));
-    w.run(part("app.js", "const commentDeletions =", "// A delivery state as a mark"));
+    w.run(part("app.js", "const commentDeletions =", "// Inline comments (NEXT-33)"));
     const removing = w.run("deletePageComment({id:1,step_id:7})");
     const answering = w.run("choicesSaved({id:7})").then(() => null, (error) => error);
     if (missingBeforeRefusal) {

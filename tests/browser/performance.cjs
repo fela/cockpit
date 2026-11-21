@@ -50,7 +50,7 @@ function read(info, cursor) {
     assert.equal(seeded.status, 0, seeded.stderr);
     cases[name] = { info, work, polls: [], renders: [], loads: [] };
   }
-  const browser = await chromium.launch({ headless: true });
+  const browser = await chromium.launch({ headless: true, executablePath: process.env.BROWSER_EXECUTABLE || undefined });
   try {
     // Alternate versions to reduce bias from changes in host load.
     for (let trial = 0; trial < 5; trial++) {

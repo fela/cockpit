@@ -289,6 +289,23 @@ def test_removing_a_list_item_and_an_agent_edit_without_stamps(world: World) -> 
     assert commits(world)[0] == "Spec: agent:spec-example edited a list item under Notes (removed) on Cockpit"
 
 
+def test_a_part_edit_names_the_rows_it_added_or_changed_not_the_row_it_replaced(world: World) -> None:
+    client = TestClient(world.client.app, base_url=ORIGIN)
+    one = block(world, "spec:ONE-1")["text"]
+    added = "| ONE-3 | A third thing. | User | Could | Not done |  | 2026-01-05 created (Claude) |  |"
+    response = client.post("/api/spec/part", json={"old": one, "new": f"{one}\n{added}"}, headers=world.agent("spec-example"))
+    assert response.status_code == 200
+    assert commits(world)[0] == "Spec: agent:spec-example edited ONE-3 on Cockpit"
+
+    two = block(world, "spec:ONE-2")["text"]
+    more = "| ONE-4 | A fourth thing. | User | Could | Not done |  | 2026-01-05 created (Claude) |  |"
+    response = client.post(
+        "/api/spec/part", json={"old": two, "new": two.replace("Could", "Must") + "\n" + more}, headers=world.agent("spec-example")
+    )
+    assert response.status_code == 200
+    assert commits(world)[0] == "Spec: agent:spec-example edited ONE-2 and ONE-4 on Cockpit"
+
+
 def test_whole_edit_checks_the_version_and_names_what_changed(world: World) -> None:
     page = world.client.get("/api/spec").json()
     new_text = page["text"].replace("The tool does one thing.", "The tool does two things.")
@@ -323,3 +340,32 @@ def test_a_failed_commit_keeps_the_edit_and_says_so(world: World) -> None:
     assert response.status_code == 200
     assert response.json()["committed"] is False and "index.lock" in response.json()["commit_error"]
     assert "| Should |" in next(line for line in spec_text(world).splitlines() if line.startswith("| ONE-2"))
+
+
+def test_a_spec_edit_pushes_after_another_session_pushes_between_its_pull_and_push(world: World, tmp_path: Path,
+                                                                                    monkeypatch) -> None:
+    """CODE-7: a push refused because another session pushed first leaves nothing split from the remote."""
+    remote = git(world.spec_repo, "remote", "get-url", "origin").strip()
+    worktree = tmp_path / "worktree"
+    subprocess.run(["git", "clone", "-q", "-b", "main", remote, str(worktree)], check=True, capture_output=True)
+    git(worktree, "config", "user.name", "Test")
+    git(worktree, "config", "user.email", "test@example.test")
+    real_git, raced = spec._git, []
+
+    def racing_git(repo, args):
+        if args[0] == "push" and not raced:  # the other session's push lands just before this one
+            raced.append(True)
+            (worktree / "code.py").write_text("print('raced')\n")
+            git(worktree, "add", "code.py")
+            git(worktree, "commit", "-q", "-m", "Code pushed meanwhile")
+            git(worktree, "push", "-q", "origin", "main")
+        return real_git(repo, args)
+
+    monkeypatch.setattr(spec, "_git", racing_git)
+    row = block(world, "spec:ONE-2")
+    response = world.client.post("/api/spec/part", json={"old": row["text"], "new": row["text"].replace("Could", "Should")}, headers=world.user())
+    assert response.status_code == 200 and response.json()["committed"] is True, response.json()
+    assert response.json()["commit_error"] == ""
+    assert commits(world)[:2] == ["Spec: Sam edited ONE-2 on Cockpit", "Code pushed meanwhile"]
+    git(world.spec_repo, "fetch", "-q", "origin")
+    assert git(world.spec_repo, "rev-list", "--left-right", "--count", "HEAD...origin/main").split() == ["0", "0"]

@@ -1,5 +1,5 @@
 // Take back after Send says what became of the message, and gives its words back. Checks, at laptop and phone width:
-// - Send on Next up hands the step off, and the notice offers Take back;
+// - Send on the card hands the step off, and the notice offers Take back, for a task with another step in Inbox;
 // - a notice the pointer rests on keeps the message waiting on Cockpit;
 // - Take back draws the step at the top of the queue at once, where Cockpit puts it, not in Ready next until Cockpit
 //   answers;
@@ -63,6 +63,12 @@ async function main() {
     for (const width of [1440, 390]) {
       const key = `note:take-back-${Date.now()}`;
       await agent("PUT", "/api/items", { key, title: "Take back test", priority: "urgent", sessions: [SESSION_B] });
+      // The task's other step, a permission ask, keeps its row in Inbox, so a Send's Undo is the notice with Take back
+      // rather than the sent row in Busy. A permission ask is not a card of its own, so the card shows the step below.
+      const other = (await agent("POST", "/api/steps", {
+        item_key: key, need: `allow:take-back-${width}`, ask: "Let the session list the other part", score: 90, session_id: SESSION_B,
+        permission: { list: "allow", rule: `Bash(ls /tmp/take-back-${width} *)` },
+      })).step;
       const answer = await agent("POST", "/api/steps", {
         item_key: key, need: `review:take-back-${width}`, ask: "Take back test", score: 100, session_id: SESSION_B,
         body: "Take back test body.",
@@ -76,7 +82,7 @@ async function main() {
       const errors = [];
       page.on("pageerror", (error) => errors.push(error.message));
       page.on("console", (message) => { if (message.type() === "error") errors.push(message.text()); });
-      await page.goto(`${info.origin}/classic`, { timeout: 90000 });
+      await page.goto(`${info.origin}/`, { timeout: 90000 });
       const card = page.locator(`#next article[data-step="${id}"]`).first();
       // The first drawing of a synthetic board can take long on a busy host.
       await card.waitFor({ timeout: 90000 });
@@ -225,6 +231,8 @@ async function main() {
 
       check(`${width}: no page errors`, errors.length === 0, errors.join(" | "));
       await context.close();
+      // The next width's task leads the board on its own.
+      await user("POST", `/api/steps/${other.id}/snooze`, { until: "2099-01-01T08:00:00Z" });
     }
   } finally {
     if (browser) await browser.close();

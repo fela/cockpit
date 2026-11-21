@@ -53,9 +53,9 @@
 
   // By name, what the user chose; null or an empty list for a choice the user cleared.
   const choices = {};
-  const tell = (name, chosen, label) => {
+  const tell = (name, chosen, label, typing) => {
     choices[name] = chosen === "" ? null : chosen;
-    post({ type: "chose", name, chosen: choices[name], label: label || "" });
+    post({ type: "chose", name, chosen: choices[name], label: label || "", typing });
   };
 
   // Names the user chose since the page loaded: the saved choices that arrive later leave those as they are.
@@ -63,11 +63,15 @@
   const report = (event) => {
     const control = event.target;
     if (!control || !control.name || !controls().includes(control)) return;
-    // Text goes as it is typed, so a close of the page straight after typing keeps it.
+    // Text goes to the parent as it is typed; its queue keeps it safe while coalescing keystrokes.
     if (event.type === "input" && !(control.localName === "textarea" || control.localName === "input" && !["radio", "checkbox"].includes(control.type))) return;
     edited.add(control.name);
     const { chosen, label } = read(control.name);
-    tell(control.name, chosen, label);
+    if (Object.hasOwn(choices, control.name) && JSON.stringify(choices[control.name]) === JSON.stringify(chosen)) {
+      if (event.type === "change") post({ type: "flush", name: control.name });
+      return;
+    }
+    tell(control.name, chosen, label, event.type === "input");
   };
   document.addEventListener("change", report, true);
   document.addEventListener("input", report, true);
@@ -80,7 +84,7 @@
       if (typeof name !== "string" || !name) throw new Error("cockpit.choose needs a name");
       edited.add(name);
       write(name, value);
-      tell(name, value ?? null, label || "");
+      tell(name, value ?? null, label || "", false);
     },
   });
 

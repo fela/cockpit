@@ -224,7 +224,17 @@ def test_a_message_while_the_archive_waits_keeps_the_session(world: World, monke
     )
 
 
+def test_a_stopped_session_is_archived_without_a_message_that_would_restart_it(world: World) -> None:
+    world.cache.sessions = [make_session(SESSION_A, pid=None, state="working")]
+    step = _done(world, _step(world, "review"))
+    assert step["session_end"] == {"name": "session 1111", "how": "archiving", "other_steps": 0}
+    [archive] = _archives(world)
+    assert archive["message_id"] is None and archive["stopped_at"] is not None
+    assert world.runner.calls == []
+
+
 def test_a_failed_archive_message_leaves_the_session_and_says_why(world: World) -> None:
+    world.cache.sessions = [live("done", "idle")]
     world.runner.returncode = 1
     world.runner.output = "no such session"
     _done(world, _step(world, "review"))

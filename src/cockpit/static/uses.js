@@ -172,7 +172,7 @@
         if ((answer.ok || answer.status < 500) && pending === body) pending = null;
         if (!window.answerIsAway?.(answer.status)) failingSince = null;
         else if (failingFor(sentAt, clock()) < AWAY_QUIET_MS) return;
-        if (!answer.ok) throw new Error(`control uses: Cockpit answered ${answer.status}`);
+        if (!answer.ok) throw Object.assign(new Error(`control uses: Cockpit answered ${answer.status}`), { status: answer.status });
       }, (failure) => {
         const ms = failingFor(sentAt, clock());
         // A send failing while the browser is offline is the user's network, however long sends have failed.

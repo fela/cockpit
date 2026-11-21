@@ -1,9 +1,9 @@
 "use strict";
 
-// The Usage page (SPEC SESSION-9 to SESSION-16) shows weekly limits, then a graph of Claude use, Codex use and steps done on
-// each of the last 30 days. Below come the period's core numbers, counted from the Claude Code transcripts on the
-// host (spend.py) and Codex's own session files (codex.py): Claude's total, the cost of cache misses, the share of
-// input read from the cache and Codex's total as tiles, the cost by kind of token, where the use went (sessions,
+// The Usage page (SPEC SESSION-9 to SESSION-16) shows weekly limits, the period's core numbers, then Claude use,
+// Codex use and steps done on each of the last 30 days. Use is counted from the Claude Code transcripts on the
+// host (spend.py) and Codex's own session files (codex.py): Claude's total, Codex's total, the share used by
+// subagents and the cost of cache misses as figures, the cost by kind of token, where the use went (sessions,
 // skills, what started the work, Codex sessions) and the work with the costliest cache misses as ranked bars. The
 // full tables per model, session, skill and turn, and per Codex session, sit behind one disclosure. Claude use shows
 // in one measure the user picks: the share of one account's weekly limit (the default), the cost at API list prices,
@@ -89,7 +89,7 @@ const ui = {
   lineOn: false,
   tablesDirty: true,
   sort: { models: "value", origins: "value", session_kinds: "value", sessions: "value", skills: "value" },
-  all: { models: false, origins: false, session_kinds: false, top: false, sessions: false, skills: false, codex: false },
+  all: { models: false, origins: false, session_kinds: false, top: false, sessions: false, skills: false, codex: false, other: false },
   // The rows whose breakdown is open, and the day whose figures show under the charts; a poll's redraw keeps them.
   opened: new Set(), day: null,
 };
@@ -160,6 +160,24 @@ function measured(usd) {
   return measure.show(measure.of(usd, ui.data));
 }
 
+// Exact chart values keep the precision in the data without the headline's rounding.
+const EXACT_NUMBER = new Intl.NumberFormat("en-US", { maximumFractionDigits: 10 });
+function exactValue(value, unit) {
+  return unit === "$" ? `$${EXACT_NUMBER.format(value)}` : `${EXACT_NUMBER.format(value)} ${unit}`.trim();
+}
+
+function exactMeasured(usd) {
+  return exactValue(MEASURES[ui.measure].of(usd, ui.data), ui.measure === "week" ? "%" : "$");
+}
+
+// Hover text stays within two lines; the breakdown retains the full detail.
+function shortHover(...lines) {
+  return lines.filter(Boolean).slice(0, 2).map((line) => {
+    const words = line.replace(/\s+/g, " ").trim();
+    return words.length > 80 ? `${words.slice(0, 79).trimEnd()}…` : words;
+  }).join("\n");
+}
+
 // A bar of cost split by token kind; `scale` is the cost that fills the whole width. The widths go through
 // the style object: Cockpit's content policy refuses style attributes.
 function kindBar(use, scale) {
@@ -168,6 +186,11 @@ function kindBar(use, scale) {
     part.style.width = `${scale ? (use.usd_by_kind[kind] / scale) * 100 : 0}%`;
     return part;
   }));
+}
+
+function kindTitle(use, kind, label) {
+  return shortHover(`${label}: ${exactMeasured(use.usd_by_kind[kind])}, ${tokens(use.tokens[kind])} tokens`,
+    `${use.tokens[kind].toLocaleString("en-US")} tokens`);
 }
 
 // The measure's cell in a table (SESSION-11): a bar split by token kind, which the largest row fills, then the
@@ -425,33 +448,28 @@ function totalLabel(data) {
     : `Claude, of the ${allowed} % the accounts allowed in these ${PERIOD_WORDS[ui.shownPeriod]}`;
 }
 
-// One tile of the period's core numbers: a large figure, what it is, and a line that says more. A tile with a
-// breakdown (`more`, else null) is a button that opens it under its line, as the ranked rows do; `key` names it.
-function tile(figure, label, line, more, key) {
-  const parts = [h("span", { class: "spend-figure", text: figure }), h("span", { class: "spend-label", text: label }),
-    h("span", { class: "tile-line", text: line })];
-  if (!more) return h("div", { class: "spend-readout" }, parts);
+// A figure opens its full explanation in place, with a short summary on hover.
+function tile(figure, label, hover, more, key) {
   const open = ui.opened.has(key);
-  return h("button", { type: "button", class: "spend-readout", "aria-expanded": String(open), "data-focus": key, onclick: () => toggle(key) },
-    parts, open && h("span", { class: "breakdown", text: more }));
+  return h("button", {
+    type: "button", class: "spend-readout", title: hover, "aria-expanded": String(open),
+    "data-focus": key, onclick: () => toggle(key),
+  }, h("span", { class: "spend-figure", text: figure }),
+  h("span", { class: "spend-label" }, label), open && h("span", { class: "breakdown", text: more }));
 }
 
-// Codex's use in the period as a share of its own weekly limit, which it often resets early, so a period can pass
-// 100 %. The line gives its calls and how much of its input came from the cache.
 function codexTile(codex) {
   const { fresh, cached, output } = codex.total;
   const line = codex.calls
     ? `${codex.calls.toLocaleString("en-US")} calls in ${codex.sessions.length} sessions; ${shareOf(cached, fresh + cached)} of the input read from the cache, ${tokens(output)} tokens out.`
     : "Choose a longer period to find Codex use";
-  // Each Codex account allows 100 % a week, and Codex resets a week early at times, so a period can hold several
-  // weeks: the label says what they allow together.
   const label = codex.weeks > 1
     ? `Codex, of the ${codex.weeks * 100} % ${codex.accounts.length > 1 ? `its ${codex.accounts.length} accounts' ${codex.weeks} weeks` : `its ${codex.weeks} weeks`} in this period allow`
     : "Codex, of its own weekly limit";
-  const readout = tile(percent(codex.week_percent), label, line, [
-    CODEX_SHARE, "",
-    ...CODEX_KINDS.map(([kind, label]) => `${label}: ${tokens(codex.total[kind])} tokens`),
-  ].join("\n"), "tile:codex");
+  const readout = tile(percent(codex.week_percent),
+    [h("strong", { text: "Codex" }), codex.weeks > 1 ? ` of ${codex.weeks * 100} %` : " of its week"],
+    shortHover(label, `${codex.calls.toLocaleString("en-US")} calls in ${codex.sessions.length} sessions`),
+    [label, line, "", CODEX_SHARE, "", ...CODEX_KINDS.map(([kind, name]) => `${name}: ${tokens(codex.total[kind])} tokens`)].join("\n"), "tile:codex");
   readout.classList.add("codex");
   return readout;
 }
@@ -466,27 +484,46 @@ function renderTotals(data) {
   const turns = data.sessions.reduce((sum, row) => sum + row.turns, 0);
   const note = periodNote(data, use);
   const input = use.tokens.fresh + use.tokens.cache_write + use.tokens.cache_read;
+  const calls = `${use.calls.toLocaleString("en-US")} calls in ${turns.toLocaleString("en-US")} turns of ${data.sessions.length} sessions.`;
+  const claudeDetail = [totalLabel(data), calls,
+    `Subagents ${shareOf(use.subagent_usd, use.usd)} of it, work after background tasks ${shareOf(use.woken_usd, use.usd)}.`,
+    `${shareOf(use.tokens.cache_read, input)} of the input read from the cache.`,
+    `${tokens(use.tokens.cache_read)} tokens read back, ${tokens(use.tokens.cache_write)} written to it, ${tokens(use.tokens.fresh)} uncached.`,
+    "", useTitle(use), "", note].filter(Boolean).join("\n");
+  const missDetail = `${use.misses.toLocaleString("en-US")} misses, ${shareOf(use.miss_usd, use.usd)} of all use; `
+    + `${shareOf(use.paused_miss_usd, use.miss_usd)} of it after a pause of 5 minutes or more.\n`
+    + `${tokens(use.miss_tokens)} tokens written to the cache again\n${dollars(use.miss_usd)} at API list prices over reading them back`;
+  const allowed = ui.measure === "week" && available(data);
+  const label = [h("strong", { text: "Claude" }), allowed ? ` of ${allowed.toLocaleString("en-US")} %`
+    : ui.measure === "week" ? " of a week" : ui.measure === "api" ? " at API price" : " at plan price"];
+  const kindStrip = kindBar(use, use.usd);
+  kindStrip.removeAttribute("aria-hidden");
+  [...kindStrip.children].forEach((part, at) => {
+    const [kind, name] = KINDS[at];
+    part.title = kindTitle(use, kind, name);
+  });
+  const resets = ui.shownPeriod === "week" ? 0 : resetsIn(data).length;
+  const summary = note && (ui.shownPeriod === "week"
+    ? `Meters ${meterPercent(data.limits.accounts.reduce((sum, account) => sum + account.windows.find((window) => window.key === "seven_day").used, 0))}; transcript estimate ${measured(use.usd)}`
+    : `Includes ${resets} weekly ${resets === 1 ? "reset" : "resets"}`);
   fill("spend-totals",
     h("div", { class: "tiles" },
-      tile(measured(use.usd), totalLabel(data),
-        `${use.calls.toLocaleString("en-US")} calls in ${turns.toLocaleString("en-US")} turns of ${data.sessions.length} sessions. `
-        + `Subagents ${shareOf(use.subagent_usd, use.usd)} of it, work after background tasks ${shareOf(use.woken_usd, use.usd)}.`,
-        useTitle(use), "tile:claude"),
-      tile(measured(use.miss_usd), "lost to cache misses",
-        `${use.misses.toLocaleString("en-US")} misses, ${shareOf(use.miss_usd, use.usd)} of all use; `
-        + `${shareOf(use.paused_miss_usd, use.miss_usd)} of it after a pause of 5 minutes or more.`,
-        `${tokens(use.miss_tokens)} tokens written to the cache again\n${dollars(use.miss_usd)} at API list prices over reading them back`, "tile:misses"),
-      tile(shareOf(use.tokens.cache_read, input), "of the input read from the cache",
-        `${tokens(use.tokens.cache_read)} tokens read back, ${tokens(use.tokens.cache_write)} written to it, ${tokens(use.tokens.fresh)} uncached.`, null, null),
-      codexTile(data.codex)),
-    note && h("p", { class: "spend-note", text: note }),
-    h("div", { class: "kinds" },
-      h("h3", { class: "card-title", text: "Cost by kind of token" }),
-      kindBar(use, use.usd),
-      h("ul", { class: "kinds-legend" }, KINDS.map(([kind, label, meaning]) => h("li", { title: meaning },
-        h("span", { class: `kind-key kind-${kind}`, "aria-hidden": "true" }),
-        h("span", { class: "kinds-name", text: label }),
-        h("span", { class: "kinds-figure", text: `${measured(use.usd_by_kind[kind])} · ${tokens(use.tokens[kind])} tokens` }))))));
+      tile(measured(use.usd), label, shortHover(totalLabel(data), calls), claudeDetail, "tile:claude"),
+      codexTile(data.codex),
+      tile(shareOf(use.subagent_usd, use.usd), ["used by ", h("strong", { text: "subagents" })],
+        shortHover(`${shareOf(use.subagent_usd, use.usd)} of Claude use, ${measured(use.subagent_usd)}`, `${shareOf(use.woken_usd, use.usd)} after background tasks`),
+        `Subagents: ${measured(use.subagent_usd)}, ${shareOf(use.subagent_usd, use.usd)} of Claude use.\n`
+        + `Work after background tasks: ${measured(use.woken_usd)}, ${shareOf(use.woken_usd, use.usd)} of Claude use.`, "tile:subagents"),
+      tile(measured(use.miss_usd), ["lost to ", h("strong", { text: "cache misses" })],
+        shortHover(`${use.misses.toLocaleString("en-US")} misses, ${shareOf(use.miss_usd, use.usd)} of Claude use`, `${shareOf(use.paused_miss_usd, use.miss_usd)} after pauses of 5 minutes or more`),
+        missDetail, "tile:misses")),
+    h("p", { class: "spend-note", text: summary || "" }),
+    h("div", { class: "kinds", "aria-label": "Cost by kind of token" }, kindStrip,
+      h("ul", { class: "kinds-legend" }, KINDS.map(([kind, name]) => h("li", {},
+        h("button", { type: "button", class: "kind-detail", title: kindTitle(use, kind, name),
+          "aria-expanded": String(ui.opened.has(`kind:${kind}`)), "data-focus": `kind:${kind}`, onclick: () => toggle(`kind:${kind}`) },
+          h("span", { class: `kind-key kind-${kind}`, "aria-hidden": "true" }), h("span", { class: "kinds-name", text: name }))))),
+      KINDS.filter(([kind]) => ui.opened.has(`kind:${kind}`)).map(([kind, name, meaning]) => breakdown(`${kindTitle(use, kind, name)}\n${meaning}`))));
 }
 
 // Opens or closes the breakdown under a row. Breakdowns open on a press rather than in a hover, so they work on a
@@ -513,21 +550,19 @@ function rankList(rows, empty) {
     fillBar.style.width = `${most ? (row.value / most) * 100 : 0}%`;
     const open = ui.opened.has(row.key);
     return h("li", {},
-      h("button", { type: "button", class: "rank-row", "aria-expanded": String(open), "data-focus": row.key, onclick: () => toggle(row.key) },
+      h("button", { type: "button", class: "rank-row", title: shortHover(`${row.exact}, ${row.name}`, row.meta), "aria-expanded": String(open), "data-focus": row.key, onclick: () => toggle(row.key) },
         h("span", { class: "rank-name", text: row.name }),
-        h("span", { class: "rank-figure", text: row.figure }),
         h("span", { class: "rank-bar", "aria-hidden": "true" }, fillBar),
-        row.meta && h("span", { class: "rank-meta", text: row.meta })),
-      open && breakdown(row.more));
+        h("span", { class: "rank-figure", text: row.figure })),
+      open && breakdown([row.name, row.meta, row.more].filter(Boolean).join("\n")));
   }));
 }
 
 // A card with a small title; `table` names the section below that holds all its rows, `kind` styles it.
 function card(title, body, table, kind) {
-  return h("div", { class: kind ? `spend-card ${kind}` : "spend-card" },
-    h("h3", { class: "card-title", text: title }),
-    body,
-    table && h("button", { type: "button", class: "link-button card-more", onclick: () => openTable(table) }, "All in the table"));
+  return h("div", { class: kind ? `rank-list ${kind}` : "rank-list" },
+    h("div", { class: "rank-head" }, h("h3", { class: "card-title", text: title }),
+      table && h("button", { type: "button", class: "link-button card-more", "aria-label": `All ${title.toLowerCase()}`, "data-focus": `all:${table}`, onclick: () => openTable(table) }, "All")), body);
 }
 
 // Opens the tables and scrolls to one of them. The tables open at once rather than growing open (motion.css), since a
@@ -543,24 +578,24 @@ function openTable(id) {
 
 function renderWhere(data) {
   const rows = (list, row) => list.slice(0, RANK_ROWS).map((entry) => ({
-    value: entry.use.usd, figure: measured(entry.use.usd), more: useTitle(entry.use), ...row(entry),
+    value: entry.use.usd, figure: measured(entry.use.usd), exact: exactMeasured(entry.use.usd), more: useTitle(entry.use), ...row(entry),
   }));
   fill("spend-where",
     head("where-title", "Where it went", null),
     h("div", { class: "cards" },
       card("Sessions", rankList(rows(data.sessions, (row) => ({
         key: `where-session:${row.session_id}`, name: row.name || row.session_id,
-        meta: `${(SESSION_KINDS[row.kind] || [row.kind])[0]} · ${row.turns} turns`,
+        meta: `${(SESSION_KINDS[row.kind] || [row.kind])[0]}, ${row.turns} turns`,
       })), "Choose a longer period to find sessions"), "spend-sessions"),
       card("Skills", rankList(rows(data.skills, (row) => ({
         key: `where-skill:${row.skill}`, name: row.skill || "No skill loaded", meta: `${row.turns} turns in ${row.sessions} sessions`,
       })), "Choose a longer period to find skill use"), "spend-skills"),
-      card("What started the work", rankList(rows(data.origins, (row) => ({
+      card("Kinds of work", rankList(rows(data.origins, (row) => ({
         key: `where-origin:${row.origin}`, name: (ORIGINS[row.origin] || [row.origin])[0], meta: `${row.turns} turns in ${row.sessions} sessions`,
       })), "Choose a longer period to find work"), "spend-origins"),
-      card("Codex sessions", rankList(data.codex.sessions.slice(0, RANK_ROWS).map((row) => ({
-        value: row.week_percent, figure: percent(row.week_percent), name: folder(row.cwd) || row.session_id,
-        key: `where-codex:${row.session_id}`, more: codexTitle(row), meta: `${codexAccount(data.codex, row)}${CODEX_SOURCES[row.source] || row.source || "unknown start"} · ${row.calls} calls · from ${moment(row.first)}`,
+      card("Codex", rankList(data.codex.sessions.slice(0, RANK_ROWS).map((row) => ({
+        value: row.week_percent, figure: percent(row.week_percent), exact: exactValue(row.week_percent, "%"), name: folder(row.cwd) || row.session_id,
+        key: `where-codex:${row.session_id}`, more: codexTitle(row), meta: `${codexAccount(data.codex, row)}${CODEX_SOURCES[row.source] || row.source || "unknown start"}, ${row.calls} calls, from ${moment(row.first)}`,
       })), "Choose a longer period to find Codex use"), "spend-codex", "codex")));
 }
 
@@ -577,19 +612,21 @@ function renderMisses(data) {
   const sessions = data.sessions.filter((row) => row.use.misses).sort((a, b) => b.use.miss_usd - a.use.miss_usd).slice(0, RANK_ROWS);
   const missTitle = (missed) => `${missed.misses} cache misses, ${tokens(missed.miss_tokens)} tokens written again\n`
     + `${dollars(missed.miss_usd)} at API list prices over reading them back, ${dollars(missed.paused_miss_usd)} of it after a pause`;
-  fill("spend-misses",
-    head("misses-title", "Cache misses", `${use.misses.toLocaleString("en-US")} in this period, ${shareOf(use.miss_usd, use.usd)} of all Claude use.`),
-    h("p", { class: "spend-define", text: MISS_DEFINITION }),
+  const heading = head("misses-title", "Cache misses", `${use.misses.toLocaleString("en-US")} in this period, ${shareOf(use.miss_usd, use.usd)} of Claude use`);
+  heading.querySelector("h2").title = "Extra cost of writing cached input again instead of reading it back\nAfter the cache expires or the start of a prompt changes";
+  heading.querySelector("h2").tabIndex = 0;
+  heading.querySelector("h2").dataset.focus = "misses:definition";
+  fill("spend-misses", heading,
     h("div", { class: "cards two" },
-      card("Sessions with the costliest misses", rankList(sessions.map((row) => ({
-        value: row.use.miss_usd, figure: measured(row.use.miss_usd), name: row.name || row.session_id,
+      card("Costliest sessions", rankList(sessions.map((row) => ({
+        value: row.use.miss_usd, figure: measured(row.use.miss_usd), exact: exactMeasured(row.use.miss_usd), name: row.name || row.session_id,
         key: `miss-session:${row.session_id}`, more: missTitle(row.use),
-        meta: `${row.use.misses} misses · ${shareOf(row.use.miss_usd, row.use.usd)} of its use`,
+        meta: `${row.use.misses} misses, ${shareOf(row.use.miss_usd, row.use.usd)} of its use`,
       })), "No cache misses in this period.")),
-      card("Turns with the costliest misses", rankList(data.miss_turns.slice(0, RANK_ROWS).map((turn) => ({
-        value: turn.use.miss_usd, figure: measured(turn.use.miss_usd), name: names.get(turn.session_id) || turn.session_id,
+      card("Costliest turns", rankList(data.miss_turns.slice(0, RANK_ROWS).map((turn) => ({
+        value: turn.use.miss_usd, figure: measured(turn.use.miss_usd), exact: exactMeasured(turn.use.miss_usd), name: names.get(turn.session_id) || turn.session_id,
         key: `miss-turn:${turn.session_id}:${turn.start}`, more: `${turn.prompt}\n\n${missTitle(turn.use)}`,
-        meta: `${moment(turn.start)} · ${turn.use.misses} misses · ${promptLine(turn.prompt) || "no prompt"}`,
+        meta: `${moment(turn.start)}, ${turn.use.misses} misses, ${promptLine(turn.prompt) || "no prompt"}`,
       })), "No cache misses in this period."))));
 }
 
@@ -615,9 +652,9 @@ function localDays(hours) {
   return [...days.values()];
 }
 
-// The graph per day (SESSION-14): Claude use and the steps done on each of the last days, two charts over one
-// row of days, so a day lines up in both. A day's hover gives its figures from both and lights its column in both.
+// The three daily plots share their dates and highlighted column. Precision lives in the tooltip.
 function renderDaily(data) {
+  hideDayTip();
   const { since, hours, steps } = data.daily;
   const dayKey = (date) => `${date.getFullYear()}-${date.getMonth()}-${date.getDate()}`;
   // The day `since` falls in is counted only in part, so the graph starts at the next midnight here.
@@ -643,56 +680,156 @@ function renderDaily(data) {
   const measure = MEASURES[ui.measure];
   const useOf = (day) => (day.use ? measure.of(day.use.usd, data) : 0);
   const columns = [];
-  const light = (at) => { for (const column of columns) column.classList.toggle("lit", column.dataset.day === String(at)); };
   const chosen = days.find((day) => dayKey(day.start) === ui.day);
-  const choose = (day) => { ui.day = dayKey(day.start) === ui.day ? null : dayKey(day.start); render(); };
-  const chart = (kind, title, valueOf, tick) => {
+  const light = (at) => { for (const column of columns) column.classList.toggle("lit", column.dataset.day === String(at)); };
+  const read = (column, day, at) => { light(at); showDayTip(column, day); };
+  const clear = () => {
+    const focused = document.activeElement;
+    if (columns.includes(focused)) read(focused, days[Number(focused.dataset.day)], Number(focused.dataset.day));
+    else { light(-1); hideDayTip(); }
+  };
+  // `anyOf` is what a day's tooltip can say under this chart: a chart keeps its days while one of them has any of it.
+  const chart = (kind, title, valueOf, anyOf, tick) => {
     const top = niceTop(Math.max(0, ...days.map(valueOf)));
+    const words = kind === "use" ? "Claude" : kind === "codex" ? "Codex" : title;
+    // The hover says what the name leaves out.
+    const name = h("div", { class: "daily-title", text: words, title: title === words ? null : shortHover(title) });
+    // A measure with nothing on any day is its name and "None": an empty plot would take a chart's room to say so.
+    if (!days.some(anyOf)) return h("div", { class: `daily-chart ${kind} none` }, h("div", { class: "daily-heading" }, name, h("span", { class: "daily-scale", text: "None" })));
     return h("div", { class: `daily-chart ${kind}` },
-      h("div", { class: "daily-title", text: title }),
-      h("div", { class: "daily-plot" },
-        h("div", { class: "daily-axis", "aria-hidden": "true" }, [top, top / 2, 0].map((at) => h("span", { text: tick(at) }))),
-        h("div", { class: "daily-days", onpointerleave: () => light(-1) }, days.map((day, at) => {
+      h("div", { class: "daily-heading" }, name,
+        h("span", { class: "daily-scale", text: tick(top), "aria-label": `Scale maximum ${tick(top)}` })),
+      h("div", { class: "daily-plot daily-columns" },
+        h("div", { class: "daily-days", onpointerleave: clear }, days.map((day, at) => {
           const bar = h("span", { class: "daily-bar" });
           bar.style.height = `${(valueOf(day) / top) * 100}%`;
           const column = h("button", {
             type: "button", class: at === days.length - 1 ? "daily-day today" : "daily-day", "data-day": at, "data-focus": `${kind}:${at}`,
-            "aria-label": DAY_NAME.format(day.start),
-            "aria-pressed": String(day === chosen), onpointerenter: () => light(at), onclick: () => choose(day),
+            "aria-label": `${title}, ${DAY_NAME.format(day.start)}`, tabindex: at === days.length - 1 ? 0 : -1,
+            "aria-pressed": String(day === chosen),
+            onpointerenter: (event) => { if (event.pointerType !== "touch") read(column, day, at); },
+            onfocus: () => {
+              for (const sibling of column.parentElement.children) sibling.tabIndex = sibling === column ? 0 : -1;
+              read(column, day, at);
+            },
+            onblur: () => { light(-1); hideDayTip(); },
+            onkeydown: (event) => {
+              const moves = { ArrowLeft: Math.max(0, at - 1), ArrowRight: Math.min(days.length - 1, at + 1), Home: 0, End: days.length - 1 };
+              if (Object.hasOwn(moves, event.key)) {
+                event.preventDefault();
+                column.parentElement.children[moves[event.key]].focus();
+              } else if (event.key === "Escape") { light(-1); hideDayTip(); }
+            },
+            onclick: () => {
+              ui.day = dayKey(day.start) === ui.day ? null : dayKey(day.start);
+              render();
+              const replacement = document.querySelector(`[data-focus="${kind}:${at}"]`);
+              if (replacement) {
+                for (const peer of document.querySelectorAll(".daily-day")) peer.classList.toggle("lit", peer.dataset.day === String(at));
+                showDayTip(replacement, day);
+              }
+            },
           }, bar);
           columns.push(column);
           return column;
         }))));
   };
   fill("spend-daily",
-    head("daily-title", `The last ${days.length} days`, "Local time"),
+    head("daily-title", "Per day, the last 30 days", "Local time"),
     h("div", { class: "daily" },
-      chart("use", measure.words, useOf, (at) => (ui.measure === "week" ? `${axisFigure(at)} %` : `$${axisFigure(at)}`)),
-      chart("codex", "Codex, as a share of its own weekly limit", (day) => day.codex, (at) => `${axisFigure(at)} %`),
-      // A half step has no column of its own, so its gridline goes unlabelled.
-      chart("steps", "Steps done", (day) => day.done, (at) => (Number.isInteger(at) ? String(at) : "")),
-      h("div", { class: "daily-dates", "aria-hidden": "true" }, days.flatMap((day, at) => {
+      chart("use", measure.words, useOf, useOf, (at) => (ui.measure === "week" ? `${axisFigure(at)} %` : `$${axisFigure(at)}`)),
+      chart("codex", "Codex, as a share of its own weekly limit", (day) => day.codex, (day) => day.codex, (at) => `${axisFigure(at)} %`),
+      chart("steps", "Steps done", (day) => day.done, (day) => day.done + day.dismissed, (at) => String(at)),
+      h("div", { class: "daily-dates daily-axis", "aria-hidden": "true" }, days.flatMap((day, at) => {
         if (day.start.getDay() !== 1) return [];
         const label = h("span", { class: at > days.length - 5 ? "end" : null, text: DAY_TICK.format(day.start) });
         label.style.setProperty("--at", String(at));
         label.style.setProperty("--days", String(days.length));
         return [label];
       })),
-      chosen && breakdown(dayTitle(chosen))));
+      chosen && h("div", { class: "breakdown day-figures" }, h("div", { class: "day-when", text: dayWhen(chosen) }),
+        dayFigures(chosen).flatMap(([name, value]) => [h("span", { text: name }), h("span", { class: "day-value", text: value })]))));
 }
 
-// A day's figures, shown under the charts once the user presses its column: its Claude use in each measure, Codex's, the steps closed, and use per step done.
-function dayTitle(day) {
+// The tooltip and the pinned breakdown use the same figures and units.
+function dayFigures(day) {
   const { use, codex, done, dismissed } = day;
-  const today = day.start.toDateString() === new Date().toDateString();
   return [
-    `${DAY_NAME.format(day.start)}${today ? ", so far" : ""}`,
-    use ? `Claude: ${percent(use.week_percent)} of a week, ${dollars(use.usd)} at API list prices` : "No Claude use",
-    codex ? `Codex: ${percent(codex)} of its own week` : "No Codex use",
-    `Steps done: ${done}; dismissed: ${dismissed}`,
-    use && done ? `Claude per step done: ${percent(use.week_percent / done)} of a week, ${dollars(use.usd / done)} at API list prices` : null,
-  ].filter(Boolean).join("\n");
+    ["Claude", `${exactValue(use?.week_percent || 0, "%")} of a week`],
+    ["Claude API price", exactValue(use?.usd || 0, "$")],
+    ["Codex", `${exactValue(codex, "%")} of its own week`],
+    ["Steps done", String(done)],
+    ["Steps dismissed", String(dismissed)],
+    ...(use && done ? [
+      ["Claude per step", `${exactValue(use.week_percent / done, "%")} of a week`],
+      ["API price per step", exactValue(use.usd / done, "$")],
+    ] : []),
+  ];
 }
+
+function dayWhen(day) {
+  return `${DAY_NAME.format(day.start)}${day.start.toDateString() === new Date().toDateString() ? ", so far" : ""}`;
+}
+
+let usageDayTipAnchor = null;
+function hideDayTip() {
+  usageDayTipAnchor?.removeAttribute("aria-describedby");
+  usageDayTipAnchor = null;
+  const tip = document.getElementById("usage-day-tip");
+  if (tip) tip.hidden = true;
+}
+
+function showDayTip(anchor, day) {
+  let tip = document.getElementById("usage-day-tip");
+  if (!tip) {
+    tip = h("div", { id: "usage-day-tip", class: "chart-tip", role: "tooltip", hidden: true });
+    document.body.append(tip);
+  }
+  usageDayTipAnchor?.removeAttribute("aria-describedby");
+  usageDayTipAnchor = anchor;
+  anchor.setAttribute("aria-describedby", tip.id);
+  tip.replaceChildren(h("div", { class: "tip-when", text: dayWhen(day) }),
+    ...dayFigures(day).map(([name, value]) => h("div", { class: "tip-row" }, h("span", { text: name }), h("span", { text: value }))));
+  tip.hidden = false;
+  positionDayTip(anchor, tip);
+}
+
+function positionDayTip(anchor, tip) {
+  const rect = anchor.getBoundingClientRect();
+  if (rect.bottom <= 0 || rect.top >= window.innerHeight) { hideDayTip(); return; }
+  tip.style.maxWidth = "";
+  let box = tip.getBoundingClientRect();
+  const edge = 8;
+  const width = document.documentElement.clientWidth;
+  let left = Math.max(edge, Math.min(width - box.width - edge, rect.left + rect.width / 2 - box.width / 2));
+  // Place above the whole column, or below when the column is near the viewport's top.
+  const height = window.innerHeight;
+  let top = rect.top >= box.height + edge + 10 ? rect.top - box.height - 10 : rect.bottom + 10;
+  if (top + box.height > height - edge) {
+    if (rect.right + box.width + 10 <= width - edge) left = rect.right + 10;
+    else if (rect.left - box.width - 10 >= edge) left = rect.left - box.width - 10;
+    else {
+      // In a short viewport, narrow the tooltip into the wider side of the column.
+      const before = rect.left - edge - 10;
+      const after = width - edge - rect.right - 10;
+      tip.style.maxWidth = `${Math.max(before, after)}px`;
+      box = tip.getBoundingClientRect();
+      left = after >= before ? rect.right + 10 : rect.left - box.width - 10;
+    }
+    top = Math.max(edge, height - box.height - edge);
+  }
+  top = Math.max(edge, Math.min(height - box.height - edge, top));
+  tip.style.left = `${left}px`;
+  tip.style.top = `${top}px`;
+}
+
+window.addEventListener("scroll", () => {
+  const tip = document.getElementById("usage-day-tip");
+  if (usageDayTipAnchor === document.activeElement && tip && !tip.hidden) positionDayTip(usageDayTipAnchor, tip);
+  else hideDayTip();
+}, { passive: true });
+window.addEventListener("resize", hideDayTip, { passive: true });
+document.addEventListener("pointerdown", (event) => { if (!event.target.closest(".daily-day")) hideDayTip(); });
 
 // The top of a chart's scale: the largest value rounded up to 1, 2, 2.5, 4, 5, 6, 8 or 10 times a power of ten,
 // so the tallest column fills most of the height and the half line still falls on a round figure.
@@ -878,11 +1015,12 @@ const CODEX_KINDS = [
 // How Codex's share of its weekly limit is counted (codex.py).
 const CODEX_SHARE = "Codex's share of its own weekly limit, from its meter: each whole-percent rise is shared out over the "
   + "same account's Codex calls on the host since the rise before, by their tokens. Each account has its own meter, and "
-  + "use of the same Codex account elsewhere counts here too.";
+  + "use of the same Codex account elsewhere counts here too. Codex that runs through the model hub has no meter of its own, "
+  + "so its calls share out the rises the hub reads on each of its Codex accounts.";
 
 // The account a Codex session ran on, as the start of its row's line, when more than one account is signed in.
 function codexAccount(codex, row) {
-  return codex.accounts.length > 1 ? `${row.account} · ` : "";
+  return codex.accounts.length > 1 ? `${row.account}, ` : "";
 }
 
 // A Codex session's breakdown: where it ran, its share of the week and its tokens.
@@ -892,6 +1030,38 @@ function codexTitle(row) {
     `${percent(row.week_percent)} of its Codex account's weekly limit`,
     ...CODEX_KINDS.map(([kind, label]) => `${label}: ${tokens(row.tokens[kind])} tokens`),
   ].join("\n");
+}
+
+// Claude Code sessions that ran on a model that is not Claude's through the model hub: the fallback to
+// another model while the hub cannot reach Claude, or one picked on purpose (SPEC SESSION-12). They count apart, in tokens, per session.
+const OTHER_KINDS = CODEX_KINDS.slice(0, 3);
+
+function otherModelUse(other) {
+  if (!other.calls) return null;
+  const most = Object.fromEntries(OTHER_KINDS.map(([kind]) => [kind, Math.max(0, ...other.sessions.map((row) => row.tokens[kind]))]));
+  const mostCalls = Math.max(0, ...other.sessions.map((row) => row.calls));
+  const rows = ui.all.other ? other.sessions : other.sessions.slice(0, TOP_ROWS);
+  const models = [...new Set(other.sessions.flatMap((row) => row.models))].join(", ");
+  const sessions = other.sessions.length === 1 ? "1 Claude Code session" : `${other.sessions.length} Claude Code sessions`;
+  return [
+    h("h3", { class: "card-title other-title", text: "Other models in Claude Code sessions" }),
+    h("p", { class: "spend-count", text: `${other.calls.toLocaleString("en-US")} model calls in ${sessions} ran on ${models} `
+      + "through the model hub in place of Claude, by the fallback or a pick. They are not in the Claude totals "
+      + "above, and the share of Codex's weekly limit counts only Codex's own sessions." }),
+    h("div", { class: "table-scroll" },
+      h("table", { class: "spend-table codex-table" },
+        h("thead", {}, h("tr", {}, h("th", { scope: "col", class: "name-col", text: "Session" }),
+          h("th", { scope: "col", "aria-sort": "descending", text: "Calls" }),
+          OTHER_KINDS.map(([, label, meaning]) => h("th", { scope: "col", title: meaning, text: label })))),
+        h("tbody", {}, rows.map((row) => openRow(`other:${row.session_id}`, OTHER_KINDS.length + 2,
+          [row.cwd, row.session_id, `Models ${row.models.join(", ")}`, `First call ${moment(row.first)}, last ${moment(row.last)}`, "",
+            ...OTHER_KINDS.map(([kind, label]) => `${label}: ${tokens(row.tokens[kind])} tokens`)].join("\n"),
+          [h("span", { class: "row-name", text: row.name || row.session_id }),
+            h("span", { class: "row-meta", text: `${folder(row.cwd)} · ${row.session_id.slice(0, 8)} · last call ${moment(row.last)}` })],
+          [heatCell(String(row.calls), row.calls, mostCalls, true),
+            OTHER_KINDS.map(([kind]) => heatCell(tokens(row.tokens[kind]), row.tokens[kind], most[kind], false))]))))),
+    showAll("other", other.sessions.length, TOP_ROWS),
+  ];
 }
 
 function renderCodex(data) {
@@ -922,7 +1092,8 @@ function renderCodex(data) {
                   CODEX_KINDS.map(([kind]) => heatCell(tokens(row.tokens[kind]), row.tokens[kind], most[kind], false))]))))),
           showAll("codex", codex.sessions.length, TOP_ROWS),
         ]
-      : h("p", { class: "note", text: "Choose a longer period to find Codex use" }));
+      : h("p", { class: "note", text: "Choose a longer period to find Codex use" }),
+    otherModelUse(data.other_models));
 }
 
 // One line: the period the figures cover and when they were read; how they are counted is under the figures.
@@ -938,7 +1109,7 @@ function render() {
   const focused = document.activeElement?.dataset?.focus;
   draw();
   const again = focused && [...document.querySelectorAll("[data-focus]")].find((el) => el.dataset.focus === focused);
-  if (again) again.focus();
+  if (again) again.focus({ preventScroll: true });
 }
 
 function draw() {
@@ -962,7 +1133,7 @@ function draw() {
     `Claude Code's and Codex's calls, read from their session files on the host; this week begins when the earlier of the Claude accounts' current weeks began. `
     + `List prices per million tokens on Opus 5.5: $4 input, $20 output, $0.20 for a cache read. `
     + `The weekly share is an estimate using ${dollars(data.week_list_usd)} of list-price use as its reference budget. A turn runs from one prompt to the next; a subagent's calls count in the turn it started in, `
-    + `and so does the work after a background command or subagent finished and woke the session.`);
+    + `and so does the work after a background command or subagent finished and woke the session.\n\n${MISS_DEFINITION}`);
   showBanners(data.unpriced_models.length > 0
     && `The totals on this page leave out calls to ${data.unpriced_models.join(", ")}, because Cockpit does not know that model's price yet.`);
 }

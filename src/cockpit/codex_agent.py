@@ -16,6 +16,7 @@ import subprocess
 import sys
 import threading
 import uuid
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -42,6 +43,10 @@ class CodexError(Exception):
     def __init__(self, message: str, session_id: str | None = None) -> None:
         super().__init__(message)
         self.session_id = session_id
+
+
+class WorkerRetired(CodexError):
+    """The worker runs older Cockpit code than is installed and takes no new work; nothing reached Codex."""
 
 
 def installed_version(command: str) -> str | None:
@@ -296,6 +301,8 @@ class CodexAgent:
         # Starts, messages and their interrupts go one at a time, so none uses the app-server between
         # _restart_if_updated finding Codex idle and its close. Not self._lock: the reader thread needs that to handle the close's disconnect.
         self._sending = threading.RLock()
+        # Set once, by retire_if_idle; from then on every start and message is refused before it reaches Codex.
+        self.retired = False
         self.rpc = AppServer(command, self.event)
 
     def _save(self, session_id: str, **changes) -> None:
@@ -350,15 +357,32 @@ class CodexAgent:
             log.info("Codex was updated since its app-server started; restarting it")
             self.rpc.close()
 
+    def retire_if_idle(self, outdated: Callable[[], bool]) -> bool:
+        """Whether this agent has stopped taking starts and messages. It stops once no turn or request of Codex is
+        open and `outdated()` finds newer Cockpit code installed, so its worker can exit and the next call start a
+        worker on that code. Under _sending, so no start or message runs between the check and the refusals."""
+        with self._sending:
+            if not self.retired:
+                with self._lock:
+                    idle = not self._active and not self._pending
+                self.retired = idle and outdated()
+            return self.retired
+
+    def _refuse_if_retired(self) -> None:
+        if self.retired:
+            raise WorkerRetired("This Codex worker runs older Cockpit code and takes no new work; nothing was sent")
+
     def start(self, cwd: Path, name: str, text: str, model: str, effort: str, speed: str) -> str:
         """Start a thread on the picked model, effort and speed and send it `text`; resumes keep those picks."""
         with self._sending:
+            self._refuse_if_retired()
             config.validate_speed("codex", model, speed)
             return self._start(cwd, name, text, model, effort, speed, None)
 
     def start_for_message(self, message_id: int, cwd: Path, name: str, text: str, model: str, effort: str, speed: str) -> str:
         """Attach the created thread before sending a prompt, even if the web caller disappears."""
         with self._sending:
+            self._refuse_if_retired()
             config.validate_speed("codex", model, speed)
             return self._start(cwd, name, text, model, effort, speed, message_id)
 
@@ -405,6 +429,7 @@ class CodexAgent:
         if not self.owns(session_id):
             raise CodexError(f"Codex thread {session_id} is not owned by Cockpit")
         with self._sending:
+            self._refuse_if_retired()
             if restart:
                 self.interrupt(session_id)
             self._send(session_id, text)
@@ -413,7 +438,7 @@ class CodexAgent:
         self._restart_if_updated()
         with self._lock:
             if session_id in self._active:
-                raise CodexError("Codex is still working; wait for the current turn or use Send now")
+                raise CodexError("Codex is still working; wait for the current turn")
         connection = self.rpc.start()
         with self._lock:
             loaded = self._loaded.get(session_id) is connection

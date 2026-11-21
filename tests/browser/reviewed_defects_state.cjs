@@ -200,7 +200,7 @@ check("usage keeps a refused account choice on show through redraws until one sa
   const w = world({ holdLeave: noop, TRY_MS: 30000, load: noop, render: () => w.run("draw()"),
     sendAction: async () => answer, h: (tag, props) => ({ tag, ...props }),
     document: { querySelectorAll: () => [], getElementById: () => ({ addEventListener: noop, replaceChildren: (...children) => { shown = children; } }) },
-    ui: { data: { unpriced_models: [] } } });
+    ui: { data: { unpriced_models: [] } }, MISS_DEFINITION: "" });
   for (const name of ["renderLimits", "renderDaily", "fill", "lede", "renderTotals", "renderWhere", "renderMisses", "renderModels",
     "renderSessions", "renderSkills", "renderOrigins", "renderSessionKinds", "renderTop", "renderCodex", "dollars"]) w.context[name] = noop;
   w.run(part("usage.js", "let preferring =", "// The weekly resets inside the period"));
@@ -315,7 +315,7 @@ for (const action of ["run", "allow"]) {
         apiWritten: async (_method, url) => { requests.push(url); return { stopped: true }; },
       });
       w.run(part("app.js", "async function run(key, work, success)", "// Optimistic changes:"));
-      w.run(part("app.js", "function act(step, action, body", "  actToast(step, action, body, acting, outcome);") + "return acting; }");
+      w.run(part("app.js", "function act(step, action, body", "  if (!snoozing || !snoozedNotice(step, body, sent)) actToast(") + "return acting; }");
       w.run(part("app.js", "function pressStepButton(", "function runCommand("));
       w.run(part("app.js", "function takenByUser(id)", "// A held step missing from the state"));
       w.run('const step = {id:7,target:{session_id:"session"}};');

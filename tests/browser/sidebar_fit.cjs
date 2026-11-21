@@ -66,17 +66,24 @@ async function main() {
       page.on("pageerror", (error) => errors.push(error.message));
       page.on("console", (message) => { if (message.type() === "error") errors.push(message.text()); });
 
-      // The box offers no checkout and no start picks (SPEC SESSION-22), and Take back puts the words back into it
-      // (on the classic page, where Next up shows the step): from the notice after Send; from You handed these
-      // after a reload, where the page holds nothing of the send; and a Take back the page left on its way at a
-      // reload, which the next page sends (errors.js).
-      await page.goto(`${info.origin}/classic`, { timeout: 90000 });
-      for (const how of ["notice", "reload", "left"]) {
+      // The box offers no checkout and no start picks (SPEC SESSION-22), and Take back puts the words back into it:
+      // from the hand-off's Undo after Send; from the item's card after a reload, where the page holds nothing of the send; and
+      // a Take back the page left on its way at a reload, which the next page sends (errors.js).
+      await page.goto(`${info.origin}/`, { timeout: 90000 });
+      // The hand-off's Undo: the sent task's row in Busy, Busy's heading while it is folded, or the bar's Your items
+      // on a phone's item screen.
+      const sentUndo = async () => {
+        const undo = page.locator(`#sidebar li.held-hand[data-item="${answer.step.item_id}"] > .side-row, #sidebar .sidebar-group > summary .busy-undo, .phone-items > .busy-undo`)
+          .locator("visible=true").first();
+        await undo.waitFor();
+        return undo;
+      };
+      for (const how of ["undo", "reload", "left"]) {
         const card = page.locator(`#next article[data-step="${id}"]`).first();
         await card.waitFor({ timeout: 90000 });
         const box = card.locator(`textarea[data-key="${draftKey}"]`);
         // A checkout and picks the page kept for this box from before give way to the defaults.
-        if (how === "notice") {
+        if (how === "undo") {
           await page.evaluate(([key, cwd]) => {
             ui.choices.set(key, `new:${cwd}`);
             ui.starts.set(key, { provider: null, model: null, effort: "low", account: null });
@@ -104,10 +111,9 @@ async function main() {
         check(`${width}, ${how}: Send starts the new session in the project's checkout, at the defaults`,
           sentTo.new_cwd === path.join(work, "checkouts", "cockpit") && sentTo.model == null && sentTo.effort == null && sentTo.account == null,
           JSON.stringify(sentTo));
-        const notice = page.locator("#toast button", { hasText: "Take back" });
-        await notice.waitFor();
-        if (how === "notice") {
-          await notice.click();
+        const undo = await sentUndo();
+        if (how === "undo") {
+          await undo.click();
         } else if (how === "left") {
           // The answer never comes to this page: it reloads with the Take back in its outbox.
           const held = `**/api/steps/${id}/return`;
@@ -115,16 +121,16 @@ async function main() {
           const sent = new Promise((resolve) => { pressed = resolve; });
           // Hold only this page's request through navigation; removing the route would release it.
           await page.route(held, () => pressed(), { times: 1 });
-          await notice.click();
+          await undo.click();
           await sent;
           await page.reload({ timeout: 90000 });
           await page.unroute(held);
         } else {
           await page.reload({ timeout: 90000 });
-          const handed = page.locator(`.with-agents li[data-step="${id}"] button[aria-label^="Take back"]`).first();
-          await handed.waitFor({ state: "attached", timeout: 90000 });
-          // Busy and Waiting start folded (VIEW-27): open the group that holds the handed step.
-          await handed.evaluate((el) => { for (let at = el.closest("details"); at; at = at.parentElement.closest("details")) at.open = true; });
+          // The item's card says what its session is doing, with Take back; the item shows from its row.
+          await page.locator(`#sidebar li[data-item="${answer.step.item_id}"]`).first().waitFor({ state: "attached", timeout: 90000 });
+          const handed = page.locator(`#next [data-handed="${id}"] .working-back`);
+          if (!(await handed.isVisible())) await page.evaluate((itemId) => showInSidebar(itemId), answer.step.item_id);
           await handed.click();
         }
         await page.waitForFunction((key) => document.querySelector(`#next textarea[data-key="${key}"]`)?.value, draftKey, { timeout: 20000 }).catch(() => {});
@@ -140,6 +146,8 @@ async function main() {
         const toastText = await page.locator("#toast .toast-text").textContent();
         const said = how === "left" ? "Taken back from the page you left" : "Taken back. Your message was not sent";
         check(`${width}, Take back from the ${how}: the message was not sent`, toastText.startsWith(said), toastText);
+        // That notice has said its part; on a phone it would sit over the bar's Undo of the next Send.
+        await page.evaluate(() => hideToast());
       }
 
       // A Take back left on its way and answered on Usage, which has no reply boxes (errors.js): a box that holds
@@ -150,14 +158,13 @@ async function main() {
         await card.waitFor({ timeout: 90000 });
         await card.locator(`textarea[data-key="${draftKey}"]`).fill(`Meant for a new session on Usage ${width}`);
         await card.locator(".composer:not(.feedback-box) button.send").first().click();
-        const notice = page.locator("#toast button", { hasText: "Take back" });
-        await notice.waitFor();
+        const undo = await sentUndo();
         const held = `**/api/steps/${id}/return`;
         let pressed = null;
         const sent = new Promise((resolve) => { pressed = resolve; });
         // The next page sends the retry, while this page's request stays held until navigation.
         await page.route(held, () => pressed(), { times: 1 });
-        await notice.click();
+        await undo.click();
         await sent;
         // Meanwhile the box writes to a session and holds other words.
         await page.evaluate(([key, choice]) => {
@@ -352,12 +359,12 @@ async function main() {
       const openMenu = async () => {
         // On a phone the first press slides the item's screen in over the list (UI-56), and the item stays picked.
         if (await row.isVisible()) await row.click();
-        const key = page.locator("main .step-context .step-menu > summary").first();
+        const key = page.locator("main .context-marks .step-menu > summary").first();
         await key.waitFor({ timeout: 15000 }).catch(() => {});
         if (await key.isVisible().catch(() => false)) await key.click();
       };
       await openMenu();
-      const entries = page.locator("main .step-context .step-menu .menu-list .menu-session[data-opens]");
+      const entries = page.locator("main .context-marks .step-menu .menu-list .menu-session[data-opens]");
       const viewKey = entries.first();
       const firstId = await viewKey.count() ? await viewKey.getAttribute("data-opens") : "";
       const keyName = firstId ? (await viewKey.getAttribute("aria-label")) : "";
@@ -370,7 +377,7 @@ async function main() {
       check(`${width}: the session's entry opens its conversation in the page`, opened, "the conversation did not open");
       await page.evaluate(() => closeSessionView(false));
       await openMenu();
-      const other = page.locator(`main .step-context .step-menu .menu-list .menu-session[data-opens="${SESSION_A}"]`).first();
+      const other = page.locator(`main .context-marks .step-menu .menu-list .menu-session[data-opens="${SESSION_A}"]`).first();
       const otherShown = await other.isVisible().catch(() => false);
       if (otherShown) await other.click();
       const openedOther = await page.waitForFunction((id) => sessionView.id === id, SESSION_A, { timeout: 10000 }).then(() => true, () => false);

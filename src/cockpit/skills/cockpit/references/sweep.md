@@ -215,7 +215,7 @@ Where authorized independent workers are available, split slow collection by sou
 - **Notion:** in full sweeps, check available comments, mentions and review requests from the last three days.
   Read linked pages and comments. Use `note:notion-<page id>` for unanswered page requests, with a link and prepared questions.
 - **Archived sessions:** inspect the last two days for unfinished work, uncommitted or unpushed changes, CI and open threads.
-  Resume unfinished work with `cockpit send --session UUID --as sweep`, stating what remains.
+  Decide unfinished work under Deciding what to wake; wake with `cockpit send --session UUID --as sweep`, stating what remains.
 - **Idle sessions:** inspect live background sessions idle over an hour with nothing running or waiting.
   Close only finished sessions with `cockpit session close`. Keep uncertain waits; Cockpit can refuse closure while work remains.
 - **Agent closes:** inspect `.closed_recently` since the previous full sweep. Verify merged PRs, posted replies and answered questions.
@@ -259,9 +259,20 @@ Bring work forward in full sweeps and low queues: unfinished idle work, resolvab
 Ask owners to resolve resource limits within authorization. Put a user decision when cost, timing or permissions require it.
 Give each active goal a working session, prepared step or owner asked this run. Split work from a busy session when needed.
 
+#### Deciding what to wake
+
+A stopped session's prompt cache has usually expired after an hour, so waking it rereads its whole conversation at full price, often 50,000 to 200,000 tokens. Decide each wake on its value, and wake only what needs its session now.
+
+- **Finish without waking** when the work is done or overtaken: its PR merged, the user answered elsewhere, another item covers it, or only the user's step remains. Write the finish step or the user's step yourself, from what the item, its links and the session's transcript show.
+- **Wake** when only that session can move work the user wants soon, with one message stating what remains.
+- **Let it wait** when nothing is lost by later: low priority, or a review or release still pending. Revisit it next run or when its wait resolves.
+- **Read the tightness** of the session's provider in `.hub.tightness`. While it is `tight`, wake only work the user is waiting on now or work due before the next reset; the rest waits. While it is `room`, also bring forward work that waited.
+- **Spread large wakes**, such as after a reboot or a sign-in: urgent work first, a few sessions per run, the rest in later runs.
+- **Ask the user** only when a large wake has unclear value, such as many long sessions while the allowance runs low. Put one decision step naming the sessions, the reason and the expected cost.
+
 #### Stalled work
 
-Read `stalled_since` every sweep and fill. Wake every non-low-priority stalled owner in this run, including fire-and-forget work.
+Read `stalled_since` every sweep and fill. Decide each non-low-priority stalled owner in this run under Deciding what to wake, including fire-and-forget work.
 State when work stopped and ask it to resume, identify a blocker, or put the question only the user can answer.
 For planned rest, require agent `until` and `why`, plus `by_user` when appropriate. Revisit unjustified or excessive rests.
 If a recent wake stalled again, read the last message and act on the blocker yourself.
@@ -299,7 +310,7 @@ Group superseded or stale tickets in one cleanup item with verdicts, keeping at 
 
 Close vanished ordinary needs with a readable reason. Follow the parent's rules for finish steps and handed work.
 After a merge, tell its owner to check deployment and continue promised follow-up.
-For failed messages: dismiss superseded deliveries; fix and retry your own needed messages; resend other senders' messages through `cockpit send`.
+For failed messages: dismiss superseded deliveries. For a needed message, fix the cause and retry the unchanged original once with `cockpit message retry ID --as sweep`, whoever sent it. This preserves the sender's text and model choice. Check whether an uncertain delivery arrived before retrying it. If the retry fails, inspect the new failure before another attempt.
 Dismiss an old failure only after successful replacement or when a prepared step carries the remaining user decision.
 When a queued user message was already relayed, dismiss it with that explanation so it is not delivered twice.
 Failures needing sign-in or another user choice become prepared steps on their item's owning session.
@@ -404,6 +415,15 @@ Removed defaults stay removed. The usual factors, for a user who set none, are:
   Work serves a goal when the goal's words cover what the work is, whatever project or goal link it carries.
 - Close to done and fresh in mind: recent user effort and the last action before shipping or closure.
 - Not forgotten: older valid work can rise enough to remain visible.
+
+**Warm cache.** Each step in `cockpit get --json` carries `cache`, the prompt cache of the session that gets its answer:
+`tokens` it holds, `minutes_left` until it expires, `warm_until`, and `cold_usd`, what answering after it expires costs over answering before.
+For a Codex session the lifetime is an estimate and `cold_usd` is null; judge by `tokens`.
+Count the cache factor for a step when its cache is warm and a higher place makes it likely the user answers before `warm_until`;
+count it more the larger `cold_usd` or `tokens` is.
+Compare the minutes left with the time the steps that would stand above it are likely to take the user, going by their sizes.
+Name the time in the reason, in the user's zone, such as "cache warm until 14:20, saves $0.50",
+and score the step without the factor once `warm_until` has passed.
 
 Weigh consequences, due dates within two days and assigned work. Keep nearby top scores a few points apart.
 When a better task outranks work the user is doing, score it clearly higher and explain the proposed switch in its first reason.

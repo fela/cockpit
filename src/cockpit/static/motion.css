@@ -139,9 +139,12 @@
   ::view-transition-new(*) { animation-duration: var(--dur-pop); animation-timing-function: var(--ease-out); }
 }
 
-/* Finishing a task (CONTROL-15). Completing has its own colour, a deep plum that no lamp uses, on the
+/* Finishing a task (CONTROL-15). Completing has its own colour, a plum that no lamp uses, on the
    last step's Done key, on Task done in its panel, on a closing answer and in the completion: a ring draws itself round a check over
-   the card and bursts, sparks fly and the card lifts away. app.js moves copies, so the page redraws underneath at once. */
+   the card and bursts, sparks fly and the card lifts away. app.js moves copies, so the page redraws underneath at once.
+   The dark page takes a light mauve with petrol letters, like its apricot keys, so the filled keys there read as one set (UI-29).
+   --complete-drain is the Undo's countdown fill and --complete-flash the done heading's first frame; the dark page mixes
+   less of its light mauve into both, so the plum words on them keep 4.5:1. */
 :root {
   --complete: oklch(0.5 0.16 318);
   --complete-hover: oklch(0.46 0.155 318);
@@ -150,16 +153,20 @@
   --complete-bg: oklch(0.965 0.022 318);
   --complete-line: oklch(0.84 0.07 318);
   --on-complete: oklch(1 0 0);
+  --complete-drain: color-mix(in oklab, var(--complete-bg), var(--complete) 34%);
+  --complete-flash: color-mix(in oklab, var(--complete-bg), var(--complete) 45%);
 }
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
-    --complete: oklch(0.6 0.15 318);
-    --complete-hover: oklch(0.65 0.15 318);
-    --complete-edge: oklch(0.5 0.13 318);
-    --complete-text: oklch(0.78 0.11 318);
-    --complete-bg: oklch(0.29 0.045 318);
-    --complete-line: oklch(0.45 0.09 318);
-    --on-complete: oklch(0.99 0.005 318);
+    --complete: oklch(0.76 0.1 318);
+    --complete-hover: oklch(0.8 0.1 318);
+    --complete-edge: oklch(0.68 0.09 318);
+    --complete-text: oklch(0.8 0.09 318);
+    --complete-bg: oklch(0.31 0.045 318);
+    --complete-line: oklch(0.49 0.07 318);
+    --on-complete: var(--bg);
+    --complete-drain: color-mix(in oklab, var(--complete-bg), var(--complete) 20%);
+    --complete-flash: color-mix(in oklab, var(--complete-bg), var(--complete) 20%);
   }
 }
 
@@ -186,30 +193,34 @@
 .step-keys > .button.task-done { gap: 6px; padding: 0 12px 0 10px; font-weight: 600; }
 
 /* A closing answer: the reply and the completion in one press. */
-:root .answers > .button.answer.closes { gap: 6px; padding-left: 10px; font-weight: 600; }
-.answers > .button.answer.closes .icon { flex: none; }
+/* A confirm key that finishes a card wears the same mark. */
+:root .answers > .button.answer:is(.closes, .confirm) { gap: 6px; padding-left: 10px; font-weight: 600; }
+.answers > .button.answer:is(.closes, .confirm) .icon { flex: none; }
 /* Beside a closing answer, Task done waits for a typed last message (CONTROL-31). */
 .answers > .button.task-done[hidden] { display: none; }
 
 /* The close keys go down as they are pressed; the close animation springs them back. */
 @media (prefers-reduced-motion: no-preference) {
-  :root :is(.step-keys > .button.task-done, .answers > .button.answer.closes, .button.close-item) { transition: transform 140ms cubic-bezier(0.2, 0.9, 0.3, 1.2); }
-  :root :is(.step-keys > .button.task-done, .answers > .button.answer.closes, .button.close-item):active:not(:disabled) { transform: scale(0.94); transition-duration: 70ms; }
+  :root :is(.step-keys > .button.task-done, .answers > .button.answer.closes, .answers > .button.answer.confirm, .button.close-item) { transition: transform 140ms cubic-bezier(0.2, 0.9, 0.3, 1.2); }
+  :root :is(.step-keys > .button.task-done, .answers > .button.answer.closes, .answers > .button.answer.confirm, .button.close-item):active:not(:disabled) { transform: scale(0.94); transition-duration: 70ms; }
 }
 
 /* Closing a task is always explicit (CONTROL-17): every press that ends one is a solid plum key, the page's one
-   solid plum: Task done, a closing answer, Close item in its box and Close in an All work row. Each plays the
-   close (app.js closeAnimation), and the notice after it is plum too. */
-:root :is(.step-keys > .button.task-done, .answers > .button.answer.closes, .button.close-item) {
+   solid plum: Task done, a closing answer, Close item in its box and Close on an item's row. Each plays the
+   close (app.js closeAnimation), and the notice after it is plum too. A confirm key that finishes a card, such as
+   a form's Confirm, wears the same plum and mark, and plays the close when it finishes the card; off until there
+   is something to confirm, it is a plain grey key. */
+:root :is(.step-keys > .button.task-done, .answers > .button.answer.closes, .answers > .button.answer.confirm, .button.close-item) {
   background: var(--complete);
   color: var(--on-complete);
   box-shadow: inset 0 1px 0 oklch(1 0 0 / .16), 0 0 0 1px var(--complete-edge), 0 1px 2px oklch(0.4 0.12 318 / .3);
 }
-:root :is(.step-keys > .button.task-done, .answers > .button.answer.closes, .button.close-item) .icon { color: currentColor; }
+:root :is(.step-keys > .button.task-done, .answers > .button.answer.closes, .answers > .button.answer.confirm, .button.close-item) .icon { color: currentColor; }
 @media (hover: hover) {
-  :root :is(.step-keys > .button.task-done, .answers > .button.answer.closes, .button.close-item):hover:not(:disabled) { background: var(--complete-hover); }
+  :root :is(.step-keys > .button.task-done, .answers > .button.answer.closes, .answers > .button.answer.confirm, .button.close-item):hover:not(:disabled) { background: var(--complete-hover); }
 }
 .button.close-item { gap: 6px; padding: 0 12px; font-weight: 600; }
+:root .answers > .button.answer.confirm:disabled { opacity: 1; background: var(--chip); color: var(--text-4); box-shadow: none; }
 :root .toast.closed { background: var(--complete); color: var(--on-complete); font-weight: 600; }
 :root .toast.closed button { font-weight: 600; }
 

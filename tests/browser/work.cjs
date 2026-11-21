@@ -59,18 +59,25 @@ for (const [signal, code] of [["SIGINT", 130], ["SIGTERM", 143], ["SIGHUP", 129]
 // three minutes, since a machine busy with other work starts the server slowly). The server
 // stops with the test's process (parent_watch.py), and does not keep that process running once the test is done.
 async function startPreview(prefix) {
+  return startServer(path.join(__dirname, "serve_preview.py"), prefix);
+}
+
+// The same with another server script that takes the work folder and writes cookie.json, such as one that runs the
+// preview with an install's parts.
+async function startServer(script, prefix) {
   const work = workFolder(prefix);
   const python = path.join(__dirname, "..", "..", ".venv", "bin", "python");
-  const server = spawn(python, [path.join(__dirname, "serve_preview.py"), work], { stdio: ["ignore", "inherit", "inherit"] });
+  const server = spawn(python, [script, work], { stdio: ["ignore", "inherit", "inherit"] });
   server.unref();
+  const name = path.basename(script);
   const file = path.join(work, "cookie.json");
   for (const end = Date.now() + 180e3; Date.now() < end; await new Promise((done) => setTimeout(done, 200))) {
-    if (server.exitCode !== null) throw new Error(`serve_preview.py exited with ${server.exitCode}`);
+    if (server.exitCode !== null) throw new Error(`${name} exited with ${server.exitCode}`);
     if (!fs.existsSync(file)) continue;
     const info = JSON.parse(fs.readFileSync(file, "utf8"));
     if (await fetch(`${info.origin}/healthz`).then((response) => response.ok, () => false)) return { work, info };
   }
-  throw new Error("serve_preview.py did not come up within 180 s");
+  throw new Error(`${name} did not come up within 180 s`);
 }
 
 // A screenshot of the node `locator` finds. A poll can redraw the node while the shot is taken (Playwright then says it is
@@ -92,4 +99,4 @@ async function fullState(route) {
   return { response, headers: { ...response.headers(), "x-cockpit-state": "" } };
 }
 
-module.exports = { workFolder, startPreview, screenshotRedrawn, fullState };
+module.exports = { workFolder, startPreview, startServer, screenshotRedrawn, fullState };

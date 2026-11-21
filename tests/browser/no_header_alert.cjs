@@ -1,8 +1,7 @@
 // The header shows no failure alert (UI-26).
-// Checks, on the classic page and the page with the rail, at 1440, 1280, 1100, 1001 and 390 px:
+// Checks, at 1440, 1280, 1100, 1001 and 390 px:
 // - the header holds no alert count;
-// - the header fits its width (on the page with the rail, the rail holds its controls) and the page has no sideways
-//   scroll;
+// - the rail, which holds the header's controls, fits its width, and the page has no sideways scroll;
 // - the page draws without errors.
 //
 // Starts serve_preview.py (this checkout's Cockpit on a synthetic database; README.md says what it needs) and
@@ -43,56 +42,54 @@ async function main() {
   try {
     const info = await harnessUp(work, server);
     browser = await chromium.launch({ executablePath: CHROMIUM });
-    for (const where of ["/classic", "/"]) {
-      for (const width of [1440, 1280, 1100, 1001, 390]) {
-        const name = `${where} at ${width}`;
-        const context = await browser.newContext({ viewport: { width, height: 900 }, isMobile: width < 600, hasTouch: width < 600 });
-        await context.setExtraHTTPHeaders({ cookie: `${info.name}=${info.value}` });
-        const page = await context.newPage();
-        // Counts the page's redraws, so the checks run on a header drawn from the state.
-        await page.addInitScript(() => {
-          window.redraws = 0;
-          document.addEventListener("cockpit:redraw", () => { window.redraws += 1; });
-        });
-        page.setDefaultTimeout(10000);
-        const errors = [];
-        page.on("pageerror", (error) => errors.push(error.message));
-        page.on("console", (message) => { if (message.type() === "error") errors.push(message.text()); });
-        await page.goto(`${info.origin}${where}`);
-        await page.waitForFunction(() => window.redraws > 0);
-        await page.evaluate(() => document.fonts.ready);
-        // On a phone the rail is the list screen, which the bar's "Your items" opens (UI-56).
-        const phoneBack = page.locator(".phone-back");
-        if (await phoneBack.isVisible()) await phoneBack.click();
-        // The header fits itself on the next frame after a redraw.
-        await sleep(500);
-        const seen = await page.evaluate(() => {
-          const shown = (el) => el && el.offsetParent !== null && getComputedStyle(el).display !== "none";
-          const rail = document.querySelector(".rail");
-          const box = shown(rail) ? rail : document.querySelector(".top-inner");
-          if (!shown(box)) return { box: null };
-          // How far the line's content or any control in it reaches past its edges.
-          const edge = box.getBoundingClientRect();
-          let over = box.scrollWidth - box.clientWidth;
-          for (const el of box.querySelectorAll("*")) {
-            const r = el.getBoundingClientRect();
-            if (r.width && r.height) over = Math.max(over, r.right - edge.right, edge.left - r.left);
-          }
-          return {
-            box: box.className,
-            counts: document.querySelectorAll("#counts, .count.fail").length,
-            over: Math.round(over),
-            sideways: document.documentElement.scrollWidth - innerWidth,
-          };
-        });
-        check(`${name}: the header is drawn`, seen.box !== null, "neither the rail nor the header line shows");
-        check(`${name}: the header holds no alert count`, seen.counts === 0, `${seen.counts} found`);
-        check(`${name}: the ${seen.box} fits its width`, seen.over <= 0, `${seen.over}px too wide`);
-        check(`${name}: the page has no sideways scroll`, seen.sideways <= 0, `${seen.sideways}px too wide`);
-        check(`${name}: no page errors`, errors.length === 0, errors.join(" | "));
-        if (shots) await page.screenshot({ path: path.join(shots, `${where === "/" ? "rail" : "classic"}-${width}.png`) });
-        await context.close();
-      }
+    for (const width of [1440, 1280, 1100, 1001, 390]) {
+      const name = `${width} px`;
+      const context = await browser.newContext({ viewport: { width, height: 900 }, isMobile: width < 600, hasTouch: width < 600 });
+      await context.setExtraHTTPHeaders({ cookie: `${info.name}=${info.value}` });
+      const page = await context.newPage();
+      // Counts the page's redraws, so the checks run on a header drawn from the state.
+      await page.addInitScript(() => {
+        window.redraws = 0;
+        document.addEventListener("cockpit:redraw", () => { window.redraws += 1; });
+      });
+      page.setDefaultTimeout(10000);
+      const errors = [];
+      page.on("pageerror", (error) => errors.push(error.message));
+      page.on("console", (message) => { if (message.type() === "error") errors.push(message.text()); });
+      await page.goto(`${info.origin}/`);
+      await page.waitForFunction(() => window.redraws > 0);
+      await page.evaluate(() => document.fonts.ready);
+      // On a phone the rail is the list screen, which the bar's "Your items" opens (UI-56).
+      const phoneBack = page.locator(".phone-back");
+      if (await phoneBack.isVisible()) await phoneBack.click();
+      // The rail settles its layout on the next frame after a redraw.
+      await sleep(500);
+      const seen = await page.evaluate(() => {
+        const shown = (el) => el && el.offsetParent !== null && getComputedStyle(el).display !== "none";
+        const rail = document.querySelector(".rail");
+        const box = shown(rail) ? rail : document.querySelector(".top-inner");
+        if (!shown(box)) return { box: null };
+        // How far the line's content or any control in it reaches past its edges.
+        const edge = box.getBoundingClientRect();
+        let over = box.scrollWidth - box.clientWidth;
+        for (const el of box.querySelectorAll("*")) {
+          const r = el.getBoundingClientRect();
+          if (r.width && r.height) over = Math.max(over, r.right - edge.right, edge.left - r.left);
+        }
+        return {
+          box: box.className,
+          counts: document.querySelectorAll("#counts, .count.fail").length,
+          over: Math.round(over),
+          sideways: document.documentElement.scrollWidth - innerWidth,
+        };
+      });
+      check(`${name}: the header is drawn`, seen.box !== null, "neither the rail nor the header line shows");
+      check(`${name}: the header holds no alert count`, seen.counts === 0, `${seen.counts} found`);
+      check(`${name}: the ${seen.box} fits its width`, seen.over <= 0, `${seen.over}px too wide`);
+      check(`${name}: the page has no sideways scroll`, seen.sideways <= 0, `${seen.sideways}px too wide`);
+      check(`${name}: no page errors`, errors.length === 0, errors.join(" | "));
+      if (shots) await page.screenshot({ path: path.join(shots, `rail-${width}.png`) });
+      await context.close();
     }
   } finally {
     if (browser) await browser.close();

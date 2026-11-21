@@ -23,8 +23,9 @@ call after a compaction's summary, start a new prompt and miss nothing. A miss a
 counts apart, as the cache's time running out.
 
 Each call names its model, and each turn keeps its use per model (SESSION-12): a model counts under the PRICES key
-that prices it, so Haiku's subagent calls show apart from Opus's. Calls on a model that is not Claude's are not Claude use and
-are left out.
+that prices it, so Haiku's subagent calls show apart from Opus's. Calls on a model that is not Claude's, such as a
+session the model hub runs on another provider's model, are not Claude use: they count apart, per session in tokens, as Codex's
+do, and a session's own call on one warns as a session on the wrong model does (wrong_models).
 
 Each turn has an origin, what started it (ORIGINS), read from its prompt. Each session has a kind (KINDS_OF_SESSION):
 the sweeper, the one session Cockpit sends sweeps, checks and pauses to, or else what started its first turn.
@@ -37,6 +38,7 @@ from __future__ import annotations
 import bisect
 import json
 import logging
+import math
 import re
 import threading
 import time
@@ -66,7 +68,6 @@ DAILY_DAYS = 30
 WRONG_MODEL_HOURS = 24
 # $ per million tokens, by a part of the model's name, tried in this order: (input, output, cache read). The part
 # also names the model on the Usage page.
-# Writing to the cache costs 1.25 times input for 5 minutes and 2 times input for an hour.
 PRICES = {
     "opus-5-5": (4.0, 20.0, 0.20),
     "sonnet-5-5": (2.0, 10.0, 0.10),
@@ -79,6 +80,8 @@ PRICES = {
     "opus-4": (5.0, 25.0, 0.50),
     "haiku-4-5": (1.0, 5.0, 0.10),
 }
+# What writing to the cache costs as a multiple of input's price, by the minutes the cache keeps what was written.
+CACHE_WRITE_MULTIPLIERS = {5: 1.25, 60: 2.0}
 # Models whose calls cost more when the prompt is long: the prompt's size in tokens above which they do, and their
 # prices then. A call's prompt is its input read fresh, written to the cache and read from it.
 LONG_PROMPT_PRICES = {"haiku-5-5": (100_000, (0.50, 2.50, 0.05))}
@@ -91,6 +94,10 @@ CONTINUES = (
 )
 # The entry Claude Code writes where it compacted the conversation, which starts the prompt anew.
 COMPACTED = '"subtype":"compact_boundary"'
+# The entry Claude Code writes as a session's process ends, and the note a new process writes before its first call
+# when it runs on another model than the conversation last ran on.
+PROCESS_ENDED = '{"type":"cost-state"'
+MODEL_NOTE = '"attachment":{"type":"model"'
 # A message that Cockpit or another session sends over a session's socket arrives as a prompt that starts with this.
 PEER_PROMPT = "Another Claude session sent a message:"
 COMMAND = re.compile(r"<command-name>/?([^<\s]+)</command-name>")
@@ -131,9 +138,15 @@ STAMP_KEY = '"timestamp":"'
 STOP_KEY = '"stop_reason":'
 SKILL_CALL = re.compile(r'"name":"Skill","input":\{"skill":"([^"]+)"')
 DECODER = json.JSONDecoder()
+# Claude Code's request snapshots contain whole copies of the conversation, rather than new calls or prompts.
+# Their type is the first field, so they can be discarded before decoding or searching their message bodies.
+REQUEST_RECORD = re.compile(rb'^\s*\{\s*"type"\s*:\s*"api-request(?:-blob)?"\s*[,}]')
 
 
 KINDS = ("fresh", "cache_write", "cache_read", "output")
+# The tokens of a call on a model that is not Claude's: input read fresh (with what it wrote to the cache), input read
+# from the cache, and output.
+OTHER_KINDS = ("fresh", "cached", "output")
 
 
 @dataclass
@@ -206,6 +219,8 @@ class Transcript:
     offset: int = 0
     title: str = ""  # the name the session was given, from its latest custom-title entry
     first_prompt: str = ""
+    # Whether a typed command stands in for the first prompt, until a prompt in words arrives.
+    command_first: bool = False
     cwd: str = ""
     first: str = ""  # times of its first and last priced call
     last: str = ""
@@ -225,12 +240,40 @@ class Transcript:
     # starts the prompt anew.
     cached: int = 0
     cached_at: str = ""
+    # What the prompt cache holds of its own conversation (calls not in a `claude -p` turn): the input of its latest
+    # own call, that call's time and model, and the minutes the cache keeps it, from its latest own call that wrote
+    # to the cache (60 when any of that write was for an hour, else 5; a call that only reads keeps the lifetime
+    # before it). A compaction sets the input and the minutes to 0 and the time to its own.
+    held: int = 0
+    held_at: str = ""
+    held_model: str = ""
+    held_minutes: int = 0
     # Its own calls (not a subagent's, not in a `claude -p` turn) by model, and its latest such call's time and model.
     own_models: dict[str, ModelCalls] = field(default_factory=dict)
     latest: tuple[str, str] = ("", "")
     # The models someone picked with /model in this session: each is the one its next own call ran on.
     picked: set[str] = field(default_factory=set)
     picking: bool = False
+    # The models a later process of the session was started on, such as with `claude --continue --model`: each is the
+    # one the process's model note named before its first own call. `starting` holds that note's model until then, or
+    # "" once a process has ended and no note followed yet; None while a process runs.
+    restarted_on: set[str] = field(default_factory=set)
+    starting: str | None = None
+    # Its calls, a subagent's too, on a model that is not Claude's (is_claude), each with its tokens in OTHER_KINDS.
+    other: list[OtherCall] = field(default_factory=list)
+    # What its priced calls, a subagent's too, cost per hour they ran in, keyed by the hour's start "YYYY-MM-DDTHH".
+    by_hour: dict[str, float] = field(default_factory=dict)
+
+
+@dataclass
+class OtherCall:
+    """A call on a model that is not Claude's: its time, model and tokens. `calls` is 0 for a later entry of a reply
+    that counts only the output it adds."""
+
+    stamp: str
+    model: str
+    calls: int
+    tokens: dict[str, int]
 
 
 @dataclass
@@ -243,7 +286,16 @@ class SessionModels:
     cwd: str
     per_model: dict[str, ModelCalls]
     picked: set[str]
+    restarted_on: set[str]  # the models its later processes were started on, as their model notes name them
     latest: str  # the model of its latest own call
+
+
+@dataclass
+class ModelChoices:
+    """Delivered model choices, latest first, and whether Cockpit recorded the session's launch."""
+
+    models: list[str]
+    launched: bool
 
 
 class Group:
@@ -273,6 +325,19 @@ def priced_as(model: str) -> str | None:
     return next((part for part in PRICES if part in model), None)
 
 
+def is_claude(model: str) -> bool:
+    """Whether a model id is one of Claude's; any other came through a gateway."""
+    return "claude" in model
+
+
+def other_tokens(usage: dict[str, Any]) -> dict[str, int]:
+    """A call's tokens in OTHER_KINDS, the kinds the Usage page counts Codex's tokens in."""
+    return {
+        "fresh": int(usage.get("input_tokens") or 0) + int(usage.get("cache_creation_input_tokens") or 0),
+        "cached": int(usage.get("cache_read_input_tokens") or 0), "output": int(usage.get("output_tokens") or 0),
+    }
+
+
 def add_models(into: dict[str, Use], models: dict[str, Use]) -> None:
     for name, use in models.items():
         into.setdefault(name, Use()).add(use, 1)
@@ -287,12 +352,17 @@ def call_prices(model: str, usage: dict[str, Any]) -> tuple[float, float, float]
     return PRICES[model]
 
 
-def call_use(usage: dict[str, Any], prices: tuple[float, float, float]) -> Use:
+def cache_writes(usage: dict[str, Any]) -> tuple[int, int]:
+    """A call's tokens written to the cache for 5 minutes and for an hour; a usage without the split counts them all
+    as 5 minutes'."""
     write = usage.get("cache_creation") or {}
-    write_5m = int(write.get("ephemeral_5m_input_tokens") or 0)
-    write_1h = int(write.get("ephemeral_1h_input_tokens") or 0)
     if not write:
-        write_5m = int(usage.get("cache_creation_input_tokens") or 0)
+        return int(usage.get("cache_creation_input_tokens") or 0), 0
+    return int(write.get("ephemeral_5m_input_tokens") or 0), int(write.get("ephemeral_1h_input_tokens") or 0)
+
+
+def call_use(usage: dict[str, Any], prices: tuple[float, float, float]) -> Use:
+    write_5m, write_1h = cache_writes(usage)
     fresh = int(usage.get("input_tokens") or 0)
     cache_read = int(usage.get("cache_read_input_tokens") or 0)
     output = int(usage.get("output_tokens") or 0)
@@ -300,7 +370,8 @@ def call_use(usage: dict[str, Any], prices: tuple[float, float, float]) -> Use:
     return Use(
         tokens={"fresh": fresh, "cache_write": write_5m + write_1h, "cache_read": cache_read, "output": output},
         usd={
-            "fresh": fresh * per_input / 1e6, "cache_write": (write_5m * 1.25 + write_1h * 2) * per_input / 1e6,
+            "fresh": fresh * per_input / 1e6,
+            "cache_write": (write_5m * CACHE_WRITE_MULTIPLIERS[5] + write_1h * CACHE_WRITE_MULTIPLIERS[60]) * per_input / 1e6,
             "cache_read": cache_read * per_read / 1e6, "output": output * per_output / 1e6,
         },
         calls=1,
@@ -429,11 +500,12 @@ class SpendIndex:
         # Claude settings files whose model could not be read, each logged once.
         self.unreadable: set[Path] = set()
         self.ready_at: str | None = None
-        # Grows whenever a refresh changes what was read, so per_session and wrong_models work out their sums once
-        # per change and not on every page poll.
+        # Grows whenever a refresh changes what was read, so per_session, wrong_models and caches work out their sums
+        # once per change and not on every page poll.
         self._version = 0
         self._uses: tuple[int, list[tuple[str, dict[str, Any], list[Transcript]]]] | None = None
         self._model_calls: tuple[int, list[SessionModels]] | None = None
+        self._caches: tuple[int, dict[str, dict[str, Any]]] | None = None
 
     def refresh(self, now: datetime) -> None:
         """Read what was appended to every transcript written within HORIZON_DAYS."""
@@ -469,23 +541,25 @@ class SpendIndex:
         if size < known.offset:
             log.error("%s shrank from %d to %d bytes; Claude use keeps what it read", path, known.offset, size)
             known.offset = size
-        # What a known transcript gained is read first and counted under one lock. Taken per line, the lock would go
-        # to the page's polls between every two lines and slow a refresh down.
+        # Count a known transcript's additions under one lock, streaming one line at a time. Taken per line, the
+        # lock would go to the page's polls between every two lines and slow a refresh down.
         with path.open("rb") as handle:
             handle.seek(known.offset)
-            added = handle.readlines()
-        with self._lock:
-            try:
-                self._lines(path, known, added)
-            finally:
-                # Lines counted before an unexpected error still change the sums.
-                self._version += 1
+            with self._lock:
+                try:
+                    self._lines(path, known, handle)
+                finally:
+                    # Lines counted before an unexpected error still change the sums.
+                    self._version += 1
 
     def _lines(self, path: Path, known: Transcript, lines: Iterable[bytes]) -> None:
         for raw in lines:
             # A line still being written is read on the next refresh.
             if not raw.endswith(b"\n"):
                 break
+            if REQUEST_RECORD.match(raw):
+                known.offset += len(raw)
+                continue
             try:
                 self._line(known, raw.decode("utf-8", errors="replace"))
             except (ValueError, KeyError, TypeError) as exc:
@@ -500,9 +574,18 @@ class SpendIndex:
             return
         if COMPACTED in line:
             known.cached = 0
+            known.held = known.held_minutes = 0
+            known.held_at = str(json.loads(line).get("timestamp") or "") or known.held_at
             return
         if '"type":"custom-title"' in line:
             known.title = str(json.loads(line).get("customTitle") or "")
+            return
+        if line.startswith(PROCESS_ENDED):
+            known.starting = None if known.subagent else ""
+            return
+        if MODEL_NOTE in line:
+            if known.starting is not None:
+                known.starting = str(json.loads(line)["attachment"]["identity"]["modelId"])
             return
         if '"type":"user"' not in line or '"type":"tool_result"' in line:
             return
@@ -522,7 +605,11 @@ class SpendIndex:
             if known.waiting and text.startswith(NOTICES):
                 known.woken = True
             return
-        known.first_prompt = known.first_prompt or text[:200]
+        if command:
+            if not known.first_prompt:
+                known.first_prompt, known.command_first = f"/{command}", True
+        elif not known.first_prompt or known.command_first:
+            known.first_prompt, known.command_first = text[:200], False
         began = origin(text, str(entry.get("entrypoint") or "").startswith("sdk"))
         known.turns.append(Turn(start=stamp, origin=began, prompt=text[:PROMPT_CHARS], skills=[command] if command else []))
         known.waiting = known.woken = False
@@ -547,11 +634,25 @@ class SpendIndex:
                 if known.picking:
                     known.picked.add(call.model)
                     known.picking = False
+                if known.starting:
+                    known.restarted_on.add(known.starting)
+                known.starting = None
                 # Every model: for a session the user started on another model, config.MAIN_MODEL is the wrong one.
                 calls = known.own_models.setdefault(call.model, ModelCalls(first=call.stamp, last=call.stamp))
                 calls.last = max(calls.last, call.stamp)
                 # One reply is several entries with the same message id.
                 calls.ids.add(call.message_id)
+                # Read before the message id is checked, so a copy of the session read first still follows its own
+                # calls; the entries of one reply repeat the same usage.
+                known.held = sum(
+                    int(call.usage.get(key) or 0) for key in ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")
+                )
+                known.held_at, known.held_model = call.stamp or known.held_at, call.model
+                write_5m, write_1h = cache_writes(call.usage)
+                if write_1h:
+                    known.held_minutes = 60
+                elif write_5m:
+                    known.held_minutes = 5
         # Claude Code writes one reply as several entries with the same message id. In a subagent's transcript the
         # output count grows from entry to entry, so a later entry counts the output it adds.
         counted = self._seen.get(call.message_id)
@@ -559,10 +660,15 @@ class SpendIndex:
         if call.model.startswith("<") or (counted is not None and output <= counted):
             return
         self._seen[call.message_id] = output
+        if not is_claude(call.model):
+            # A session can run on another provider's model through a gateway that speaks Claude's API. Its calls
+            # are no Claude use; they count apart, in tokens.
+            tokens = other_tokens(call.usage) if counted is None else {"fresh": 0, "cached": 0, "output": output - counted}
+            known.other.append(OtherCall(call.stamp, call.model, int(counted is None), tokens))
+            return
         model = priced_as(call.model)
         if model is None:
-            # A model that is not Claude's has no Claude price; its calls are no Claude use, so they count nowhere here.
-            if "claude" in call.model and call.model not in self.unpriced:
+            if call.model not in self.unpriced:
                 log.error("no price for Claude model %r; its calls count as $0", call.model)
                 self.unpriced.add(call.model)
             return
@@ -578,6 +684,7 @@ class SpendIndex:
         known.first = known.first or call.stamp
         known.last = max(known.last, call.stamp)
         if call.stamp:
+            known.by_hour[call.stamp[:13]] = known.by_hour.get(call.stamp[:13], 0.0) + use.total()
             known.recent = [*_since(known.recent, _minutes_before(call.stamp, RECENT_MINUTES)), (call.stamp, use.total())]
         if known.subagent:
             use.subagent_usd = use.total()
@@ -625,13 +732,23 @@ class SpendIndex:
 
     def summary(self, since: datetime) -> dict[str, Any]:
         """Use of the turns started since `since`: in total, per session, per skill, per origin, per kind of session,
-        per model, the most expensive turns and the turns with the costliest cache misses."""
+        per model, the most expensive turns and the turns with the costliest cache misses; and the calls made since
+        `since` on models that are not Claude's, per session."""
         cutoff = since.strftime("%Y-%m-%dT%H:%M:%S")
         total = Use()
         per_skill, per_origin, per_kind, per_model = Group(), Group(), Group(), Group()
-        rows, turns = [], []
+        rows, turns, other_rows = [], [], []
         with self._lock:
             for session_id, transcripts in self._sessions().items():
+                other = [call for transcript in transcripts for call in transcript.other if call.stamp >= cutoff]
+                if other:
+                    own = transcripts[0]
+                    other_rows.append({
+                        "session_id": session_id, "title": own.title, "first_prompt": own.first_prompt, "cwd": own.cwd,
+                        "models": sorted({call.model for call in other}), "first": min(call.stamp for call in other),
+                        "last": max(call.stamp for call in other), "calls": sum(call.calls for call in other),
+                        "tokens": {kind: sum(call.tokens[kind] for call in other) for kind in OTHER_KINDS},
+                    })
                 session_use, session_turns = Use(), []
                 every_turn = list(self._turns(transcripts))
                 for turn in every_turn:
@@ -661,6 +778,7 @@ class SpendIndex:
                     "turns": len(session_turns), "use": session_use.as_dict(),
                 })
         rows.sort(key=lambda row: -row["use"]["usd"])
+        other_rows.sort(key=lambda row: (-row["calls"], row["session_id"]))
         turns.sort(key=lambda pair: -pair[1].use.total())
         missed = sorted((pair for pair in turns if pair[1].use.misses), key=lambda pair: -pair[1].use.miss_usd)
 
@@ -678,6 +796,12 @@ class SpendIndex:
             ],
             "top_turns": [turn_row(session_id, turn) for session_id, turn in turns[:TOP_TURNS]],
             "miss_turns": [turn_row(session_id, turn) for session_id, turn in missed[:MISS_TURNS]],
+            # Sessions with calls on a model that is not Claude's, in tokens, the most first.
+            "other_models": {
+                "calls": sum(row["calls"] for row in other_rows),
+                "tokens": {kind: sum(row["tokens"][kind] for row in other_rows) for kind in OTHER_KINDS},
+                "sessions": other_rows,
+            },
             "unpriced_models": sorted(self.unpriced), "week_list_usd": WEEK_LIST_USD,
             "plan_usd_per_percent": PLAN_USD_PER_PERCENT,
         }
@@ -693,18 +817,33 @@ class SpendIndex:
                         per_hour.setdefault(turn.start[:13] + ":00:00Z", Use()).add(turn.use, 1)
         return [{"hour": hour, "use": per_hour[hour].as_dict()} for hour in sorted(per_hour)]
 
-    def wrong_models(self, now: datetime, started: dict[str, str]) -> list[dict[str, Any]] | None:
+    def use_by_hour(self, since: datetime) -> dict[str, float]:
+        """What Claude calls cost per hour since `since`, at list prices, each call in the hour it ran (hours() puts
+        a turn's whole use in the hour it started). Keyed by the hour's start, "YYYY-MM-DDTHH:00:00Z"."""
+        cutoff = since.strftime("%Y-%m-%dT%H")
+        per_hour: dict[str, float] = {}
+        with self._lock:
+            for transcript in self._files.values():
+                for hour, usd in transcript.by_hour.items():
+                    if hour >= cutoff:
+                        per_hour[hour + ":00:00Z"] = per_hour.get(hour + ":00:00Z", 0.0) + usd
+        return per_hour
+
+    def wrong_models(self, now: datetime, selected: dict[str, ModelChoices]) -> list[dict[str, Any]] | None:
         """None until the first refresh has read every transcript, as a part-read index misses sessions still on the
         wrong model. Then each session whose own conversation answered on a model other than its intended one in the last
         WRONG_MODEL_HOURS, one row per model, the latest first (SPEC SESSION-20), with `intended` and `back`: whether the session's
         latest own call was on an intended model again. For a session Cockpit started, the intended model is the one
-        it was started on (`started`, by session id: the user's pick or config.MAIN_MODEL, SPEC SESSION-22); a
+        most recently chosen for it (`selected`, by session id, latest first), with earlier deliberate choices
+        also intended (SPEC SESSION-22); a
         session another session, a script or a terminal started was started on its model on purpose, so for it the
-        intended model is the one its first own call ran on. A model someone chose for the session counts as intended
+        intended model is the one its first own call ran on, and a model a later process of it was started on, such
+        as with `claude --continue --model`, is intended too. A model someone chose for the session counts as intended
         too: one picked with /model in it, or one named by the `model` setting of its folder's Claude settings, as
         Claude Code moves a running session to that model. Subagents and the turns of `claude -p` runs name their own
         model, so their calls are left out. A session resumed in another folder repeats its replies there; each
-        reply counts once."""
+        reply counts once. A model that is not Claude's, such as the hub's fallback model, always shows,
+        chosen or not (`claude` false), and its `back` says whether the latest own call was on a Claude model again."""
         if self.ready_at is None:
             return None
         since = (now - timedelta(hours=WRONG_MODEL_HOURS)).strftime("%Y-%m-%dT%H:%M:%S")
@@ -713,20 +852,33 @@ class SpendIndex:
         settings_models: dict[str, list[str]] = {}
         for session in self._session_models():
             per_model = session.per_model
-            intended = started.get(session.session_id) or min(per_model, key=lambda model: per_model[model].first)
+            recent = {model: calls for model, calls in per_model.items() if calls.last >= since}
+            if not recent:
+                continue
+            selection = selected.get(session.session_id)
+            choices = selection.models if selection else []
+            first = min(per_model, key=lambda model: per_model[model].first)
+            intended = choices[0] if choices else first
             if session.cwd not in settings_models:
                 settings_models[session.cwd] = self._settings_models(session.cwd)
             named = settings_models[session.cwd]
-            chosen = {intended, *session.picked,
+            chosen = {intended, *choices, *session.picked,
                       *(model for model in per_model if any(names_model(name, model) for name in named))}
-            recent = {model: wrong for model, wrong in per_model.items() if wrong.last >= since and model not in chosen}
+            if selection is None or not selection.launched:
+                chosen.add(first)
+                chosen.update(model for model in per_model
+                              if any(names_model(name, model) for name in session.restarted_on))
+            recent = {
+                model: wrong for model, wrong in recent.items()
+                if model not in chosen or not is_claude(model)
+            }
             if not recent:
                 continue
-            back = session.latest in chosen
             rows.extend(
                 {"session_id": session.session_id, "title": session.title, "first_prompt": session.first_prompt,
-                 "model": model, "intended": intended, "first": wrong.first, "last": wrong.last,
-                 "calls": len(wrong.ids), "back": back}
+                 "model": model, "claude": is_claude(model), "intended": intended, "latest": session.latest,
+                 "first": wrong.first, "last": wrong.last, "calls": len(wrong.ids),
+                 "back": session.latest in chosen if is_claude(model) else is_claude(session.latest)}
                 for model, wrong in recent.items()
             )
         rows.sort(key=lambda row: row["last"], reverse=True)
@@ -751,6 +903,7 @@ class SpendIndex:
                 sessions.append(SessionModels(
                     session_id=session_id, title=own.title, first_prompt=own.first_prompt, cwd=own.cwd,
                     per_model=per_model, picked={model for transcript in transcripts for model in transcript.picked},
+                    restarted_on={model for transcript in transcripts for model in transcript.restarted_on},
                     latest=max(transcript.latest for transcript in transcripts)[1],
                 ))
             self._model_calls = (self._version, sessions)
@@ -772,6 +925,10 @@ class SpendIndex:
             if isinstance(settings, dict) and isinstance(settings.get("model"), str):
                 names.append(settings["model"])
         return names
+
+    def latest_models(self) -> dict[str, str]:
+        """Each session's model of its latest own call (as latest_model), by session id."""
+        return {session.session_id: session.latest for session in self._session_models() if session.latest}
 
     def latest_model(self, session_id: str) -> str | None:
         """The model of the session's latest own call (not a subagent's, not in a `claude -p` turn), or None before
@@ -804,6 +961,44 @@ class SpendIndex:
                 for session_id, use, transcripts in self._uses[1]
             }
 
+    def caches(self) -> dict[str, dict[str, Any]]:
+        """What the prompt cache holds of each Claude session's main conversation (its own transcript whose cache
+        state is the latest, a compaction's included), by session id, worked out once per change to the index: its
+        tokens, until when it stays warm, and what answering after that costs over answering before: writing the
+        tokens again over reading them. A session whose conversation has nothing cached, or compacted with no call
+        that wrote to the cache since, has none; cache_at adds the minutes left."""
+        with self._lock:
+            if self._caches is not None and self._caches[0] == self._version:
+                return self._caches[1]
+            caches = {}
+            for session_id, transcripts in self._sessions().items():
+                own = [transcript for transcript in transcripts if not transcript.subagent]
+                main = max(own, key=lambda transcript: transcript.held_at, default=None)
+                if main is None or not main.held or not main.held_at or not main.held_minutes:
+                    continue
+                model = priced_as(main.held_model)
+                if model is None:
+                    continue
+                per_input, _, per_read = call_prices(model, {"cache_read_input_tokens": main.held})
+                until = datetime.fromisoformat(main.held_at) + timedelta(minutes=main.held_minutes)
+                caches[session_id] = {
+                    "tokens": main.held,
+                    "warm_until": until.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    "lifetime_minutes": main.held_minutes,
+                    "lifetime_estimated": False,
+                    "cold_usd": round(main.held * (per_input * CACHE_WRITE_MULTIPLIERS[main.held_minutes] - per_read) / 1e6, 2),
+                    "model": main.held_model,
+                }
+            self._caches = (self._version, caches)
+            return caches
+
+
+def cache_at(cache: dict[str, Any], now: datetime) -> dict[str, Any]:
+    """The cache with `minutes_left`: the minutes from `now` until `warm_until`, rounded up; 0 once it has passed."""
+    seconds = (datetime.fromisoformat(cache["warm_until"]) - now).total_seconds()
+    # `minutes_left` follows `warm_until`; the keys after it keep their order.
+    return {"tokens": cache["tokens"], "warm_until": cache["warm_until"], "minutes_left": max(0, math.ceil(seconds / 60))} | cache
+
 
 def _minutes_before(stamp: str, minutes: int) -> str:
     """The time `minutes` before a transcript's timestamp, in the timestamps' own form for comparing as text."""
@@ -815,16 +1010,12 @@ def _since(calls: list[tuple[str, float]], since: str) -> list[tuple[str, float]
     return [(stamp, usd) for stamp, usd in calls if stamp >= since]
 
 
-def refresh_forever(index: SpendIndex, codex_index: codex.CodexIndex) -> None:
+def refresh_codex_forever(codex_index: codex.CodexIndex) -> None:
     while True:
         started = time.monotonic()
-        try:
-            index.refresh(datetime.now(UTC))
-        except Exception:
-            log.exception("counting Claude use from the transcripts failed")
         try:
             codex_index.refresh(datetime.now(UTC))
         except Exception:
             log.exception("counting Codex use from its session files failed")
-        log.info("Claude and Codex use counted in %.1f s", time.monotonic() - started)
+        log.info("Codex use counted in %.1f s", time.monotonic() - started)
         time.sleep(REFRESH_SECONDS)

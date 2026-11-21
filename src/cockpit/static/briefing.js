@@ -31,7 +31,7 @@ function taskLinkId(link) {
   } catch {
     return null;
   }
-  if (url.origin !== location.origin || !["/", "/classic"].includes(url.pathname)) return null;
+  if (url.origin !== location.origin || url.pathname !== "/") return null;
   const match = url.hash.match(/^#(?:(?:home|board)\/)?item\/(\d+)$/);
   return match ? Number(match[1]) : null;
 }

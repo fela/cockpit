@@ -506,15 +506,6 @@ const Pick = (() => {
   // Whether the user can see an element: rendered, and neither it nor a part around it transparent or hidden.
   const shown = (el) => el.checkVisibility({ opacityProperty: true, visibilityProperty: true, checkOpacity: true, checkVisibilityCSS: true });
 
-  // Plates that open while the pointer is over their group (the overview's). The pointer leaves for the
-  // feedback box right after a pick and the plate closes, so a part around one shows it neither in its
-  // words nor in its copy; a pick inside a plate keeps it.
-  const PLATES = ".light-list";
-  const plateIn = (node, el) => {
-    const plate = node.closest(PLATES);
-    return Boolean(plate) && plate !== el && el.contains(plate);
-  };
-
   // Whether a box ends at its edges, so what lies past them is cut off.
   const clips = (el) => css(el).overflow !== "visible";
   const overlaps = (a, b) => a.width > 0 && a.height > 0 && a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top;
@@ -527,7 +518,7 @@ const Pick = (() => {
     const range = el.ownerDocument.createRange();
     for (let node = walker.nextNode(); node; node = walker.nextNode()) {
       const text = node.data.trim();
-      if (!text || !shown(node.parentElement) || plateIn(node.parentElement, el)) continue;
+      if (!text || !shown(node.parentElement)) continue;
       range.selectNodeContents(node);
       const rects = [...range.getClientRects()];
       const inView = rects.some((rect) => {
@@ -582,7 +573,7 @@ const Pick = (() => {
       }
       const rect = original.getBoundingClientRect();
       const outside = rect.width > 0 && rect.height > 0 && !overlaps(rect, corner);
-      if (original !== el && (!shown(original) || original.matches(PLATES) || outside)) {
+      if (original !== el && (!shown(original) || outside)) {
         hidden.add(original);
         const target = clones[twins.get(original)];
         target.replaceChildren();
