@@ -1,142 +1,142 @@
-"""A finished task reopens without a message (SPEC CONTROL-33): the user's Reopen takes it back to Busy as a message
-would (CONTROL-28) and tells its session, and a session that must still post on a completed task reopens it itself."""
+"""Reopen on a finished task (SPEC CONTROL-34), with "reopen" in the setup's features: the user takes the task up again
+as a message would (CONTROL-28) and its session gets a fixed message from them."""
 
 from __future__ import annotations
 
-from cockpit import db, store
-from tests.conftest import SESSION_A, World
+import dataclasses
+import json
+
+import pytest
+
+from cockpit import config, db
+from tests.conftest import SESSION_A, SESSION_B, World
 from tests.test_api import run_sql
 from tests.test_closed_items import _complete, _put_step, _shown
 from tests.test_complete_task import CLOSING, ITEM, _agent, _finish, _item, _item_state, _step
 
 
-def test_reopen_takes_a_completed_task_back_to_busy_and_tells_its_session(world: World) -> None:
-    item_id = _complete(world)
-    response = world.client.post(f"/api/items/{item_id}/take-up", headers=world.user())
-    assert response.status_code == 200, response.text
-    item = _item_state(world, item_id)
-    assert (item["stage"], item["archived"], item["waiting_on"]) == ("building", 0, [])
-    send = response.json()["send"]
-    # While Cockpit's message is on its way, the task shows in Busy, also with its session stopped (the test's fake
-    # delivery fails it, so its state is set as delivery would have it).
-    run_sql(world, "UPDATE messages SET state = 'queued' WHERE id = ?", (send["id"],))
-    assert _shown(world, item_id) == {"group": "busy", "finished": False, "counted": False}
-    assert send["author"] == "cockpit" and send["session_id"] == SESSION_A and send["item_id"] == item_id
-    assert "reopened item" in send["text"] and "takes your steps again" in send["text"]
-    # Its session may put steps on it again.
-    assert _put_step(world, "read:answer")[0] == 200
+@pytest.fixture
+def reopen_on(monkeypatch: pytest.MonkeyPatch) -> None:
+    setup = config.setup()
+    monkeypatch.setattr(config, "setup", lambda: dataclasses.replace(setup, features=("reopen",)))
+
+
+def _take_up(world: World, item_id: int, seen: str | None) -> tuple[int, dict]:
+    response = world.client.post(f"/api/items/{item_id}/take-up", json={"session_id": seen}, headers=world.user())
+    return response.status_code, response.json()
+
+
+def _paused(world: World) -> bool:
+    return world.client.get("/api/state").json()["sweeps_paused"] is not None
+
+
+def _pause_sweeps(world: World) -> None:
     conn = db.connect(world.db_path)
     try:
-        event = conn.execute("SELECT data FROM events WHERE kind = 'item.reopened' ORDER BY id DESC LIMIT 1").fetchone()
+        with db.transaction(conn):
+            db.kv_set(conn, "sweeps_paused", {"at": "2026-01-07T18:00:00Z", "away_since": "2026-01-07T16:00:00Z"})
     finally:
         conn.close()
-    assert '"by": "reopen"' in event["data"]
 
 
-def test_reopen_on_an_open_task_is_refused(world: World) -> None:
-    item_id = _item(world)
-    response = world.client.post(f"/api/items/{item_id}/take-up", headers=world.user())
-    assert response.status_code == 409
-    assert "not finished" in response.json()["detail"]
-
-
-def test_only_the_user_reopens(world: World) -> None:
+def test_reopen_is_off_by_default(world: World) -> None:
     item_id = _complete(world)
-    response = _agent(world).post(f"/api/items/{item_id}/take-up", headers=world.agent())
-    assert response.status_code in (401, 403), response.text
+    assert world.client.get("/api/state").json()["features"] == []
+    status, body = _take_up(world, item_id, SESSION_A)
+    assert status == 404 and "Reopen is off" in body["detail"]
     assert _item_state(world, item_id)["stage"] == "done"
 
 
-def _agent_reopen(world: World, item_id: int, why: str) -> tuple[int, str]:
-    response = _agent(world).post(f"/api/items/{item_id}/agent-reopen", json={"why": why}, headers=world.agent())
-    return response.status_code, response.text
-
-
-def test_a_session_reopens_a_completed_task_itself_and_posts_there_again(world: World) -> None:
+@pytest.mark.usefixtures("reopen_on")
+def test_reopen_takes_a_completed_task_back_to_busy_and_tells_its_session(world: World) -> None:
     item_id = _complete(world)
-    status, text = _agent_reopen(world, item_id, "the test run still posts here")
-    assert status == 200, text
+    assert world.client.get("/api/state").json()["features"] == ["reopen"]
+    status, body = _take_up(world, item_id, SESSION_A)
+    assert status == 200, body
     item = _item_state(world, item_id)
-    assert (item["stage"], item["archived"], item["waiting_on"], item["doing"]) == ("building", 0, [], "the test run still posts here")
-    # It leaves Finished this week; the test's session is stopped, so the page lists it under Waiting, not Busy.
-    assert _shown(world, item_id)["finished"] is False
+    assert (item["stage"], item["archived"], item["waiting_on"]) == ("building", 0, [])
+    send = body["send"]
+    # While the message is on its way, the task shows in Busy, also with its session stopped (the test's fake delivery
+    # fails it, so its state is set as delivery would have it).
+    run_sql(world, "UPDATE messages SET state = 'queued' WHERE id = ?", (send["id"],))
+    assert _shown(world, item_id) == {"group": "busy", "finished": False, "counted": False}
+    assert (send["author"], send["session_id"], send["item_id"], send["as_prompt"]) == ("user", SESSION_A, item_id, 1)
+    # Fixed words with the numeric ID; the title, which an agent can write, stays out of the prompt.
+    assert send["text"].startswith(f"I reopened item {item_id} on Cockpit, so it takes your steps again.")
+    assert item["title"] not in send["text"]
+    # Its session may put steps on it again.
     assert _put_step(world, "read:answer")[0] == 200
     conn = db.connect(world.db_path)
     try:
         event = conn.execute("SELECT actor, data FROM events WHERE kind = 'item.reopened' ORDER BY id DESC LIMIT 1").fetchone()
     finally:
         conn.close()
-    assert event["actor"].startswith("agent:") and '"by": "agent"' in event["data"]
+    assert event["actor"] == "user" and '"by": "reopen"' in event["data"]
 
 
-def test_a_session_says_why_it_reopens(world: World) -> None:
+@pytest.mark.usefixtures("reopen_on")
+def test_reopen_with_no_session_sends_nothing_and_waits_for_a_next_move(world: World) -> None:
     item_id = _complete(world)
-    assert _agent_reopen(world, item_id, "  ")[0] == 400
-    assert _agent_reopen(world, item_id, "x" * 61)[0] == 400
+    run_sql(world, "UPDATE items SET sessions = '[]' WHERE id = ?", (item_id,))
+    status, body = _take_up(world, item_id, None)
+    assert status == 200 and body["send"] is None, body
+    assert _item_state(world, item_id)["stage"] == "building"
+    # The page's notice says Waiting, where it lands.
+    assert _shown(world, item_id) == {"group": "waiting", "finished": False, "counted": False}
+
+
+@pytest.mark.usefixtures("reopen_on")
+@pytest.mark.parametrize(("seen", "now"), [(SESSION_A, [SESSION_B, SESSION_A]), (None, [SESSION_A])])
+def test_reopen_is_refused_when_the_task_has_another_session_than_the_page_showed(
+    world: World, seen: str | None, now: list[str],
+) -> None:
+    item_id = _complete(world)
+    run_sql(world, "UPDATE items SET sessions = ? WHERE id = ?", (json.dumps(now), item_id))
+    _pause_sweeps(world)
+    status, body = _take_up(world, item_id, seen)
+    assert status == 409 and "another session since your page showed it" in body["detail"]
+    assert _item_state(world, item_id)["stage"] == "done"
+    assert world.client.get("/api/items", params={"key": ITEM}).json()["messages"] == []
+    # A refused press leaves paused sweeps paused.
+    assert _paused(world)
+
+
+@pytest.mark.usefixtures("reopen_on")
+def test_reopen_resumes_paused_sweeps(world: World) -> None:
+    item_id = _complete(world)
+    _pause_sweeps(world)
+    assert _take_up(world, item_id, SESSION_A)[0] == 200
+    assert not _paused(world)
+
+
+@pytest.mark.usefixtures("reopen_on")
+def test_reopen_on_an_open_task_is_refused(world: World) -> None:
+    item_id = _item(world)
+    status, body = _take_up(world, item_id, SESSION_A)
+    assert status == 409 and "not finished" in body["detail"]
+
+
+@pytest.mark.usefixtures("reopen_on")
+def test_only_the_user_reopens(world: World) -> None:
+    item_id = _complete(world)
+    response = _agent(world).post(f"/api/items/{item_id}/take-up", json={"session_id": SESSION_A}, headers=world.agent())
+    assert response.status_code in (401, 403), response.text
     assert _item_state(world, item_id)["stage"] == "done"
 
 
-def test_a_session_reopens_no_task_closed_as_not_needed(world: World) -> None:
-    item_id = _item(world)
-    step = _step(world, "reply:1", [CLOSING])
-    assert _finish(world, item_id, step["id"], "close", None, "not needed").status_code == 200
-    status, text = _agent_reopen(world, item_id, "the test run still posts here")
-    assert status == 409 and "closed as not needed" in text, text
-    assert _item_state(world, item_id)["archived"]
-
-
-def test_a_session_s_reopen_of_an_open_task_is_refused(world: World) -> None:
-    item_id = _item(world)
-    status, text = _agent_reopen(world, item_id, "the test run still posts here")
-    assert status == 409 and "not finished" in text, text
-
-
-def test_the_page_uses_its_own_reopen(world: World) -> None:
-    item_id = _complete(world)
-    response = world.client.post(f"/api/items/{item_id}/agent-reopen", json={"why": "x"}, headers=world.user())
-    assert response.status_code in (401, 403), response.text
-
-
-def test_other_steps_on_a_completed_task_are_still_refused_and_point_to_the_reopen_command(world: World) -> None:
-    _complete(world)
-    status, detail = _put_step(world, "read:fj-comparison")
-    assert status == 409
-    assert "cockpit item reopen" in detail
-
-
-def test_a_closed_task_s_refusal_names_no_reopen_command(world: World) -> None:
-    item_id = _item(world)
-    step = _step(world, "reply:1", [CLOSING])
-    assert _finish(world, item_id, step["id"], "close", None, "not needed").status_code == 200
-    status, detail = _put_step(world, "read:fj-comparison")
-    assert status == 409 and "cockpit item reopen" not in detail
-
-
-def test_reopen_plainly_with_no_session_sends_nothing(world: World) -> None:
-    item_id = _complete(world)
-    conn = db.connect(world.db_path)
-    try:
-        conn.execute("UPDATE items SET sessions = '[]' WHERE id = ?", (item_id,))
-        conn.commit()
-        assert store.reopen_plainly(conn, item_id, world.db_path.parent)["send"] is None
-    finally:
-        conn.close()
-    assert _item_state(world, item_id)["stage"] == "building"
-
-
+@pytest.mark.usefixtures("reopen_on")
 def test_reopen_after_a_close_landed_is_refused_and_the_task_stays_closed(world: World) -> None:
     item_id = _complete(world)
     assert world.client.put("/api/items", json={"key": ITEM, "archived": True}, headers=world.user()).status_code == 200
-    response = world.client.post(f"/api/items/{item_id}/take-up", headers=world.user())
-    assert response.status_code == 409 and "closed as not needed" in response.json()["detail"]
+    status, body = _take_up(world, item_id, SESSION_A)
+    assert status == 409 and "closed as not needed" in body["detail"]
     assert _item_state(world, item_id)["archived"]
 
 
-def test_a_session_s_reopen_waits_for_the_user_s_timer_on_the_task(world: World) -> None:
+@pytest.mark.usefixtures("reopen_on")
+def test_a_closed_task_s_refusal_keeps_its_sentence(world: World) -> None:
     item_id = _item(world)
     step = _step(world, "reply:1", [CLOSING])
-    assert world.client.post(f"/api/steps/{step['id']}/timer/start", headers=world.user()).status_code == 200
-    run_sql(world, "UPDATE items SET stage = 'done' WHERE id = ?", (item_id,))
-    status, text = _agent_reopen(world, item_id, "the test run still posts here")
-    assert status == 409 and "timer runs" in text, text
-    assert _item_state(world, item_id)["stage"] == "done"
+    assert _finish(world, item_id, step["id"], "close", None, "not needed").status_code == 200
+    status, detail = _put_step(world, "read:fj-comparison")
+    assert status == 409 and detail.endswith("reopens a closed item.")

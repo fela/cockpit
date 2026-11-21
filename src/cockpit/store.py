@@ -144,8 +144,7 @@ ANSWER_CHARS = 80
 CORE_LINKS_MAX = 3
 CORE_LINK_CHARS = 40
 # A step whose need starts with one of these asks the user to let the session act, so it offers that action as an
-# answer ("Merge it") that is not a closing one (SPEC NEXT-21): without it the user cannot tell which
-# press merges.
+# answer ("Merge it") that is not a closing one (SPEC NEXT-21): without it the user cannot tell which press merges.
 ACTION_NEED = re.compile(r"(?:merge|approve)\b")
 # A merge step stays with its session after the merge, which follows the change through dev, staging and prod and
 # checks it runs, so none of its answers closes the item; "I merged it on GitHub" hands it off.
@@ -1920,16 +1919,10 @@ def refuse_on_closed_item(item: dict[str, Any], actor: str, what: str) -> None:
     if not actor.startswith("agent:") or not (item["archived"] or item["stage"] == "done"):
         return
     how = "closed" if item["archived"] else "completed"
-    # A task closed as not needed stays closed; a session reopens one completed itself (CONTROL-33).
-    reopen = (
-        f" Only {user_name()} reopens it."
-        if item["archived"]
-        else " If work still has to post on this item itself, reopen it first with"
-        f' `cockpit item reopen {item["key"]} --note "<why, up to {DOING_CHARS} characters>"`.'
-    )
     raise Conflict(
         f"Item {item['id']} ({item['title']}) is closed: {user_name()} {how} it. {what} Put the result on a new"
-        f" item, or on the item {user_name()} asked on, and link this one there if it helps.{reopen}"
+        f" item, or on the item {user_name()} asked on, and link this one there if it helps. Only {user_name()}"
+        " reopens a closed item."
     )
 
 
@@ -4231,67 +4224,51 @@ def reopen_for_message(conn: sqlite3.Connection, item_id: int) -> bool:
     closed, and asks a close left open are withdrawn, so the task is the agents' and not back in the Inbox: the message
     is the new ask, and the session puts again what it still needs. Undo no longer puts the finish back. No change to
     an open task. Returns whether it reopened."""
-    return _take_up_again(conn, item_id, "message", "user")
+    return _take_up_again(conn, item_id, "message")
 
 
-def reopen_plainly(conn: sqlite3.Connection, item_id: int, checkouts_dir: Path) -> dict[str, Any]:
-    """The user's Reopen on a finished task (SPEC CONTROL-33): the task goes back to Busy as a message would take it
-    (CONTROL-28), without the user having to write one, and Cockpit tells the item's primary session that it may put
-    steps there again. Returns {item, send}: `send` is Cockpit's message to deliver now,
-    or None for an item with no session."""
+# What the user's Reopen sends the item's session, as the user's own message: fixed words and the numeric ID alone.
+REOPENED_TEXT = (
+    "I reopened item {item_id} on Cockpit, so it takes your steps again. Post there what you still had for it, or"
+    " put a step for me with what is next."
+)
+
+
+def reopen_plainly(conn: sqlite3.Connection, item_id: int, seen_session: str | None, checkouts_dir: Path) -> dict[str, Any]:
+    """The user's Reopen on a finished task (SPEC CONTROL-34): it takes the task up again as a message would
+    (CONTROL-28), and when the task has a session, sends it REOPENED_TEXT as the user's message, so the task shows in
+    Busy while that is on its way. `seen_session` is the primary session the user's page showed (None for none); a
+    different one now refuses the press, so the message reaches the session shown. Returns {item, send}: `send` is
+    the message to deliver now, or None for a task with no session, which then waits with no next move."""
     with db.transaction(conn):
         item = get_item(conn, item_id)
         # A Close that landed after the page drew Reopen wins: a task closed as not needed has Unarchive.
         if item["stage"] != "done" or item["archived"]:
             how = "was closed as not needed" if item["archived"] else "is not finished"
             raise Conflict(f"item {item_id} ({item['title']}) {how}, so Reopen does not apply")
-        _take_up_again(conn, item_id, "reopen", "user")
+        session_id = item["sessions"][0] if item["sessions"] else None
+        if session_id != seen_session:
+            raise Conflict(f"item {item_id} has another session since your page showed it; read it again")
         send = None
-        if item["sessions"]:
+        if session_id is not None:
             send = create_message(
-                conn, "cockpit",
-                f"{user_name()} reopened item {item_id}, {item['title']}, on Cockpit. It is back in Busy at stage"
-                " building, waiting on nothing, and takes your steps again. Post there what you still had for it,"
-                f" or put a step for {user_name()} with what is next.",
-                {"session_id": item["sessions"][0], "item_id": item_id}, checkouts_dir,
+                conn, "user", REOPENED_TEXT.format(item_id=item_id), {"session_id": session_id, "item_id": item_id},
+                checkouts_dir,
             )
-            conn.execute("UPDATE messages SET as_prompt = 1 WHERE id = ?", (send["id"],))
-            send = get_message(conn, send["id"])
+        _take_up_again(conn, item_id, "reopen")
     return {"item": get_item(conn, item_id), "send": send}
 
 
-def reopen_by_agent(conn: sqlite3.Connection, item_id: int, actor: str, why: str) -> dict[str, Any]:
-    """A session reopens a task the user completed, with no step for the user (SPEC CONTROL-33): work it must still
-    post there, such as an armed run's result, takes the task back to Busy as the user's Reopen would, and `why`
-    becomes the task's `doing`, the line Busy shows on hover. A task the user closed as not needed stays closed. Returns the item."""
-    why = why.strip()
-    if not why or len(why) > DOING_CHARS:
-        raise Invalid(f"say why the task reopens, in up to {DOING_CHARS} characters; Busy shows it on hover")
-    with db.transaction(conn):
-        item = get_item(conn, item_id)
-        if item["archived"]:
-            raise Conflict(f"item {item_id} ({item['title']}) was closed as not needed; only {user_name()} reopens it")
-        if item["stage"] != "done":
-            raise Conflict(f"item {item_id} ({item['title']}) is not finished; it takes your steps as it is")
-        # Reopening withdraws the item's open asks, so it waits for the user's timer on one of them to stop.
-        running = running_step(conn)
-        if running is not None and get_step(conn, running)["item_id"] == item_id:
-            raise Conflict(f"{user_name()}'s timer runs on step {running} of item {item_id}; reopen it once the timer stops")
-        _take_up_again(conn, item_id, "agent", actor)
-        conn.execute("UPDATE items SET doing = ? WHERE id = ?", (why, item_id))
-    return get_item(conn, item_id)
-
-
-def _take_up_again(conn: sqlite3.Connection, item_id: int, by: str, actor: str) -> bool:
-    """reopen_for_message's change, by the user's message, their Reopen or a session (`by`, kept in the history)."""
+def _take_up_again(conn: sqlite3.Connection, item_id: int, by: str) -> bool:
+    """reopen_for_message's change, by the user's message or their Reopen (`by`, kept in the history)."""
     item = get_item(conn, item_id)
     if not item["archived"] and item["stage"] != "done":
         return False
     now = db.now_iso()
     conn.execute(
         "UPDATE items SET stage = 'building', waiting_on = '[]', archived = 0, user_fields = ?, updated_at = ?,"
-        " updated_by = ? WHERE id = ?",
-        (json.dumps([name for name in item["user_fields"] if name != "archived"]), now, actor, item_id),
+        " updated_by = 'user' WHERE id = ?",
+        (json.dumps([name for name in item["user_fields"] if name != "archived"]), now, item_id),
     )
     record_stage(conn, "user", item_id, item["stage"], "building")
     asks = db.rows(conn.execute(
@@ -4307,13 +4284,13 @@ def _take_up_again(conn: sqlite3.Connection, item_id: int, by: str, actor: str) 
             "UPDATE steps SET withdrawn_at = ?, queued_at = NULL, held_at = NULL, snoozed_until = NULL WHERE id = ?",
             (now, ask["id"]),
         )
-        patterns.record_step(conn, "withdraw", actor, get_step(conn, ask["id"]))
+        patterns.record_step(conn, "withdraw", "user", get_step(conn, ask["id"]))
     finish = get_finish(conn, item_id)
     if finish is not None:
-        reason = {"message": "took the item up again with a message", "reopen": "reopened the item"}.get(by, "completed the item, and a session reopened it")
+        reason = {"message": "took the item up again with a message", "reopen": "reopened the item with Reopen"}[by]
         _retire_finish(conn, finish, now, reason)
     patterns.record(
-        conn, "item.reopened", actor, item_id, finish["step_id"] if finish else None, None,
+        conn, "item.reopened", "user", item_id, finish["step_id"] if finish else None, None,
         {"how": finish["how"] if finish else "agent", "by": by},
     )
     if asks:
@@ -5815,14 +5792,14 @@ MESSAGE_GOES_WITHIN = timedelta(minutes=5)
 
 
 def messaged_item_ids(conn: sqlite3.Connection, now: datetime) -> set[int]:
-    """The items with a message from the user, or from Cockpit such as the one a Reopen sends (CONTROL-33), on its way
-    to a session, written just now or, for the user's, with its item changed just now (a retried message keeps its old
-    time, and its reopening changes the item), or sent to one in the last moment. The agents have that work from Send on, so the item shows in
-    Busy (SPEC CONTROL-28), not as idle until the session starts."""
+    """The items with a message from the user on its way to a session, written or with its item changed just now (a
+    retried message keeps its old time, and its reopening changes the item), or sent to one in the last moment. The
+    agents have that work from Send on, so the item shows in Busy (SPEC CONTROL-28), not as idle until the session
+    starts."""
     goes_since = _iso(now - MESSAGE_GOES_WITHIN)
     return {row[0] for row in conn.execute(
-        "SELECT DISTINCT m.item_id FROM messages m JOIN items i ON i.id = m.item_id WHERE m.author IN ('user', 'cockpit')"
-        " AND ((m.state IN ('queued', 'sending') AND (m.created_at >= ? OR (m.author = 'user' AND i.updated_at >= ?)))"
+        "SELECT DISTINCT m.item_id FROM messages m JOIN items i ON i.id = m.item_id WHERE m.author = 'user'"
+        " AND ((m.state IN ('queued', 'sending') AND (m.created_at >= ? OR i.updated_at >= ?))"
         " OR (m.state = 'sent' AND m.sent_at >= ?))",
         (goes_since, goes_since, _iso(now - MESSAGE_STARTS_WITHIN)),
     )}

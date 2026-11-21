@@ -673,9 +673,11 @@ class FollowUp(Body):
     text: Text
 
 
-class ItemReopen(Body):
-    # Why the session reopens the task; Busy shows it on hover as the task's `doing`.
-    why: Line
+class ItemTakeUp(Body):
+    nullable = frozenset({"session_id"})
+
+    # The item's primary session as the user's page showed it; null when it showed none.
+    session_id: SessionId | None
 
 
 class ItemFinish(Body):
@@ -2145,6 +2147,7 @@ def create_app(
         )
         result["projects"] = projects.listing(conn)
         result["providers"] = list(settings.providers)
+        result["features"] = list(config.setup().features)
         result["default_provider"] = settings.default_provider
         # The user's home folder, which a blocked call's folder shows as `~` (SPEC PERM-26).
         result["home"] = str(Path.home())
@@ -2957,19 +2960,17 @@ def create_app(
             background,
         )
 
-    # Reopen on a finished task (SPEC CONTROL-33): back to Busy as a message would take it, with no words to write.
+    # Reopen on a finished task (SPEC CONTROL-34), with "reopen" in the setup's features: back to Busy as a message
+    # would take it, with no words to write.
     @app.post("/api/items/{item_id}/take-up", dependencies=[Depends(user_only)])
-    def take_up_item(item_id: int, background: BackgroundTasks, conn: Conn) -> dict[str, Any]:
+    def take_up_item(item_id: int, body: ItemTakeUp, background: BackgroundTasks, conn: Conn) -> dict[str, Any]:
+        if "reopen" not in config.setup().features:
+            raise store.NotFound('Reopen is off: add "reopen" to features in the setup file to turn it on')
+        reopened = store.reopen_plainly(conn, item_id, body.session_id, settings.checkouts_dir)
         sweeper.resume(conn, "reopened a task")
-        reopened = store.reopen_plainly(conn, item_id, settings.checkouts_dir)
         if reopened["send"] is not None:
             background.add_task(deliverer.send, reopened["send"]["id"])
         return reopened
-
-    # A session reopens a completed task it must still post on, with no step for the user (SPEC CONTROL-33).
-    @app.post("/api/items/{item_id}/agent-reopen", dependencies=[Depends(session_only)])
-    def agent_reopen_item(item_id: int, body: ItemReopen, request: Request, conn: Conn) -> dict[str, Any]:
-        return store.reopen_by_agent(conn, item_id, request.state.actor, body.why)
 
     @app.post("/api/items/{item_id}/reopen", dependencies=[Depends(user_only)])
     def reopen_item(item_id: int, background: BackgroundTasks, conn: Conn) -> dict[str, Any]:
