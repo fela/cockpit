@@ -23,6 +23,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
 
+from cockpit import config
+
 # A personal Google account's address ends in one of these; its ID token has no `hd` claim.
 PERSONAL_DOMAINS = frozenset({"gmail.com", "googlemail.com"})
 GOOGLE_AUTHORIZATION_ENDPOINT = "https://accounts.google.com/o/oauth2/v2/auth"
@@ -30,11 +32,13 @@ GOOGLE_TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token"
 GOOGLE_ISSUERS = frozenset({"https://accounts.google.com", "accounts.google.com"})
 SIGN_IN_PATH = "/auth/google"
 CALLBACK_PATH = "/auth/google/callback"
-SIGN_IN_COOKIE = "__Host-cockpit_sign_in"
+# Browsers send a cookie to every port of a host, so each instance (SPEC SCOPE-7) names its cookies its own way, and
+# signing in to one leaves the other signed in.
+SIGN_IN_COOKIE = f"__Host-cockpit_sign_in{config.SUFFIX}"
 SIGN_IN_MAX_AGE = 10 * 60
-SESSION_COOKIE = "__Host-cockpit_session"
+SESSION_COOKIE = f"__Host-cockpit_session{config.SUFFIX}"
 SESSION_MAX_AGE = 30 * 24 * 60 * 60
-LOCAL_SESSION_COOKIE = "cockpit_local_session"
+LOCAL_SESSION_COOKIE = f"cockpit_local_session{config.SUFFIX}"
 LOCAL_COOKIE_ATTRIBUTES = "Path=/; HttpOnly; SameSite=Strict"
 LOCAL_SIGN_IN_PATH = "/auth/local"
 # SameSite=Lax, not Strict: the browser reaches "/" through a redirect from
@@ -256,8 +260,8 @@ def canonical_email(email: str) -> str:
 # Visitors to a page shared with specific people (SPEC API-7) sign in on the public host. Their cookie lives on that
 # host only, holds the address Google confirmed, and is signed with a key of its own derived from the session key, so
 # it can never pass as the user's Cockpit session.
-VISITOR_COOKIE = "__Host-p_visitor"
-VISITOR_SIGN_IN_COOKIE = "__Host-p_sign_in"
+VISITOR_COOKIE = f"__Host-p_visitor{config.SUFFIX}"
+VISITOR_SIGN_IN_COOKIE = f"__Host-p_sign_in{config.SUFFIX}"
 VISITOR_MAX_AGE = 30 * 24 * 60 * 60
 VISITOR_CALLBACK_PATH = "/p/google/callback"
 _VISITOR_PATTERN = re.compile(r"([A-Za-z0-9_-]{1,400})\.([0-9]{1,12})\.([0-9a-f]{64})")

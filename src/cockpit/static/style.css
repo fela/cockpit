@@ -2275,6 +2275,10 @@ details.menu:not([open]) > .menu-list { display: none; }
 .item-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 12px 0; }
 .item-controls-row > .item-controls { flex: 1 1 auto; margin: 0; }
 .item-controls-row > .close-item { margin-left: auto; }
+/* Reopen on a finished task (CONTROL-34) sits just before Close, the two together at the end of the row. */
+.button.reopen-task { gap: 6px; padding: 0 12px; font-weight: 600; }
+.end-keys { display: flex; align-items: center; gap: 8px; }
+.item-controls-row > .end-keys { margin-left: auto; }
 /* A step card's task fold: what the item's row would hold. */
 .task-details { margin-top: 12px; }
 .task-body { padding: 0 0 8px 16px; }

@@ -53,6 +53,13 @@ hint, Busy's lit heading and rolled count, Finished's count, the notice, the row
 state. At desktop light it also checks that a refused Send leaves the task finished with the words back in the box, and
 that a Send behind a finish still on its way reaches the server after it (SPEC CONTROL-28).
 
+## Reopen on a finished task
+
+`reopen_control.cjs` turns on the `reopen` feature in its server's setup (`extra-setup.toml`), seeds its own finished
+tasks on a synthetic database through `serve_preview.py`, and presses Reopen at desktop light, desktop dark and phone
+width (SPEC CONTROL-34). It checks the key's place before Close, the notice, the server's Busy and the fixed message to
+the task's session; at desktop light also an open task without the key and a task with no session landing in Waiting.
+
 ## Quotes in the reply box and in sent messages
 
 `quote_display.cjs` checks that a quote made with Comment reads as a quote, never as ">" lines (SPEC NEXT-63), at

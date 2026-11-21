@@ -1,8 +1,9 @@
 """The Claude accounts Cockpit runs sessions on, and which one new work goes to (SPEC SESSION-17).
 
 Each account (config.ACCOUNTS) has a config folder of its own: its sign-in, background daemon, jobs folder and
-`claude agents` list. Every `claude` Cockpit runs names its account: the default one with CLAUDE_CONFIG_DIR
-unset, any other with CLAUDE_CONFIG_DIR set to its folder (claude_env). A session stays on the account it started
+`claude agents` list. Every `claude` Cockpit runs names its account: Claude's own default folder, ~/.claude, with
+CLAUDE_CONFIG_DIR unset, any other with CLAUDE_CONFIG_DIR set to its folder (claude_env). A named instance (SPEC
+SCOPE-7) has folders of its own, so all of its accounts set it. A session stays on the account it started
 on, so its resumes, messages, stops and limit wakes run there; only a new session, or a one-shot `claude -p`,
 picks one (pick).
 
@@ -47,7 +48,7 @@ class SignedOut(Exception):
 
 def claude_env(account: Account) -> list[str]:
     """The `env` words that run a `claude` command on `account`, whatever Cockpit's own environment holds."""
-    if account.default:
+    if account.claude_default:
         return ["env", "-u", "CLAUDE_CONFIG_DIR"]
     return ["env", f"CLAUDE_CONFIG_DIR={account.folder}"]
 
@@ -133,7 +134,7 @@ def current_name(name: str) -> str:
 def signed_in(account: Account) -> bool:
     # macOS keeps normal Claude logins in the Keychain; Claude reports a missing login when called.
     if sys.platform == "darwin":
-        return account.default or account.folder.is_dir()
+        return account.claude_default or account.folder.is_dir()
     return (account.folder / ".credentials.json").is_file()
 
 

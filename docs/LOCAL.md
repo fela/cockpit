@@ -6,8 +6,10 @@ use Google OAuth. Provider selection and browser authentication are independent.
 
 ## Local authentication
 
-`auth_mode = "local"` accepts only `http://127.0.0.1:8790` or
-`http://localhost:8790`. The server binds IPv4 loopback and disables proxy-header
+`auth_mode = "local"` accepts only `http://127.0.0.1:<port>` or
+`http://localhost:<port>`, where `port` in the setup file is 8790, and only a named
+instance (below) may set another. The
+server binds IPv4 loopback on that port and disables proxy-header
 handling. Each request checks the socket peer and exact Host, including its port.
 Browser writes require the configured Origin, including sign-in and sign-out.
 Use Google authentication with HTTPS for access through a forwarding proxy.
@@ -16,7 +18,8 @@ Use Google authentication with HTTPS for access through a forwarding proxy.
 `/auth/local/code` over loopback. The returned code works once and expires after
 two minutes. The CLI opens `/auth/local#<code>`; if no browser opens, it prints
 that one-time address with the two-minute deadline and exits successfully. The page removes the fragment
-before exchanging it for a signed `cockpit_local_session` cookie with HttpOnly,
+before exchanging it for a signed `cockpit_local_session` cookie (`cockpit_local_session-<name>`
+for a named instance) with HttpOnly,
 SameSite=Strict and Path=/. Google mode uses Secure cookies. Neither mode accepts
 the agents' bearer token as browser sign-in.
 
@@ -57,6 +60,60 @@ directly. Cockpit writes to a live Claude session over the socket that session's
 `sessions/<pid>.json` names. For a Claude release that names none, Cockpit uses the
 platform socket directory, and `claude_sockets_dir` overrides that directory if needed.
 
+## Separate instances
+
+One user can run separate Cockpits side by side, for example one for work and one
+for personal projects (SPEC SCOPE-7). Each instance has its own setup, database,
+inbox, port, service, cookies, and Claude and Codex sign-ins, so nothing one does
+shows in the other. `COCKPIT_INSTANCE`, a lowercase name such as `personal`, picks
+the instance, and nothing else does. Leaving it unset is the instance a single
+Cockpit has always been, with the names in the first column.
+
+| | Unnamed | `COCKPIT_INSTANCE=personal` |
+| --- | --- | --- |
+| Setup and secrets | `~/.config/cockpit` | `~/.config/cockpit-personal` |
+| Database, logs, worker socket | `~/.local/share/cockpit` | `~/.local/share/cockpit-personal` |
+| Claude accounts | `~/.claude`, `~/.claude-work` | `~/.claude-personal`, `~/.claude-personal-2` |
+| Codex accounts | `~/.codex`, `~/.codex-2` | `~/.codex-personal`, `~/.codex-personal-2` |
+| macOS LaunchAgent | `cockpit.server` | `cockpit.server.personal` |
+| Linux systemd unit | `cockpit` | `cockpit-personal` |
+| Browser cookies | `cockpit_local_session`, `__Host-cockpit_session`, ... | the same names ending in `-personal` |
+
+Set a second instance up with its own port:
+
+```bash
+export COCKPIT_INSTANCE=personal
+cockpit setup --local --provider claude --name Sam --timezone UTC --port 8791
+CLAUDE_CONFIG_DIR=~/.claude-personal claude   # then /login with the account for this instance
+cockpit service install                        # or run cockpit-server in this shell
+cockpit login
+```
+
+Every `cockpit` command for the instance needs `COCKPIT_INSTANCE` in its
+environment, and so does a `claude` you start by hand for it. `cockpit service
+install` writes it into the LaunchAgent; a Linux unit `cockpit-personal.service`
+needs `Environment=COCKPIT_INSTANCE=personal`. The server puts it in the
+environment of every session and program it starts, with `CODEX_HOME` set to the
+instance's first Codex folder in place of any the shell set. `setup --local` writes
+an `attach` command that carries the name.
+
+Give the instance's Claude folder the same hooks and status line as
+`~/.claude/settings.json` (`cockpit-standing-rules` run with `COCKPIT_INSTANCE`
+installs its rules there); the capture script writes to the instance's own
+`rate-limits.json` because its sessions carry `COCKPIT_INSTANCE`. A second Claude
+folder, `~/.claude-personal-2`, needs the shared entries `scripts/second-account.sh`
+makes for `~/.claude-work`, linked to `~/.claude-personal`. Give each instance its own
+`checkouts` folder. Instances may share one virtualenv: `cockpit deploy` takes one
+lock for all of them. Instances that share a virtualenv share code, though:
+deploying one changes what the other runs at its next restart and in its next
+Codex worker, so give each instance its own virtualenv when they should deploy
+independently. A credential file of any instance stays closed on every
+instance's permission card. The connector gateway (`/api/connectors/mcp`)
+answers only on port 8790, so an instance on another port has none. In Google
+mode, give each instance its own hostname: a browser sends a host's cookies to
+every port, so the cookie names keep the sign-ins apart, but each server would
+still receive the other's cookies.
+
 ## Updating the service
 
 `deploy_branch` names the branch of `spec_repo` that `cockpit deploy` installs.
@@ -76,8 +133,8 @@ finishes and says to deploy again. Uncommitted changes are excluded; a
 divergent branch or a commit that fails to import is refused.
 
 The command schedules a service restart after it returns: the LaunchAgent on
-macOS, or on Linux the systemd user service `cockpit` when
-`~/.config/systemd/user/cockpit.service` exists. Without either, it says to
+macOS, or on Linux the systemd user service `cockpit` (`cockpit-<name>` for a named
+instance) when its unit file in `~/.config/systemd/user` exists. Without either, it says to
 restart the server yourself. Open pages offer Reload when the build version
 changes. For other service arrangements, reinstall into the service environment
 and restart it using your service manager.

@@ -13,7 +13,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from cockpit import db, patterns
+from cockpit import config, db, patterns
 
 log = logging.getLogger(__name__)
 
@@ -23,7 +23,7 @@ PACKAGE = "@openai/codex"
 CLAUDE_BIN = Path.home() / ".local" / "bin" / "claude"
 # Under it, each channel names the version Claude Code's own updater installs.
 CLAUDE_CHANNEL_URL = "https://downloads.claude.ai/claude-code-releases"
-CLAUDE_SETTINGS = Path.home() / ".claude" / "settings.json"
+CLAUDE_SETTINGS = config.CLAUDE_SETTINGS
 GRACE = timedelta(days=1)
 PACKAGE_JSON = Path.home() / ".local" / "lib" / "node_modules" / "@openai" / "codex" / "package.json"
 MIN_AGE = timedelta(days=3)
