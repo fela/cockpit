@@ -266,11 +266,16 @@ def _digest_sunday(local: datetime) -> date:
 
 
 def _digest_retry(
-    conn: sqlite3.Connection, setup: Setup, record: dict[str, Any], launched: dict[str, Any]
+    conn: sqlite3.Connection, setup: Setup, record: dict[str, Any], launched: dict[str, Any], now: datetime
 ) -> datetime | None:
-    """When Cockpit asks again for a digest whose message failed: RETRY_MINUTES later, while the digest is not
-    stored, as for a briefing, and only when that comes before the next week's digest."""
-    if launched["state"] != "failed" or _written(conn, WEEKLY, record["day"]):
+    """When Cockpit asks again for a digest whose message failed: RETRY_MINUTES later, while a team is set, the
+    request's week is the current one at `now` and the digest is not stored, as for a briefing, and only when that
+    comes before the next week's digest. The scheduler and the page both ask this, so the page promises only the
+    retry the scheduler runs."""
+    current = _digest_sunday(now.astimezone(setup.timezone)).isoformat()
+    if launched["state"] != "failed" or not team(conn) or record["day"] != current:
+        return None
+    if _written(conn, WEEKLY, record["day"]):
         return None
     retry = datetime.fromisoformat(launched["created_at"]) + timedelta(minutes=RETRY_MINUTES)
     next_week = datetime.combine(
@@ -347,10 +352,18 @@ def launch_digest_once(conn: sqlite3.Connection, setup: Setup, now: datetime) ->
     waited = local >= datetime.combine(sunday, time(DIGEST_WAIT_HOUR), setup.timezone)
     with db.transaction(conn):
         record = db.kv_get(conn, WEEKLY.launch_key)
+        if record is not None and record["day"] > day:
+            return None  # a poll that read the clock before the last request's
         if record is not None and record["day"] == day:
-            retry = _digest_retry(conn, setup, record, store.get_message(conn, record["message_id"]))
+            retry = _digest_retry(conn, setup, record, store.get_message(conn, record["message_id"]), now)
             if retry is None or now < retry:
                 return None
+            # The new request replaces the failed one, which is set aside so a retry of it cannot start a second
+            # session on the digest.
+            conn.execute(
+                "UPDATE messages SET dismissed_at = ?, dismissed_by = 'cockpit', dismiss_reason = ? WHERE id = ?",
+                (f"{now:%Y-%m-%dT%H:%M:%SZ}", "Cockpit asked for the weekly digest again", record["message_id"]),
+            )
         elif not waited and not _written(conn, DAILY, day):
             return None
         week = db.rows(
@@ -499,15 +512,15 @@ def mark_read(conn: sqlite3.Connection, briefing_id: int) -> None:
         db.kv_set(conn, kind.read_key, max(_read_id(conn, kind), briefing_id))
 
 
-def launch_status(conn: sqlite3.Connection, setup: Setup, kind: Kind) -> dict[str, Any] | None:
+def launch_status(conn: sqlite3.Connection, setup: Setup, kind: Kind, now: datetime) -> dict[str, Any] | None:
     """The last request for a briefing of `kind`: its day and window, whether its message reached a session, and
-    when Cockpit asks again, if it will."""
+    when Cockpit asks again, if it will at `now`."""
     record = db.kv_get(conn, kind.launch_key)
     if record is None:
         return None
     launched = store.get_message(conn, record["message_id"])
     if kind is WEEKLY:
-        retry = _digest_retry(conn, setup, record, launched)
+        retry = _digest_retry(conn, setup, record, launched, now)
     else:
         retry = _briefing_retry(conn, record, launched)
     return {
@@ -518,7 +531,7 @@ def launch_status(conn: sqlite3.Connection, setup: Setup, kind: Kind) -> dict[st
     }
 
 
-def listing(conn: sqlite3.Connection, setup: Setup) -> dict[str, Any]:
+def listing(conn: sqlite3.Connection, setup: Setup, now: datetime) -> dict[str, Any]:
     """The page's data: the newest briefings without their text, which one is read, the last request and the
     team; with the digest on, the digests among them, the newest digest read and the last digest request."""
     kinds = [DAILY.name, WEEKLY.name] if digest_on(setup) else [DAILY.name]
@@ -530,11 +543,11 @@ def listing(conn: sqlite3.Connection, setup: Setup) -> dict[str, Any]:
         ).fetchall()
     )
     found = {
-        "briefings": briefings, "read_id": _read_id(conn, DAILY), "launch": launch_status(conn, setup, DAILY),
+        "briefings": briefings, "read_id": _read_id(conn, DAILY), "launch": launch_status(conn, setup, DAILY, now),
         "hour": BRIEFING_HOUR, "team": team(conn),
     }
     if digest_on(setup):
-        found |= {"digest_read_id": _read_id(conn, WEEKLY), "digest": launch_status(conn, setup, WEEKLY)}
+        found |= {"digest_read_id": _read_id(conn, WEEKLY), "digest": launch_status(conn, setup, WEEKLY, now)}
     return found
 
 

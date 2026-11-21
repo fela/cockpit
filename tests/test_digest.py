@@ -72,6 +72,21 @@ def digest(world: World, now: datetime) -> dict | None:
         conn.close()
 
 
+def page(world: World, now: datetime) -> dict | None:
+    """The Briefing page's word on the last digest request at `now`."""
+    conn = db.connect(world.db_path)
+    try:
+        return briefing.listing(conn, config.setup(), now)["digest"]
+    finally:
+        conn.close()
+
+
+def fail(world: World, message: dict) -> None:
+    """The message does not reach a session."""
+    world.runner.returncode = 1
+    world.deliverer.send(message["id"])
+
+
 def summary(text: str) -> str:
     return f"## Executive summary\n\n- {text}"
 
@@ -155,7 +170,7 @@ def test_a_digest_request_that_did_not_reach_a_session_is_tried_again_after_an_h
     first = digest(world, at(SUNDAY, 8))
     world.runner.returncode = 1
     world.deliverer.send(first["id"])
-    status = world.client.get("/api/briefings").json()["digest"]
+    status = page(world, at(SUNDAY, 8, 10))
     assert (status["state"], status["retry_at"]) == ("failed", "2026-01-11T02:05:00Z")
     assert digest(world, at(SUNDAY, 8, 50)) is None
     again = digest(world, at(SUNDAY, 9, 10))
@@ -184,7 +199,7 @@ def test_a_late_sunday_failure_is_tried_again_after_midnight_as_the_page_says(wo
     first = digest(world, at(SUNDAY, 23, 30))
     world.runner.returncode = 1
     world.deliverer.send(first["id"])
-    status = world.client.get("/api/briefings").json()["digest"]
+    status = page(world, at(SUNDAY, 23, 40))
     assert (status["state"], status["retry_at"]) == ("failed", "2026-01-11T17:30:00Z")  # Monday 00:30
     assert digest(world, at(12, 0, 25)) is None
     again = digest(world, at(12, 0, 35))
@@ -214,13 +229,57 @@ def test_a_failure_too_close_to_the_next_week_promises_no_retry(world: World) ->
     assert first is not None and first["new_name"] == "Weekly digest Sun 11 Jan"
     world.runner.returncode = 1
     world.deliverer.send(first["id"])
-    status = world.client.get("/api/briefings").json()["digest"]
+    status = page(world, at(18, 7, 40))
     assert (status["day"], status["state"], status["retry_at"]) == ("2026-01-11", "failed", None)
     assert digest(world, at(18, 7, 55)) is None
     brief(world, 18, summary("Ana shipped the reminder guide."))
     world.runner.returncode = 0
     nxt = digest(world, at(18, 8))
     assert nxt is not None and nxt["new_name"] == "Weekly digest Sun 18 Jan"
+
+
+@pytest.mark.usefixtures("team")
+def test_a_failed_request_starts_one_session_whether_cockpit_or_the_user_retries_it_first(world: World) -> None:
+    brief(world, SUNDAY, summary("Alex merged list sharing."))
+    first = digest(world, at(SUNDAY, 8))
+    fail(world, first)
+    again = digest(world, at(SUNDAY, 9, 10))
+    assert again is not None
+    conn = db.connect(world.db_path)
+    try:
+        # Cockpit's new request set the failed one aside, so the user's retry of it is refused.
+        assert store.get_message(conn, first["id"])["dismissed_by"] == "cockpit"
+        with pytest.raises(store.Conflict, match="dismissed"):
+            store.retry_message(conn, first["id"], "user")
+        # The user retries the new request first: Cockpit does not ask again beside it.
+        fail(world, again)
+        store.retry_message(conn, again["id"], "user")
+    finally:
+        conn.close()
+    assert digest(world, at(SUNDAY, 10, 20)) is None
+    assert page(world, at(SUNDAY, 10, 20))["retry_at"] is None
+
+
+@pytest.mark.usefixtures("team")
+def test_a_poll_that_read_the_clock_before_the_last_request_asks_for_nothing(world: World) -> None:
+    brief(world, SUNDAY, summary("Alex merged list sharing."))
+    brief(world, 18, summary("Ana shipped the reminder guide."))
+    assert digest(world, at(18, 8))["new_name"] == "Weekly digest Sun 18 Jan"
+    # A poll that read the clock before Sunday 18's 08:00 finishes after that request: the week to Sunday 11 is past.
+    assert digest(world, at(18, 7, 59)) is None
+    assert digest(world, at(18, 8, 1)) is None
+
+
+@pytest.mark.usefixtures("team")
+def test_the_page_promises_no_retry_once_the_team_is_cleared_or_the_next_week_has_come(world: World) -> None:
+    brief(world, SUNDAY, summary("Alex merged list sharing."))
+    fail(world, digest(world, at(18, 6)))  # the next Sunday, early: the retry at 07:05 is still due
+    assert page(world, at(18, 6, 30))["retry_at"] == "2026-01-18T00:05:00Z"
+    # Past Sunday 18's 08:00 the week to Sunday 11 is no longer current, and Cockpit asks for it no more.
+    assert page(world, at(18, 8, 30))["retry_at"] is None
+    assert world.client.put("/api/team", json={"team": ""}, headers=world.user()).status_code == 200
+    assert page(world, at(18, 6, 30))["retry_at"] is None
+    assert digest(world, at(18, 7, 10)) is None
 
 
 @pytest.mark.usefixtures("team")

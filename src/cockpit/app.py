@@ -3470,7 +3470,7 @@ def create_app(
 
     @app.get("/api/briefings")
     def briefings(conn: Conn) -> dict[str, Any]:
-        return briefing.listing(conn, config.setup())
+        return briefing.listing(conn, config.setup(), datetime.now(UTC))
 
     @app.get("/api/briefings/{briefing_id}")
     def get_briefing(briefing_id: int, conn: Conn) -> dict[str, Any]:
