@@ -214,6 +214,18 @@ def test_a_failed_digest_keeps_its_retry_when_the_user_moves_the_digest_later(wo
     assert again is not None and again["id"] != first["id"] and again["new_name"] == "Weekly digest Sun 11 Jan"
 
 
+@pytest.mark.usefixtures("settings_on", "team")
+def test_no_digest_saved_during_the_retry_check_means_no_retry(world: World, monkeypatch: pytest.MonkeyPatch) -> None:
+    brief(world, 11, 7, True)
+    first = digest(world, at(11, 8))
+    fail(world, first)
+    now = at(11, 9, 10)  # the retry is due
+    week = briefing._digest_week
+    # "No digest" lands between the check's two schedule reads: the second read finds no digest.
+    monkeypatch.setattr(briefing, "_digest_week", lambda conn, setup, moment: week(conn, setup, moment) if moment == now else None)
+    assert digest(world, now) is None
+
+
 @pytest.mark.usefixtures("team")
 def test_a_failed_digest_keeps_its_retry_after_a_time_zone_change(world: World) -> None:
     utc = dataclasses.replace(SETUP(), features=(briefing.DIGEST_FEATURE,), timezone=ZoneInfo("UTC"))
