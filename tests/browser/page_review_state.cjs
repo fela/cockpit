@@ -308,6 +308,30 @@ check("P9", async () => {
   }
 });
 
+check("P10: with no entry named, the page opens the newest unread briefing or digest", async () => {
+  const w = world({});
+  w.run(part("briefing.js", "// Whether the user has not opened this briefing", "// The page reads the state when it opens"));
+  // Sunday's digest (3) is unread after Monday's briefing (4) was read: the page opens the digest.
+  const monday = { briefings: [{ id: 4, kind: "daily" }, { id: 3, kind: "weekly" }, { id: 2, kind: "daily" }],
+    read_id: 4, digest_read_id: 0 };
+  w.context.monday = monday;
+  assert.equal(w.run("pick(monday)"), 3);
+  // All read: the newest entry; and with the digest off, the listing has no digest read mark and no digests.
+  w.context.read = { ...monday, digest_read_id: 3 };
+  w.run("picked = null");
+  assert.equal(w.run("pick(read)"), 4);
+  w.context.off = { briefings: [{ id: 4, kind: "daily" }, { id: 2, kind: "daily" }], read_id: 2 };
+  w.run("picked = null");
+  assert.equal(w.run("pick(off)"), 4);
+  // On the open page, the entry shown stays at the next check while only an older one is unread, and gives way
+  // to a newer one.
+  w.run("picked = 4");
+  assert.equal(w.run("pick(monday)"), 4);
+  w.context.newer = { ...monday, briefings: [{ id: 5, kind: "daily" }, ...monday.briefings], read_id: 2 };
+  w.run("picked = 4");
+  assert.equal(w.run("pick(newer)"), 5);
+});
+
 check("Q1: Send keeps words recovered while it waits for Take back", async () => {
   for (const recover of [true, false]) {
     const replay = gate();
