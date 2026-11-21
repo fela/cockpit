@@ -8,7 +8,7 @@ import json
 
 import pytest
 
-from cockpit import config, db
+from cockpit import config, db, store
 from tests.conftest import SESSION_A, SESSION_B, World
 from tests.test_api import run_sql
 from tests.test_closed_items import _complete, _put_step, _shown
@@ -99,6 +99,25 @@ def test_reopen_is_refused_when_the_task_has_another_session_than_the_page_showe
     assert world.client.get("/api/items", params={"key": ITEM}).json()["messages"] == []
     # A refused press leaves paused sweeps paused.
     assert _paused(world)
+
+
+@pytest.mark.usefixtures("reopen_on")
+def test_reopen_is_refused_when_the_shown_session_handed_its_work_to_another(world: World) -> None:
+    item_id = _complete(world)
+    conn = db.connect(world.db_path)
+    try:
+        with db.transaction(conn):
+            transfer = store.create_message(conn, "user", "Hand over", {"session_id": SESSION_B}, world.checkout)
+            conn.execute(
+                "INSERT INTO session_handovers (source_session_id, message_id, target_session_id, created_at)"
+                " VALUES (?, ?, ?, ?)", (SESSION_A, transfer["id"], SESSION_B, db.now_iso()),
+            )
+    finally:
+        conn.close()
+    status, body = _take_up(world, item_id, SESSION_A)
+    assert status == 409 and "handed its work to another session" in body["detail"]
+    assert _item_state(world, item_id)["stage"] == "done"
+    assert world.client.get("/api/items", params={"key": ITEM}).json()["messages"] == []
 
 
 @pytest.mark.usefixtures("reopen_on")

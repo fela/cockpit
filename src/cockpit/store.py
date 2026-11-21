@@ -4238,8 +4238,9 @@ def reopen_plainly(conn: sqlite3.Connection, item_id: int, seen_session: str | N
     """The user's Reopen on a finished task (SPEC CONTROL-34): it takes the task up again as a message would
     (CONTROL-28), and when the task has a session, sends it REOPENED_TEXT as the user's message, so the task shows in
     Busy while that is on its way. `seen_session` is the primary session the user's page showed (None for none); a
-    different one now refuses the press, so the message reaches the session shown. Returns {item, send}: `send` is
-    the message to deliver now, or None for a task with no session, which then waits with no next move."""
+    different one now, or a handover that would pass the message on to another, refuses the press, so the message
+    reaches the session shown. Returns {item, send}: `send` is the message to deliver now, or None for a task with no
+    session, which then waits with no next move."""
     with db.transaction(conn):
         item = get_item(conn, item_id)
         # A Close that landed after the page drew Reopen wins: a task closed as not needed has Unarchive.
@@ -4251,6 +4252,15 @@ def reopen_plainly(conn: sqlite3.Connection, item_id: int, seen_session: str | N
             raise Conflict(f"item {item_id} has another session since your page showed it; read it again")
         send = None
         if session_id is not None:
+            from cockpit.handovers import destination
+
+            # After a handover the session's messages go on to the session that took its work over, which the page
+            # did not show.
+            if destination(conn, session_id) != session_id:
+                raise Conflict(
+                    f"item {item_id}'s session handed its work to another session since your page showed it; write the"
+                    " task a message instead"
+                )
             send = create_message(
                 conn, "user", REOPENED_TEXT.format(item_id=item_id), {"session_id": session_id, "item_id": item_id},
                 checkouts_dir,
