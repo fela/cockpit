@@ -12,7 +12,8 @@ How a program finds its session, in order:
 2. Any other program: the session of the program that started it, up the chain; else CLAUDE_CODE_SESSION_ID in
    its environment. Claude's terminal host takes its agent's session.
 3. A program with none, such as Cockpit's server or Codex's app server (which runs every Codex thread in one
-   program, so Codex threads cannot be told apart), is recorded with session_id ''.
+   program, so Codex threads cannot be told apart), is recorded with session_id ''. So is a program whose
+   environment names another instance (COCKPIT_INSTANCE, SPEC SCOPE-7): that instance shows its sessions.
 
 Processor: each program's own time (utime + stime in /proc/PID/stat), in core-seconds. A program that starts and
 ends between two samples is counted through its parent's child-time counters (cutime + cstime), less what the
@@ -49,7 +50,7 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from cockpit import db, parts
+from cockpit import config, db, parts
 
 log = logging.getLogger(__name__)
 
@@ -70,9 +71,11 @@ UUID = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
 CMD_SESSION = re.compile(r"--(?:session-id|resume)[ =](?:\S*/)?(" + UUID + ")")
 FD_SESSION = (
     re.compile(r"/tmp/claude-\d+/[^/]+/(" + UUID + ")/"),
-    re.compile(r"\.claude(?:-[a-z0-9-]+)?/projects/[^/]+/(" + UUID + r")\.jsonl"),
+    re.compile(re.escape(config.CLAUDE_HOME.name) + r"/projects/[^/]+/(" + UUID + r")\.jsonl"),
 )
 ENV_SESSION = re.compile(rb"(?:^|\0)CLAUDE_CODE_SESSION_ID=(" + UUID.encode() + rb")")
+# The instance (SPEC SCOPE-7) a program works for, in its environment: none names the unnamed one.
+ENV_INSTANCE = re.compile(rb"(?:^|\0)COCKPIT_INSTANCE=([^\0]*)")
 # Codex's own program, as the word of its command line that names it: its `codex` command or `codex.js` script, or a
 # binary from its npm packages (`@openai/codex-linux-x64/.../codex-code-mode-host`).
 CODEX_PROGRAM = re.compile(r"(?:^|/)codex(?:\.js)?$|/@openai/codex\b")
@@ -190,6 +193,9 @@ class Program:
     child_ticks: int
     owned: bool  # run by the user
     mine: bool  # the user's own and open to it, so its environ and smaps_rollup can be read
+    # Its environment names another instance (SPEC SCOPE-7): its sessions are that instance's to show, so it finds
+    # none here, and the programs it starts take none from it.
+    foreign: bool
     rss_kb: int = 0
     pss_kb: int | None = None  # the latest smaps_rollup reading; None before the first
     swap_kb: int = 0
@@ -400,11 +406,13 @@ class Sampler:
         prog = Program(
             pid=pid, start=stat.start, ppid=stat.ppid, part="", cmd="", parent=parent_key, comm=stat.comm, own="",
             env=self.session_of(parent) if parent else "", ticks=stat.ticks, child_ticks=stat.child_ticks, owned=mine,
-            mine=mine, looked_at=mono - FLUSH_SECONDS,
+            mine=mine, foreign=False, looked_at=mono - FLUSH_SECONDS,
         )
         environ = self._open(prog)
         self._classify(prog, parent)
-        if not prog.env and prog.mine and prog.part not in (AGENT, MODEL_CALLS, TERMINAL):
+        if prog.foreign:
+            prog.env = ""
+        elif not prog.env and prog.mine and prog.part not in (AGENT, MODEL_CALLS, TERMINAL):
             found = ENV_SESSION.search(environ or b"")
             prog.env = found.group(1).decode() if found else ""
         return prog
@@ -420,7 +428,7 @@ class Sampler:
             part = kind_of(prog.comm, cmd)
         if part == AGENT and parent is not None and parent.part == SERVER:
             part = MODEL_CALLS
-        found = CMD_SESSION.search(cmd) if part == AGENT else None
+        found = CMD_SESSION.search(cmd) if part == AGENT and not prog.foreign else None
         prog.part, prog.cmd = part, cmd[:300]
         if found:
             prog.own = found.group(1)
@@ -429,9 +437,13 @@ class Sampler:
         return (self._read(pid, "cmdline") or b"").replace(b"\0", b" ").decode(errors="replace").strip()
 
     def _open(self, prog: Program) -> bytes | None:
-        """Settles whether the user's program is open to the user, before it is classified: its environ, or None."""
+        """Settles whether the user's program is open to the user, and whether it works for another instance, before it
+        is classified: its environ, or None."""
         prog.mine = prog.owned
-        return self._private(prog, "environ") if prog.owned else None
+        environ = self._private(prog, "environ") if prog.owned else None
+        found = ENV_INSTANCE.search(environ or b"")
+        prog.foreign = environ is not None and (found.group(1).decode(errors="replace") if found else "") != config.INSTANCE
+        return environ
 
     def _reclassify(self, prog: Program, stat: Stat) -> None:
         """The program ran another in its place (same pid and start), such as a shell that ran the tests."""
@@ -444,7 +456,7 @@ class Sampler:
         listed = sessions.get(prog.pid)
         if listed:
             prog.own = listed
-        elif not prog.own and prog.mine and mono - prog.looked_at >= FLUSH_SECONDS:
+        elif not prog.own and prog.mine and not prog.foreign and mono - prog.looked_at >= FLUSH_SECONDS:
             prog.looked_at = mono
             prog.own = self._fd_session(prog)
         if prog.own and prog.parent:
