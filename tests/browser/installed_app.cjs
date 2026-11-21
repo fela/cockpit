@@ -133,9 +133,10 @@ async function main() {
   front.point(running.info.origin);
   let browser = null;
   try {
-    // A saved profile, as a private window cannot install anything.
+    // A saved profile, as a private window cannot install anything. Installing needs the full Chromium: Playwright's
+    // headless shell has no PWA.install.
     const context = await chromium.launchPersistentContext(workFolder("cockpit-installed-profile-"), {
-      executablePath: CHROMIUM, viewport: { width: 1440, height: 900 },
+      executablePath: CHROMIUM, channel: CHROMIUM ? undefined : "chromium", viewport: { width: 1440, height: 900 },
     });
     browser = context;
     await context.setExtraHTTPHeaders({ cookie: `${running.info.name}=${running.info.value}` });

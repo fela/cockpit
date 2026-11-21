@@ -1,9 +1,10 @@
 // Add more (SPEC CONTROL-18). Checks, on the main page at 1280 and 390 px:
-// - the notice after Add names the item and offers Undo and Add more;
-// - Add more opens the Add box on that item, and Enter adds the words to the end of its text;
-// - pressing Add later opens the bare box, without the to-do just added; only a to-do whose Add more words came back
-//   unsent shows there, with Open and Add more; Open shows its row, opened;
-// - under Sessions on no item, a session whose task is done or closed goes by the task's title, marked so.
+// - pressing + after an Add opens the bare box, without the to-do just added; only a to-do whose Add more words came
+//   back unsent shows there, with Open and Add more;
+// - its Add more opens the Add box on that item, and Enter adds the words to the end of its text;
+// - New item instead goes back to a new item, and Open shows the item on the card, its row picked in the list;
+// - among a search's matches, a session on no item whose task is done or closed goes by the task's title, marked so,
+//   and every session on no item says where it came from.
 // Saves screenshots in the work dir.
 //
 // Starts serve_preview.py (this checkout's Cockpit on a synthetic database, fake sessions; README.md says what
@@ -27,7 +28,7 @@ const { chromium } = require(PLAYWRIGHT);
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 // The harness's agent token (tests/conftest.py), and a session of the ended task alone: no open item of the
-// harness lists it, so the page shows it under Sessions on no item.
+// harness lists it, so a search shows it under Sessions on no item.
 const ENDED_SESSION = "44444444-4444-4444-8444-444444444444";
 const AGENT = { authorization: `Bearer ${"t".repeat(40)}`, "x-cockpit-as": "add-more-test", "content-type": "application/json" };
 const ENDED_TITLE = "Tasks export review";
@@ -71,25 +72,38 @@ async function main() {
       page.setDefaultTimeout(15000);
       const errors = [];
       page.on("pageerror", (error) => errors.push(error.message));
-      await page.goto(`${info.origin}/classic`);
+      await page.goto(`${info.origin}/`);
       await page.locator(".layout > .primary").waitFor();
       const dialog = page.locator("#add-box");
+      // The rail's + at laptop width; the phone bar's + on a phone's item screen.
+      const add = page.locator(width < 1000 ? ".phone-add" : ".sidebar-add");
       const title = `Tasks reminder trial ${width}`;
       const item = () => page.evaluate(async (title) => (await (await fetch("/api/state")).json()).items.find((one) => one.title === title) || null, title);
 
-      // The Add sent too soon.
-      await page.locator("#add").click();
+      // The Add sent too soon. The server makes the item once its Undo time has run out.
+      await add.click();
       await page.locator('#add-box textarea[data-key="add:new"]').fill(`${title}\nwith completed tasks and`);
       await page.keyboard.press("Enter");
-      const notice = page.locator("#toast");
-      const words = await notice.innerText();
-      check(`${width} px: the notice names the new item and offers Undo and Add more`,
-        words.includes(`Added: ${title}`) && (await notice.locator("button", { hasText: "Undo" }).count()) === 1
-          && (await notice.locator("button.toast-more", { hasText: "Add more" }).count()) === 1, words);
-      // Add more from the notice sends the Add at once: the box opens on the item, and the rest joins its text.
-      await notice.locator("button.toast-more").click();
-      const made = await waitFor(item, Boolean);
+      const made = await waitFor(item, Boolean, 15000);
       check(`${width} px: the item exists`, made !== null, "no item");
+
+      // Later: the Add box opens bare; the to-do just added is not repeated above the text box.
+      await add.click();
+      await page.locator('#add-box textarea[data-key="add:new"]').waitFor();
+      check(`${width} px: the Add box does not repeat the to-do just added`, (await page.locator("#add-box .add-recent").count()) === 0, "line shown");
+      await page.keyboard.press("Escape");
+      // Add more words that came back unsent keep their to-do on offer, with Open and Add more.
+      const unsent = () => page.evaluate((id) => ui.drafts.set(addMoreKey(id), "words that did not go"), made.id);
+      await unsent();
+      await add.click();
+      const recent = page.locator("#add-box .add-recent");
+      await recent.waitFor();
+      const line = await recent.innerText();
+      check(`${width} px: the Add box offers the to-do with unsent words`,
+        line.includes("Your unsent words for") && line.includes(title) && line.includes("Open") && line.includes("Add more"), line);
+      await page.screenshot({ path: path.join(work, `add-recent-${width}-${scheme}.png`) });
+      // Its Add more opens the box on the item, and the words typed there join the end of its text.
+      await recent.locator("button", { hasText: "Add more" }).click();
       const more = page.locator('#add-box textarea[aria-label="More words"]');
       await more.waitFor();
       const heading = await page.locator("#add-box h2").innerText();
@@ -103,40 +117,31 @@ async function main() {
       await more.fill("a list selector");
       await more.press("Enter");
       check(`${width} px: Enter adds the words and closes the box`, await dialog.isHidden(), "still open");
-      const joined = await waitFor(item, (one) => one && one.summary.endsWith("\n\na list selector"));
+      const joined = await waitFor(item, (one) => one && one.summary.endsWith("\n\na list selector"), 3000);
       check(`${width} px: the words join the end of the item's text`, joined && joined.summary === `${title}\nwith completed tasks and\n\na list selector`,
         joined && JSON.stringify(joined.summary));
 
-      // Later: the Add box opens bare; the to-do just added is not repeated above the text box.
-      await page.locator("#add").click();
-      await page.locator('#add-box textarea[data-key="add:new"]').waitFor();
-      check(`${width} px: the Add box does not repeat the to-do just added`, (await page.locator("#add-box .add-recent").count()) === 0, "line shown");
-      await page.keyboard.press("Escape");
-      // Add more words that came back unsent keep their to-do on offer, with Open and Add more.
-      await page.evaluate((id) => ui.drafts.set(addMoreKey(id), "words that did not go"), made.id);
-      await page.locator("#add").click();
-      const recent = page.locator("#add-box .add-recent");
+      // New item instead goes back to a new item, which offers the to-do again; its Open shows the item.
+      await unsent();
+      await add.click();
       await recent.waitFor();
-      const line = await recent.innerText();
-      check(`${width} px: the Add box offers the to-do with unsent words`,
-        line.includes("Your unsent words for") && line.includes(title) && line.includes("Open") && line.includes("Add more"), line);
-      await page.screenshot({ path: path.join(work, `add-recent-${width}-${scheme}.png`) });
       await recent.locator("button", { hasText: "Add more" }).click();
-      check(`${width} px: its Add more opens the box on it`, (await page.locator("#add-box h2").innerText()) === title, "other heading");
       await page.locator("#add-box .add-head .link-button").click();
       check(`${width} px: New item instead goes back to a new item`, await page.locator('#add-box textarea[data-key="add:new"]').isVisible(), "no new-item box");
       await page.locator("#add-box .add-recent button", { hasText: "Open" }).click();
       check(`${width} px: Open closes the box`, await dialog.isHidden(), "still open");
-      const shown = await waitFor(() => page.evaluate((id) => {
-        const row = document.querySelector(`#work .row[data-item="${id}"]`);
-        if (!row) return null;
-        const box = row.getBoundingClientRect();
-        return { open: row.classList.contains("open"), inView: box.top >= 0 && box.top < window.innerHeight };
-      }, made.id), (value) => value && value.open && value.inView);
-      check(`${width} px: Open shows the item's row, opened, on screen`, shown && shown.open && shown.inView, JSON.stringify(shown));
+      // The card shows the item, and at laptop width its row in the list at the left is picked and on screen.
+      const shown = await waitFor(() => page.evaluate(({ id, title }) => {
+        const row = document.querySelector(`#sidebar li.side-item[data-item="${id}"]`);
+        const box = row ? row.getBoundingClientRect() : null;
+        return { picked: Boolean(row && row.classList.contains("sel")), card: document.getElementById("next").textContent.includes(title),
+          inView: Boolean(box) && box.height > 0 && box.top >= 0 && box.bottom <= window.innerHeight };
+      }, { id: made.id, title }), (value) => value.card && (width < 1000 || (value.picked && value.inView)), 3000);
+      check(`${width} px: Open shows the item on the card${width < 1000 ? "" : ", its row picked and on screen"}`,
+        shown.card && (width < 1000 || (shown.picked && shown.inView)), JSON.stringify(shown));
 
-      //: a session whose task ended goes by the task's title, marked done or closed.
-      // The page gets the ended task's session as a stopped one the user started today, and the sweep's.
+      // Sessions on no item show among a search's matches below the card. The page gets the ended task's session as a
+      // stopped one the user started today, and the sweep's; both names hold "check", which the search looks for.
       const ended = await page.evaluate(({ sessionId, endedTitle }) => {
         const done = [...ui.state.items, ...ui.state.ended_items].find((one) => one.title === endedTitle);
         const base = { ...ui.state.sessions[0], alive: false, pid: null, is_sweep: false, started: null };
@@ -144,17 +149,20 @@ async function main() {
           { ...base, session_id: sessionId, name: "Please check whether Tasks exports preserve weekly reminders",
             started: { author: "user", new_name: "Tasks export reminders", item_id: done.id, created_at: new Date().toISOString() } },
           { ...base, session_id: "sweep-example", name: "cockpit check sweep", is_sweep: true }] };
-        render(false);
+        setFind("check", false, null, true);
+        document.querySelector("#work .group.loose")?.scrollIntoView({ block: "start" });
         const rows = [...document.querySelectorAll("#work .session-row")].filter((row) => row.querySelector(".ended-chip"));
         const titles = new Set(ui.state.items.map((one) => one.title));
+        const origins = [...document.querySelectorAll("#work .group.loose .session-row")].map((row) => ({
+          title: row.querySelector(".row-title").textContent, origin: (row.querySelector(".session-origin") || {}).textContent || "" }));
         return { done: done.title, count: rows.length, named: rows.every((row) => titles.has(row.querySelector(".row-title").textContent)),
-          chips: [...new Set(rows.map((row) => row.querySelector(".ended-chip").textContent))] };
+          chips: [...new Set(rows.map((row) => row.querySelector(".ended-chip").textContent))], origins };
       }, { sessionId: ENDED_SESSION, endedTitle: ENDED_TITLE });
+      // A session whose task ended goes by the task's title, marked done or closed.
       check(`${width} px: sessions of ended tasks show the task's title and a done or closed mark`,
         ended.count > 0 && ended.named && ended.chips.every((chip) => chip === "Task done" || chip === "Task closed"), JSON.stringify(ended));
-      //: each session on no item says who started it and what is left to do; the sweep goes by what it is.
-      const origins = await page.evaluate(() => [...document.querySelectorAll("#work .group.loose .session-row")].map((row) => ({
-        title: row.querySelector(".row-title").textContent, origin: (row.querySelector(".session-origin") || {}).textContent || "" })));
+      // Each session on no item says who started it and what is left to do; the sweep goes by what it is.
+      const origins = ended.origins;
       const titled = (title) => origins.find((one) => one.title === title);
       check(`${width} px: every session on no item says where it came from`,
         origins.length > 0 && origins.every((one) => /^(Started|Cockpit's own session)/.test(one.origin)), JSON.stringify(origins));
@@ -163,11 +171,8 @@ async function main() {
         JSON.stringify(origins));
       check(`${width} px: a stopped session of a done task says there is nothing to close`,
         /^Started by you today\. Stopped, with its task finished: nothing to close\.$/.test(titled(ended.done)?.origin || ""), JSON.stringify(titled(ended.done)));
-      const group = page.locator("#work .group.loose").first();
-      if (await group.count()) {
-        await group.scrollIntoViewIfNeeded();
-        await group.screenshot({ path: path.join(work, `loose-${width}-${scheme}.png`) });
-      }
+      // The next refresh of the page's state drops the faked sessions, so the image is taken at once.
+      await page.screenshot({ path: path.join(work, `loose-${width}-${scheme}.png`) });
       check(`${width} px: no page errors`, errors.length === 0, errors.join(" | "));
       await context.close();
     }
@@ -181,9 +186,9 @@ async function main() {
   process.exitCode = failedChecks.length ? 1 : 0;
 }
 
-// The value `read` gives once `ok` holds it, or its last value after 3 s.
-async function waitFor(read, ok) {
-  const end = Date.now() + 3000;
+// The value `read` gives once `ok` holds it, or its last value after `ms`.
+async function waitFor(read, ok, ms) {
+  const end = Date.now() + ms;
   let value = await read();
   while (!ok(value) && Date.now() < end) {
     await sleep(100);

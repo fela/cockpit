@@ -617,7 +617,7 @@
   const FRAMES = "main section, details.group, .list, .closed-list, .sidebar-groups";
   const ACROSS = ".sidebar-groups";
   const FIELDS = "input, textarea, select, [contenteditable]";
-  const LOOSE = ["id", "data-step", "data-item", "data-request", "data-session", "data-glide", "data-key", "data-tip", "data-time"];
+  const LOOSE = ["id", "data-step", "data-item", "data-request", "data-session", "data-warning", "data-glide", "data-key", "data-tip", "data-time"];
   const SCROLL_KEYS = new Set(["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "]);
   // A pointerdown this recent marks the element it hit as the one acted on.
   const ACTED_MS = 1500;
@@ -664,7 +664,7 @@
   }
 
   const kindOf = (animation) => motions.get(animation)?.kind;
-  const live = (animation) => animation.playState !== "finished" && animation.playState !== "idle";
+  const live = (animation) => Boolean(animation) && animation.playState !== "finished" && animation.playState !== "idle";
 
   // A class stays on an element while any animation it was added for runs.
   const holds = new WeakMap();
@@ -1078,7 +1078,7 @@
     for (const [key, frame] of snap.frames) if (frame.el.closest("#next")) snap.frames.delete(key);
   }
 
-  function play(before, carried, ghosts, covered) {
+  function play(before, carried, ghosts, covered, sidebarHeld) {
     const motion = !reduced();
     const after = snapshot(false);
     if (covered) { uncover(before); uncover(after); }
@@ -1132,6 +1132,8 @@
     // Frames go from the height they were seen at to the new one.
     if (motion) {
       for (const [key, frame] of after.frames) {
+        // A scrolled sidebar already holds its row by changing the scrollbar offset.
+        if (sidebarHeld && frame.el.matches(ACROSS)) continue;
         const was = before.frames.get(key);
         const { rect, height } = natural.get(key);
         let seen;
@@ -1223,7 +1225,9 @@
       const y = now.rect.top - nowFrame.rect.top;
       // Whole device pixels: a slide that starts between pixels can show a sliver of what it clips.
       const dx = devicePixel(was.rect.left - wasFrame.rect.left - x);
-      const dy = devicePixel(was.rect.top - wasFrame.rect.top - y);
+      // The anchored sidebar already includes its scroll correction in the new frame position.
+      const beforeFrameTop = sidebarHeld && nowFrame.el.matches(ACROSS) ? nowFrame.rect.top : wasFrame.rect.top;
+      const dy = devicePixel(was.rect.top - beforeFrameTop - y);
       for (const old of carry) if (old.kind === "enter") started.push(resume(now.el, old));
       if (Math.abs(dx) < 1 && Math.abs(dy) < 1) continue;
       if (!near) continue;
@@ -1389,7 +1393,7 @@
 
   // What the page holds still, best first: the field the user types in; what the pointer rests on in the
   // main column, the Next up block under it first; Next up itself while it shows (its first block
-  // below the header when the pointer is elsewhere); what the pointer rests on in the side column;
+  // below the header when the pointer is elsewhere); what the pointer rests on in the list on the left;
   // then, scrolled down, what shows from the top.
   function pickAnchor() {
     const candidates = [];
@@ -1567,6 +1571,33 @@
     });
   }
 
+  // The desktop list scrolls independently of the page. Keep a visible row at
+  // the same point in the list when a poll adds or removes rows above it.
+  function sidebarAnchor() {
+    const list = document.getElementById("sidebar");
+    if (!list?.scrollTop) return null;
+    const { top, bottom } = list.getBoundingClientRect();
+    const rows = ".sidebar-group[open] > .sidebar-list > li:is([data-item], [data-session], [data-glide])";
+    const key = (row) => `${row.closest(".sidebar-group").firstElementChild.dataset.glide}:${keyOf(row)}`;
+    const visible = [];
+    const clipped = [];
+    for (const row of list.querySelectorAll(rows)) {
+      const rect = row.getBoundingClientRect();
+      if (!rect.height || rect.bottom <= top || rect.top >= bottom) continue;
+      const candidates = rect.top >= top && rect.bottom <= bottom ? visible : clipped;
+      candidates.push([key(row), rect.top - top]);
+    }
+    return () => {
+      const current = new Map([...list.querySelectorAll(rows)].map((row) => [key(row), row]));
+      for (const [id, offset] of [...visible, ...clipped]) {
+        const row = current.get(id);
+        if (!row) continue;
+        list.scrollTop += row.getBoundingClientRect().top - list.getBoundingClientRect().top - offset;
+        break;
+      }
+    };
+  }
+
   // Runs `draw` (which redraws the board's sections) and animates the change. It shows
   // the redraw at once on the first paint, on the first one after the tab was hidden,
   // and right after a key press, so keyboard actions stay instant; the scroll position
@@ -1587,6 +1618,7 @@
     if (!document.hidden) wasHidden = false;
     stopHold();
     let anchor = [];
+    let holdSidebar = null;
     let before = null;
     let carried = null;
     let ghosts = [];
@@ -1601,6 +1633,7 @@
       // mid-slide, it would hold the page's scroll to a place the card is only passing through.
       for (const animation of document.getAnimations()) if (animation.id === "beside-slide") animation.finish();
       if (!first) anchor = pickAnchor();
+      if (cause === "poll") holdSidebar = sidebarAnchor();
       if (still) settle();
       else {
         // Measured mid-flight, an element that is still moving starts its next move from where it is seen.
@@ -1614,7 +1647,8 @@
     }
     draw();
     try {
-      const started = before ? play(before, carried, ghosts, covered) : [];
+      holdSidebar?.();
+      const started = before ? play(before, carried, ghosts, covered, holdSidebar !== null) : [];
       // After a Send or close on the card, the next step shows from its top (SPEC UI-64), not where the old one was read.
       const revealed = covered && revealNext();
       if (anchor.length && !revealed) holdAnchor(anchor, started, cause);

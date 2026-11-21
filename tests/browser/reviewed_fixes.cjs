@@ -35,28 +35,30 @@ async function rules(browser) {
     else { enabled.delete(old); enabled.add(rule); }
     await route.fulfill({ contentType: "application/json", body: JSON.stringify({ allow: [...enabled], auto: [], added: true }) });
   });
-  await ruleFunctions(page);
+  for (const rule of ["Bash(a)", "Bash(new)", "Bash(b)"]) enabled.add(rule);
+  await ruleFunctions(page, ["Bash(a)", "Bash(new)", "Bash(b)"]);
+  // The Undos of rules added or changed from blocked calls' cards (PERM-11), pressed one after another.
   await page.evaluate(() => {
-    window.added = changeRules("allow", "Bash(test)", "add", null, null);
-    window.removed = changeRules("allow", "Bash(test)", "remove", null, null);
-    window.changed = changeRuleBack("allow", "Bash(test)", "Bash(old)");
+    window.removed = removeRule("allow", "Bash(a)");
+    window.changed = changeRuleBack("allow", "Bash(new)", "Bash(old)");
+    window.removedToo = removeRule("allow", "Bash(b)");
   });
   for (let i = 0; requests.length === 0 && i < 100; i++) await page.waitForTimeout(10);
   await page.waitForTimeout(150);
-  assert.deepEqual(requests, ["rules"], "later presses wait for the delayed Add");
+  assert.deepEqual(requests, ["remove"], "later presses wait for the delayed removal");
   release();
-  await page.evaluate(() => Promise.all([added, removed, changed]));
-  assert.deepEqual(requests, ["rules", "remove", "edit"], "all changes reach the server in press order");
+  await page.evaluate(() => Promise.all([removed, changed, removedToo]));
+  assert.deepEqual(requests, ["remove", "edit", "remove"], "all changes reach the server in press order");
   assert.deepEqual([...enabled], ["Bash(old)"]);
   assert.deepEqual(await page.evaluate(() => ui.permissions.allow), ["Bash(old)"]);
   await page.close();
   console.log("ok rule changes wait in press order, including change back");
 }
 
-async function ruleFunctions(page) {
+async function ruleFunctions(page, allow) {
   const app = source("app.js");
   await page.addScriptTag({ content: `
-    const ui = { permissions: { allow: [], auto: [] }, sendCount: 0, busy: new Set(), drafts: new Map() };
+    const ui = { permissions: { allow: ${JSON.stringify(allow)}, auto: [] }, sendCount: 0, busy: new Set(), drafts: new Map() };
     function renderPermissions() {} function refresh() {} function toast() {}
     async function api(method, path, body) {
       const response = await fetch(path, { method, headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
@@ -64,7 +66,7 @@ async function ruleFunctions(page) {
       return response.json();
     }
     ${between(app, "async function run(key, work, success)", "// An undo pressed")}
-    ${between(app, "let ruleChanges =", "function removeRule(")}
+    ${between(app, "let ruleChanges =", "// The page's link to the server")}
   ` });
 }
 
@@ -79,23 +81,23 @@ async function refusedRules(browser) {
       if (requests.length === 1) await held;
       await route.fulfill({ status: 409, contentType: "application/json", body: '{}' });
     });
-    await ruleFunctions(page);
+    await ruleFunctions(page, ["Bash(first)", "Bash(second)"]);
     const shown = await page.evaluate(async (back) => {
-      window.first = changeRules("allow", "Bash(first)", "add", null, null);
+      window.first = removeRule("allow", "Bash(first)");
       await Promise.resolve();
       const immediate = [...ui.permissions.allow];
-      window.second = back ? changeRuleBack("allow", "Bash(first)", "Bash(old)")
-        : changeRules("allow", "Bash(second)", "add", null, null);
+      window.second = back ? changeRuleBack("allow", "Bash(first)", "Bash(old)") : removeRule("allow", "Bash(second)");
       return immediate;
     }, back);
-    assert.deepEqual(shown, ["Bash(first)"], "an unqueued change shows before the server answers");
+    assert.deepEqual(shown, ["Bash(second)"], "an unqueued change shows before the server answers");
     release();
     await page.evaluate(() => Promise.all([first, second]));
-    assert.deepEqual(requests, ["rules", back ? "edit" : "rules"]);
-    assert.deepEqual(await page.evaluate(() => ui.permissions.allow), [], "two refused changes restore the original rules");
+    assert.deepEqual(requests, ["remove", back ? "edit" : "remove"]);
+    assert.deepEqual(await page.evaluate(() => ui.permissions.allow), ["Bash(first)", "Bash(second)"],
+      "two refused changes restore the original rules");
     await page.close();
   }
-  console.log("ok refused adds and change back each roll back to the preceding outcome");
+  console.log("ok refused removals and change back each roll back to the preceding outcome");
 }
 
 async function preferences(browser) {

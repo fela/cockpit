@@ -173,7 +173,7 @@ async function round({ browser, info, agent, user, check, work, how }) {
     let before = "";
     const end = Date.now() + 5000;
     while (Date.now() < end) {
-      const now = await page.evaluate(() => JSON.stringify([...document.querySelectorAll("#next, #queue, #toast")]
+      const now = await page.evaluate(() => JSON.stringify([...document.querySelectorAll("#next, #sidebar, #toast")]
         .map((el) => { const box = el.getBoundingClientRect(); return [box.x, box.y, box.width, box.height]; })));
       if (now === before) return;
       before = now;

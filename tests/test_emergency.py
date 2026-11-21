@@ -569,13 +569,13 @@ def test_each_message_runs_on_the_model_and_effort_the_user_picks(world: World, 
     assert (view["turns"][0]["model"], view["turns"][0]["effort"]) == ("claude-sonnet-5-5", "low")
     assert view["provider"] == "claude" and list(view["options"]) == ["claude"]
     refused = world.client.post("/api/emergency/send", headers=world.user(), json={**seen(world),
-        "text": "second", "account": "work", "provider": "claude", "model": "gpt-6.1-sol", "effort": "low"})
-    assert refused.status_code == 400 and "claude offers no model gpt-6.1-sol" in refused.json()["detail"]
+        "text": "second", "account": "work", "provider": "claude", "model": "gpt-6.2-sol", "effort": "low"})
+    assert refused.status_code == 400 and "claude offers no model gpt-6.2-sol" in refused.json()["detail"]
 
 
 def test_codex_runs_here_only_once_it_is_on(world: World, fake_claude: Path) -> None:
     refused = world.client.post("/api/emergency/send", headers=world.user(), json={**seen(world),
-        "text": "hi", "account": None, "provider": "codex", "model": "gpt-6.1-sol", "effort": "high"})
+        "text": "hi", "account": None, "provider": "codex", "model": "gpt-6.2-sol", "effort": "high"})
     assert refused.status_code == 400 and "codex is not enabled" in refused.json()["detail"]
 
 
@@ -609,7 +609,7 @@ def test_a_codex_session_starts_a_thread_and_resumes_it(world: World, fake_claud
 
 @pytest.mark.parametrize("speed", ["standard", "fast", "ultrafast"])
 def test_codex_emergency_turns_pass_speed_on_start_and_resume(world, fake_claude, codex_on, speed):
-    codex = {"account": None, "provider": "codex", "model": "gpt-6.1-sol", "effort": "high", "speed": speed}
+    codex = {"account": None, "provider": "codex", "model": "gpt-6.2-sol", "effort": "high", "speed": speed}
     for text in ("first", "second"):
         sent = world.client.post("/api/emergency/send", json={**seen(world), "text": text, **codex}, headers=world.user())
         assert sent.status_code == 200, sent.text
@@ -618,8 +618,8 @@ def test_codex_emergency_turns_pass_speed_on_start_and_resume(world, fake_claude
         args = Path(f"{fake_claude}.codex-args").read_text()
         tier = "default" if speed == "standard" else speed
         assert f'service_tier="{tier}"' in args
-        assert '-m gpt-6.1-sol' in args
-        assert view["turns"][-1]["model"] == "gpt-6.1-sol"
+        assert '-m gpt-6.2-sol' in args
+        assert view["turns"][-1]["model"] == "gpt-6.2-sol"
         if speed != "standard":
             assert "features.fast_mode=true" in args
         if speed == "ultrafast":
@@ -634,7 +634,7 @@ def test_emergency_rejects_an_unsupported_model_speed(world, fake_claude, codex_
 
 
 def test_a_codex_turn_names_no_account_and_a_claude_turn_one(world: World, fake_claude: Path, codex_on: None) -> None:
-    for body in ({"account": "work", "provider": "codex", "model": "gpt-6.1-sol", "effort": "high"},
+    for body in ({"account": "work", "provider": "codex", "model": "gpt-6.2-sol", "effort": "high"},
                  {"account": None, **CLAUDE}):
         refused = world.client.post("/api/emergency/send", json={**seen(world), "text": "hi", **body}, headers=world.user())
         assert refused.status_code == 400 and "names its account" in refused.json()["detail"]

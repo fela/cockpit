@@ -1,14 +1,14 @@
-// Signing a signed-out Claude account in again from the page (SPEC UI-37, UI-40), at 1280 px in the light look and 390
-// px in the dark: the banner at the top names the signed-out account and explains the effect on its sessions; the
-// sign-in key opens Claude's page in a new tab, and the banner itself takes the code (SPEC UI-53), with no dialog over
-// the page: its code field has the focus, has it again when the user comes back to the tab, and keeps it through the
-// page's refreshes; a wrong code is refused with what Claude said and the form goes; the right one signs the account
-// in, says so, and the banner goes. Nothing is wider than the window.
+// Signing a signed-out Claude account in again from the page (SPEC UI-37, UI-40, UI-52), at 1280 px in the light look
+// and 390 px in the dark: a warning row in Inbox names the signed-out account, and its card on Next up explains the
+// effect on its sessions; the sign-in key opens Claude's page in a new tab, and the card itself takes the code (SPEC
+// UI-53), with no dialog over the page: its code field has the focus, has it again when the user comes back to the
+// tab, and keeps it through the page's refreshes; a wrong code is refused with what Claude said and the form goes;
+// the right one signs the account in, says so, and the warning goes. Nothing is wider than the window.
 //
 // Starts serve_preview.py (this checkout's Cockpit on a synthetic database; README.md says what it needs), whose
 // `claude` is tests/fake_claude.py, clears the test account's sign-in the way Claude Code does, and drives a headless
-// Chromium. Prints one line per check, saves the banner at each width as claude-sign-in-<width>.png in the work folder,
-// the banner with its code field as claude-code-<width>.png, and exits 1 when one failed.
+// Chromium. Prints one line per check, saves the warning's card at each width as claude-sign-in-<width>.png in the
+// work folder, the page with its code field as claude-code-<width>.png, and exits 1 when one failed.
 //
 // Usage, from the checkout: node tests/browser/claude_sign_in.cjs
 
@@ -26,8 +26,9 @@ const ROOT = path.resolve(__dirname, "..", "..");
 const PYTHON = path.join(ROOT, ".venv", "bin", "python");
 // tests/fake_claude.py's code that signs in.
 const GOOD_CODE = "good-code#state";
-// The code field on the work account's banner.
-const FIELD = "sign-in:claude:work";
+// The work account's warning, and the code field on its card.
+const WARNING = "claude:work";
+const FIELD = `sign-in:${WARNING}`;
 const { chromium } = require(PLAYWRIGHT);
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -61,10 +62,11 @@ async function main() {
       const page = await context.newPage();
       const errors = [];
       page.on("pageerror", (error) => errors.push(String(error)));
-      await page.goto(`${info.origin}/classic`, { waitUntil: "networkidle" });
+      await page.goto(`${info.origin}/`, { waitUntil: "networkidle" });
       const at = `${width} px ${scheme}`;
-      const banner = page.locator("#banner .warn-card").first();
-      await page.waitForSelector("#banner .warn-card.fail", { timeout: 90e3 });
+      const row = page.locator(`#sidebar li.warn-row[data-warning="${WARNING}"]`);
+      const card = page.locator(`#next [data-warning="${WARNING}"]`);
+      await row.waitFor({ state: "attached", timeout: 90e3 });
       // The fixture may hold the inactivity question, which opens over the page: Return answers it.
       // The page asks it on a one-second timer, so the check waits past a few of its rounds.
       const idle = page.locator("dialog#idle[open]");
@@ -73,16 +75,19 @@ async function main() {
         await idle.locator("button", { hasText: "Return" }).click();
         await page.waitForSelector("dialog#idle:not([open])", { state: "attached" });
       }
-      const words = await banner.textContent();
-      check(words.startsWith("The work Claude account is signed out: its sessions answer \"Login expired\""), `${at}: the top banner says the work account is signed out (${words})`);
+      const short = await row.textContent();
+      check(short.includes("Claude work is signed out"), `${at}: a row in Inbox says the work account is signed out (${short})`);
+      await showWarning(page, row, card);
+      const words = await card.locator(".ask-text").textContent();
+      check(words.startsWith("The work Claude account is signed out: its sessions answer \"Login expired\""), `${at}: its card says the work account is signed out (${words})`);
       check(words.includes("new sessions go to the other account"), `${at}: it says where new sessions go`);
-      await page.locator("#banner").screenshot({ path: path.join(work, `claude-sign-in-${width}.png`) });
-      const [tab] = await Promise.all([context.waitForEvent("page"), banner.locator("button", { hasText: "Sign in to work" }).click()]);
+      await card.screenshot({ path: path.join(work, `claude-sign-in-${width}.png`) });
+      const [tab] = await Promise.all([context.waitForEvent("page"), card.locator("button", { hasText: "Sign in to work" }).click()]);
       await page.waitForSelector(`[data-key="${FIELD}"]`, { timeout: 90e3 });
       await tab.waitForLoadState();
       check(tab.url().startsWith("https://claude.com/cai/oauth/authorize"), `${at}: the new tab opens Claude's page (${tab.url()})`);
-      check(await page.evaluate((field) => Boolean(document.querySelector(`#banner .warn-card [data-key="${field}"]`)) && !document.querySelector("dialog[open]"), FIELD),
-        `${at}: the banner asks for the code, with no dialog over the page`);
+      check(await page.evaluate(([warning, field]) => Boolean(document.querySelector(`#next [data-warning="${warning}"] [data-key="${field}"]`)) && !document.querySelector("dialog[open]"), [WARNING, FIELD]),
+        `${at}: the card asks for the code, with no dialog over the page`);
       check(await codeFocused(page, FIELD), `${at}: the code field has the focus`);
       await page.evaluate(() => { document.activeElement.blur(); window.dispatchEvent(new Event("focus")); });
       check(await codeFocused(page, FIELD), `${at}: back on Cockpit's tab, the code field has the focus again`);
@@ -101,16 +106,17 @@ async function main() {
         () => check(false, `${at}: after a refusal the next try starts over`),
       );
       await tab.close();
-      const [again] = await Promise.all([context.waitForEvent("page"), page.locator("#banner button", { hasText: "Sign in to work" }).click()]);
+      await showWarning(page, row, card);
+      const [again] = await Promise.all([context.waitForEvent("page"), card.locator("button", { hasText: "Sign in to work" }).click()]);
       await page.waitForSelector(`[data-key="${FIELD}"]`, { timeout: 90e3 });
       await again.close();
       await page.fill(`[data-key="${FIELD}"]`, GOOD_CODE);
-      await page.locator("#banner .sign-in-form button", { hasText: /^Sign in$/ }).click();
+      await card.locator(".sign-in-form button", { hasText: /^Sign in$/ }).click();
       await page.waitForFunction(() => [...document.querySelectorAll(".toast")].some((el) => el.textContent.startsWith("Signed in to the work account")), null, { timeout: 90e3 });
       check(true, `${at}: the right code signs the account in and says so`);
-      await page.waitForFunction(() => !document.querySelector("#banner").textContent.includes("Claude account is signed out"), null, { timeout: 90e3 }).then(
-        () => check(true, `${at}: the banner goes once the account is signed in`),
-        () => check(false, `${at}: the banner goes once the account is signed in`),
+      await page.waitForFunction((warning) => !document.querySelector(`#sidebar li.warn-row[data-warning="${warning}"], #next [data-warning="${warning}"]`), WARNING, { timeout: 90e3 }).then(
+        () => check(true, `${at}: the warning goes once the account is signed in`),
+        () => check(false, `${at}: the warning goes once the account is signed in`),
       );
       wide = await overflow(page);
       check(wide.px <= 0, `${at}: nothing wider than the window (${wide.px} px over${wide.by})`);
@@ -127,6 +133,15 @@ async function main() {
   }
   console.error(`${failures} failed; work dir ${work}`);
   process.exitCode = failures ? 1 : 0;
+}
+
+// The warning's card on Next up: a red warning takes the card when nothing else is picked; otherwise its row in Inbox
+// opens it, on a phone from the list screen the bar's "Your items" opens.
+async function showWarning(page, row, card) {
+  if (await card.isVisible()) return;
+  if (!(await row.isVisible())) await page.locator(".phone-back").click();
+  await row.locator(".side-row").click();
+  await card.waitFor({ state: "visible" });
 }
 
 async function codeFocused(page, key) {

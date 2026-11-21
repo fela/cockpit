@@ -54,7 +54,7 @@ async function main() {
     page.on("request", (request) => {
       if (request.url().endsWith("/api/page-errors") && request.method() === "POST") reports.push(JSON.parse(request.postData()));
     });
-    await page.goto(`${info.origin}/classic`);
+    await page.goto(`${info.origin}/`);
     await page.waitForLoadState("networkidle");
     await page.waitForFunction(() => ui.version !== null);
     const queued = await page.evaluate(() => ui.state.queue.length);

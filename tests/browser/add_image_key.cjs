@@ -52,10 +52,10 @@ async function main() {
       page.setDefaultTimeout(5000);
       const errors = [];
       page.on("pageerror", (error) => errors.push(error.message));
-      await page.goto(`${info.origin}/classic`);
+      await page.goto(`${info.origin}/`);
       // The first drawing can take a while on a busy host.
       await page.locator(".layout > .primary").waitFor({ timeout: 30e3 });
-      await page.locator("#add").click({ timeout: 30e3 });
+      await page.locator(width <= 1000 ? ".phone-add" : ".sidebar-add").click({ timeout: 30e3 });
       const area = page.locator('#add-box textarea[data-key="add:new"]');
       await area.waitFor();
 

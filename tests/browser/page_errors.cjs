@@ -69,7 +69,7 @@ async function main() {
     check("the pages load without an error", added.length === 0 && reports.length === 0,
       JSON.stringify(added.map((error) => [error.page, error.place, error.message])));
 
-    await page.goto(`${info.origin}/classic`);
+    await page.goto(`${info.origin}/`);
     await page.waitForLoadState("networkidle");
     reports = [];
     await page.evaluate(() => {
@@ -79,7 +79,7 @@ async function main() {
     await sleep(1000);
     let errors = (await logged()).errors;
     check("an uncaught error reaches the log",
-      errors.some((error) => error.message === "probe: uncaught" && error.place.startsWith("uncaught in") && error.page === "/classic"),
+      errors.some((error) => error.message === "probe: uncaught" && error.place.startsWith("uncaught in") && error.page === "/"),
       JSON.stringify(errors));
     check("an unhandled rejection reaches the log",
       errors.some((error) => error.message === "probe: rejected" && error.place === "unhandled rejection" && error.stack.includes("Error")),

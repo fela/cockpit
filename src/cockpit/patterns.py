@@ -168,7 +168,7 @@ def sweep_times(conn: sqlite3.Connection, days: int, now: datetime) -> dict[str,
     seconds: dict[str, list[int]] = {"full": [], "light": [], "fill": [], "reorder": []}
     since = (now - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
     for event in conn.execute(
-        # By time, so the events_at index serves it rather than a scan of the whole log.
+        # By kind and time, so the events_kind_at index reads only the sweep events in the window.
         "SELECT kind, at, data FROM events WHERE at >= ? AND kind IN ('sweep.started', 'sweep.finished') ORDER BY at, id",
         (since,),
     ).fetchall():

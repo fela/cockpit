@@ -1,10 +1,12 @@
-// The user takes a ready-next step to the top of their queue (NEXT-36). Checks, at laptop and phone width:
-// - every ready-next row shows "Take it", and the page has no sideways scroll;
-// - its tooltip says which step gives up its place;
-// - pressing it puts the step first in the queue on Cockpit and as Next up on the page, and the weakest queue step the
-//   user did not work on waits in Ready next, while a weaker one the user started and paused stays, on the page before
-//   the server answers too;
-// - T on a highlighted ready-next row does the same, also while another step's timer runs.
+// The user takes a ready-next step to the top of their queue (NEXT-36). Each step is on its own task, so each has its
+// own row in the list on the left. Checks, at laptop and phone width:
+// - Inbox's "Show N more" row shows the two ready-next steps after its four places, and the page has no sideways scroll;
+// - T on a highlighted ready-next row puts the step first in the queue on Cockpit and as Next up on the page, and the
+//   weakest queue step the user did not work on waits in Ready next, while a weaker one the user started and paused
+//   stays, on the page before the server answers too;
+// - T does the same while another step's timer runs, and that timer stops; at laptop width, where the card shows
+//   the taken step, the timer moves to it (TRACK-8).
+// Then, at laptop width, a take sends the weakest step, a finish step, to Ready next.
 //
 // Starts serve_preview.py (this checkout's Cockpit on a synthetic database; README.md says what it needs) and
 // drives a headless Chromium. Prints one line per check and exits 1 when one failed.
@@ -62,9 +64,10 @@ async function main() {
 
     for (const width of [1440, 390]) {
       const key = `note:take-step-${Date.now()}`;
-      await agent("PUT", "/api/items", { key, title: "Take step test" });
-      const put = (need, score) => agent("POST", "/api/steps", { item_key: key, need, ask: `Take test ${need}`, score, session_id: SESSION_B })
-        .then((answer) => answer.step);
+      const put = async (need, score) => {
+        await agent("PUT", "/api/items", { key: `${key}-${need}`, title: `Take test ${need}` });
+        return (await agent("POST", "/api/steps", { item_key: `${key}-${need}`, need, ask: `Take test ${need}`, score, session_id: SESSION_B })).step;
+      };
       const strong = [];
       for (const n of [0, 1, 2, 3]) strong.push(await put(`strong-${n}-${width}`, 90 - n));
       const weak = await put(`weak-${width}`, 5);
@@ -80,21 +83,15 @@ async function main() {
       const errors = [];
       page.on("pageerror", (error) => errors.push(error.message));
       page.on("console", (message) => { if (message.type() === "error") errors.push(message.text()); });
-      await page.goto(`${info.origin}/classic`);
-      const group = page.locator("details.ready-next");
+      await page.goto(`${info.origin}/`);
+      // A phone page opens on the item screen; the rows are on the list screen.
+      if (width < 600) await page.evaluate(() => setPhoneScreen(true, false));
+      const group = page.locator("#sidebar details.sidebar-group.queue");
       // The first load of the fixture database, and every action on a busy host, can take well over 5 s.
-      await group.locator("summary").click();
-      const rows = group.locator(".step-row");
-      await rows.first().waitFor();
-      const takes = await rows.evaluateAll((list) => list.map((row) => Boolean(row.querySelector("button.take"))));
-      check(`${width}: every ready-next row shows Take it`, takes.length === 2 && takes.every(Boolean), JSON.stringify(takes));
-      const button = group.locator(`.step-row[data-step="${weak.id}"] button.take`);
-      check(`${width}: the button reads "Take it"`, (await button.innerText()).trim() === "Take it", await button.innerText());
-      // The page moves a title into its own tooltip (data-tip) once it is drawn.
-      const title = await button.evaluate((el) => el.getAttribute("title") || el.dataset.tip || "");
-      check(`${width}: its tooltip says a step the user worked on keeps its place`,
-        title.includes("the last step you have not worked on since it took its place waits in Waiting next;")
-        && title.includes("when you worked on all of them, the last one you are not on waits."), title);
+      await openReady(page);
+      const inbox = await inboxSteps(page);
+      check(`${width}: Show more lists the two ready-next steps after the four places`,
+        JSON.stringify(inbox) === JSON.stringify([...strong.map((step) => step.id), weak.id, weaker.id]), JSON.stringify(inbox));
       const overflow = await page.evaluate(() => document.documentElement.scrollWidth - innerWidth);
       check(`${width}: the page has no sideways scroll`, overflow <= 0, `${overflow}px too wide`);
       if (shots) await group.screenshot({ path: path.join(shots, `ready-${width}.png`) });
@@ -130,10 +127,14 @@ async function main() {
       let release;
       const held = new Promise((resolve) => { release = resolve; });
       await page.route("**/take", async (route) => { await held; await route.continue(); });
-      await button.click();
-      await page.waitForFunction((id) => !document.querySelector(`details.ready-next .step-row[data-step="${id}"]`), weak.id);
-      const readyOnPage = await page.evaluate(() => [...document.querySelectorAll("details.ready-next .step-row[data-step]")]
-        .map((row) => Number(row.dataset.step)));
+      const pressed = await pressTake(page, weak.id);
+      check(`${width}: j reaches the ready-next row and T takes it`, pressed, "never highlighted");
+      // The taken step moves up into the four places.
+      await page.waitForFunction((id) => {
+        const at = [...document.querySelectorAll("#sidebar details.sidebar-group.queue li.side-item[data-step]")].map((row) => Number(row.dataset.step)).indexOf(id);
+        return at >= 0 && at < 4;
+      }, weak.id);
+      const readyOnPage = (await inboxSteps(page)).slice(4);
       check(`${width}: before the server answers, the page shows that step in Ready next`,
         readyOnPage.includes(strong[2].id) && !readyOnPage.includes(strong[3].id), JSON.stringify(readyOnPage));
       release();
@@ -146,30 +147,31 @@ async function main() {
       check(`${width}: the page shows the taken step as Next up`, nextOnPage === weak.id, String(nextOnPage));
       if (shots) await page.screenshot({ path: path.join(shots, `taken-${width}.png`) });
 
-      // T on a highlighted ready-next row, while the taken step's timer runs: the new take still leads.
+      // T on a highlighted ready-next row, while the taken step's timer runs: the new take leads and that timer
+      // stops, as showing another item does (leaveTimerFor in app.js). The card shows the new step at laptop width,
+      // so its timer starts there; on a phone the list screen stays up.
       await user("POST", `/api/steps/${weak.id}/timer/start`);
       // The page takes the running timer from its next poll (every 5 s); a click to fetch it would pause the timer.
       await page.waitForFunction((id) => document.querySelector(`#next [data-step="${id}"]`) !== null
         && document.querySelector(`#next [data-step="${id}"].on-clock`) !== null, weak.id, { timeout: 15000 });
-      let found = false;
-      for (let n = 0; n < 60 && !found; n += 1) {
-        await page.keyboard.press("j");
-        found = await page.evaluate((id) => document.querySelector(".keyboard-current")?.dataset.step === String(id), weaker.id);
-      }
+      if (width < 600) await page.evaluate(() => setPhoneScreen(true, false));
+      await openReady(page);
+      const found = await pressTake(page, weaker.id);
       check(`${width}: j reaches the ready-next row`, found, "never highlighted");
       if (found) {
-        await page.keyboard.press("t");
         await sleep(800);
         const [after] = await queueIds();
         check(`${width}: T takes the highlighted step to the top`, after[0] === weaker.id && after[1] === weak.id, JSON.stringify(after));
         const running = (await user("GET", "/api/state")).timer;
-        check(`${width}: the taken step's timer still runs`, running && running.step_id === weak.id, JSON.stringify(running));
+        check(`${width}: the earlier step's timer stops`, !running || running.step_id !== weak.id, JSON.stringify(running));
+        if (width >= 600) check(`${width}: the timer moves to the newly taken step`, running && running.step_id === weaker.id, JSON.stringify(running));
         const next = await page.evaluate(() => Number(document.querySelector("#next [data-step]")?.dataset.step));
-        check(`${width}: the page shows it as Next up over the step whose timer runs`, next === weaker.id, String(next));
+        check(`${width}: the page shows it as Next up`, next === weaker.id, String(next));
       }
 
       check(`${width}: no page errors`, errors.length === 0, errors.join(" | "));
-      await user("POST", `/api/steps/${weak.id}/timer/pause`);
+      const timer = (await user("GET", "/api/state")).timer;
+      if (timer) await user("POST", `/api/steps/${timer.step_id}/timer/pause`);
       const [left, waiting] = await queueIds();
       await Promise.all([...left, ...waiting].map((id) => user("POST", `/api/steps/${id}/snooze`, { until: "2099-01-01T08:00:00Z" })));
       await context.close();
@@ -179,9 +181,10 @@ async function main() {
     // as on Cockpit. The queue goes by the sweeper's score only (RANK-18), so a finish step scored 1 is that step.
     {
       const key = `note:take-finish-${Date.now()}`;
-      await agent("PUT", "/api/items", { key, title: "Take finish test" });
-      const put = (need, score) => agent("POST", "/api/steps", { item_key: key, need, ask: `Take test ${need}`, score, session_id: SESSION_B })
-        .then((answer) => answer.step);
+      const put = async (need, score) => {
+        await agent("PUT", "/api/items", { key: `${key}-${need}`, title: `Take test ${need}` });
+        return (await agent("POST", "/api/steps", { item_key: `${key}-${need}`, need, ask: `Take test ${need}`, score, session_id: SESSION_B })).step;
+      };
       const strong = [];
       for (const n of [0, 1, 2]) strong.push(await put(`strong-${n}`, 90 - n));
       const finish = await put("complete", 1);
@@ -190,17 +193,15 @@ async function main() {
       await context.setExtraHTTPHeaders({ cookie: `${info.name}=${info.value}` });
       const page = await context.newPage();
       page.setDefaultTimeout(30000);
-      await page.goto(`${info.origin}/classic`);
-      const group = page.locator("details.ready-next");
-      await group.locator("summary").click();
-      await group.locator(`.step-row[data-step="${weak.id}"] button.take`).waitFor();
+      await page.goto(`${info.origin}/`);
+      await openReady(page);
       // The take's answer waits, so the lists below are the ones the page draws before Cockpit answers.
       let release;
       const held = new Promise((resolve) => { release = resolve; });
       await page.route(`**/api/steps/${weak.id}/take`, async (route) => { await held; await route.continue(); });
-      await group.locator(`.step-row[data-step="${weak.id}"] button.take`).click();
+      check("j reaches the ready-next row and T takes it", await pressTake(page, weak.id), "never highlighted");
       await sleep(300);
-      const shown = await group.locator(".step-row[data-step]").evaluateAll((list) => list.map((row) => Number(row.dataset.step)));
+      const shown = (await inboxSteps(page)).slice(4);
       check("the page sends the weakest step, a finish step, to Ready next on a take", shown.includes(finish.id) && !shown.includes(strong[2].id), JSON.stringify(shown));
       release();
       await sleep(800);
@@ -216,6 +217,32 @@ async function main() {
   const failedChecks = results.filter((result) => !result.ok);
   console.error(failedChecks.length ? `${failedChecks.length} of ${results.length} checks failed` : `all ${results.length} checks passed`);
   process.exitCode = failedChecks.length ? 1 : 0;
+}
+
+// Opens Inbox's "Show N more" row, so the ready-next steps show under its four places.
+async function openReady(page) {
+  const more = page.locator('#sidebar details.sidebar-group.queue li.sidebar-more button[aria-expanded="false"]');
+  await page.locator("#sidebar details.sidebar-group.queue li.sidebar-more").waitFor();
+  if (await more.count()) await more.click();
+  await page.locator('#sidebar details.sidebar-group.queue li.sidebar-more button[aria-expanded="true"]').waitFor();
+}
+
+// The steps of Inbox's rows, in the order the list shows them: the four places, then the ready-next steps.
+function inboxSteps(page) {
+  return page.locator("#sidebar details.sidebar-group.queue li.side-item[data-step]")
+    .evaluateAll((list) => list.map((row) => Number(row.dataset.step)));
+}
+
+// Presses j until the row of `stepId` is highlighted, then T. False when j never reaches the row.
+async function pressTake(page, stepId) {
+  for (let n = 0; n < 60; n += 1) {
+    await page.keyboard.press("j");
+    if (await page.evaluate((id) => document.querySelector(".keyboard-current")?.dataset.step === String(id), stepId)) {
+      await page.keyboard.press("t");
+      return true;
+    }
+  }
+  return false;
 }
 
 async function call(origin, headers, method, url, body) {

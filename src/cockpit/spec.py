@@ -40,6 +40,7 @@ UNESCAPED_PIPE = re.compile(r"(?<!\\)\|")
 # A numbered step, "7. ": a list item of its own, like a "- " item, so a comment or edit lands on that step.
 NUMBERED = re.compile(r"(\d+)\. ")
 GIT_TIMEOUT_SECONDS = 30
+PUSH_TRIES = 3  # a push refused because another session pushed first is tried again after a fresh pull
 
 # One edit at a time: read, check, write and commit happen under this lock.
 _lock = threading.Lock()
@@ -260,7 +261,16 @@ def edit_part(doc: Doc, old: str, new: str, actor: str, now: datetime) -> dict[s
         if not new.strip() and 0 < start < len(lines) and not lines[start - 1].strip() and not lines[start].strip():
             del lines[start]
         text = "\n".join(lines)
-        what = block["label"] if new.strip() else f"{block['label']} (removed)"
+        # Agents add a row by replacing its neighbour with both rows, so the subject names what changed, not the replaced block.
+        before, after = blocks(current, doc.key_prefix), blocks(text, doc.key_prefix)
+        old_texts = {part["text"] for part in before}
+        changed = [part for part in after if part["text"] not in old_texts]
+        if not new.strip():
+            what = f"{block['label']} (removed)"
+        elif len(changed) == 1:
+            what = changed[0]["label"]
+        else:
+            what = _changed_words(before, after)
         return _save(doc, current, text, f"{doc.subject}: {_who(actor)} edited {what} on Cockpit")
 
 
@@ -412,12 +422,17 @@ def _commit(doc: Doc, message: str) -> str | None:
     """
     ok, error = _git(doc.repo, ["commit", "-q", "-m", message, "--", doc.file])
     if ok and doc.branch is not None:
-        try:
-            _pull(doc)
-        except store.Conflict as exc:
-            ok, error = False, str(exc)
-        else:
+        # Another session can push between the pull and the push; the push is refused, and the commit would stay
+        # in the checkout, split from the remote, until the next edit. Pulling again puts it back on top.
+        for _ in range(PUSH_TRIES):
+            try:
+                _pull(doc)
+            except store.Conflict as exc:
+                ok, error = False, str(exc)
+                break
             ok, error = _git(doc.repo, ["push", "-q", "origin", f"HEAD:{doc.branch}"])
+            if ok:
+                break
         if not ok:
             _, sha = _git(doc.repo, ["rev-parse", "--short", "HEAD"])
             error = f"{doc.name} was committed in {doc.repo} as {sha} but not pushed to {doc.branch}: {error}"

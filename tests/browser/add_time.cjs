@@ -77,7 +77,7 @@ async function main() {
       const errors = [];
       page.on("pageerror", (error) => errors.push(error.message));
       page.on("console", (message) => { if (message.type() === "error") errors.push(message.text()); });
-      await page.goto(`${info.origin}/classic`);
+      await page.goto(`${info.origin}/`);
       const clockButton = page.locator('#next .step-menu [data-timer="running"]');
       await clockButton.waitFor({ state: "attached" });
       // The clock is in the card's ⋯ menu (VIEW-29), which opens first.

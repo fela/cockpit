@@ -105,12 +105,14 @@ async function main() {
         page.setDefaultNavigationTimeout(60000);
         const errors = [];
         page.on("pageerror", (error) => errors.push(error.message));
-        await page.goto(`${info.origin}/classic`);
-        const card = (id) => page.locator(`[data-step="${id}"]:visible`).first();
-        // Next up shows its body; a queue row opens on its title.
+        await page.goto(`${info.origin}/`);
+        const card = (id) => page.locator(`#next [data-step="${id}"]`).first();
+        // The step's row in Your queue opens it on the card. On a phone the list and the card are two screens, so the
+        // phone bar's back key shows the list first.
         const opened = async (id) => {
-          await card(id).waitFor();
-          if (!(await card(id).locator(".prose.body").count())) await card(id).locator(".row-title").first().click();
+          const back = page.locator(".phone-back:visible");
+          if (await back.count()) await back.click();
+          await page.locator(`#sidebar .sidebar-group.queue li[data-step="${id}"] > .side-row`).click();
           await card(id).locator(".prose.body").first().waitFor();
           return card(id);
         };
@@ -159,12 +161,12 @@ async function main() {
         }, main.id);
         check(`${at}: Tab from the last chip reaches Other`, onOther === true, `focus on ${onOther}`);
         await page.keyboard.press("Enter");
-        const isOpen = () => page.locator(`[data-step="${main.id}"]:visible .links-other`).first().evaluate((el) => el.open);
+        const isOpen = () => card(main.id).locator(".links-other").first().evaluate((el) => el.open);
         check(`${at}: Enter opens Other`, await isOpen(), "closed");
         await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
         await sleep(800);
         check(`${at}: a redraw keeps Other open`, await isOpen(), "closed");
-        const list = page.locator(`[data-step="${main.id}"]:visible .links-other > .menu-list`).first();
+        const list = card(main.id).locator(".links-other > .menu-list").first();
         // On a phone the list is a sheet inside the window; on a desktop it drops from its chip, as the ⋯ menu does, and
         // may reach below the window's bottom, which the page scrolls to.
         const box = await list.boundingBox();

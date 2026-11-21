@@ -13,6 +13,7 @@ import sys
 import time
 from collections.abc import Generator, Iterator
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +24,7 @@ from fastapi.testclient import TestClient
 from cockpit import accounts, auth, codex, config, db, delivery, github, parts, permissions, sessions, spend
 from cockpit.app import Settings, create_app
 from cockpit.sessions import Listing, Session
+from cockpit.views import read as read_view
 
 # The tests' setup file (SPEC SCOPE-5) uses EMAIL for the account that signs in.
 config.SETUP_PATH = Path(__file__).parent / "setup.toml"
@@ -116,7 +118,28 @@ class FakeRunner:
     def __call__(self, account: config.Account, args: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
         self.calls.append((args, cwd))
         self.accounts.append(account.name)
+        if self.returncode == 0 and args[:3] == ["claude", "--bg", "--resume"] and "--fork-session" not in args:
+            write_prompt(args[3], args[-1])
         return subprocess.CompletedProcess(args, self.returncode, stdout=self.output, stderr="")
+
+
+def write_prompt(session_id: str, prompt: str) -> None:
+    """Add `prompt` to the session's transcript as the prompt that starts its next turn, as a resumed session does.
+    A slash command such as `/effort` starts no turn: the transcript gets its output instead, as a background
+    session writes it."""
+    paths = list(sessions.PROJECTS_DIR.glob(f"*/{session_id}.jsonl"))
+    path = paths[0] if paths else sessions.PROJECTS_DIR / "-home-x" / f"{session_id}.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    now = datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+    if prompt.startswith("/"):
+        entry = {
+            "type": "user", "userType": "external", "entrypoint": "cli", "sessionKind": "bg", "timestamp": now,
+            "message": {"role": "user", "content": f"<local-command-stdout>Ran {prompt}</local-command-stdout>"},
+        }
+    else:
+        entry = {"type": "user", "message": {"role": "user", "content": prompt}, "timestamp": now}
+    with path.open("a") as handle:
+        handle.write(json.dumps(entry) + "\n")
 
 
 @dataclass
@@ -175,6 +198,9 @@ def transcripts(monkeypatch, tmp_path: Path) -> Path:
     folder = tmp_path / "projects"
     monkeypatch.setattr(sessions, "PROJECTS_DIR", folder)
     monkeypatch.setattr(sessions, "_usages", {})
+    monkeypatch.setattr(sessions, "_error_stops", {})
+    # Tests write a session's transcript right after looking for it; tests of the listing itself set their own time.
+    monkeypatch.setattr(sessions, "TRANSCRIPTS_SECONDS", -1)
     return folder
 
 
@@ -569,7 +595,7 @@ def world(tmp_path: Path, migrated_db: Path, spec_template: Path, app_parts) -> 
 
     # The app is built before the test starts, so its startup (opening the database, failing messages a restart left
     # mid-delivery) runs on the fixture's state and not on what the test then writes.
-    client = TestClient(create_app(settings, deliverer, cache, spend_index, codex_index, app_parts), base_url=ORIGIN)
+    client = TestClient(create_app(settings, deliverer, cache, spend_index, codex_index, app_parts, read_view), base_url=ORIGIN)
     client.cookies.set(auth.SESSION_COOKIE, auth.session_cookie_value(COOKIE_KEY, EMAIL, expires))
     return World(
         settings, client, settings.db_path, cache, runner, deliverer, checkout, exchange_result, spec_repo, claude_settings,

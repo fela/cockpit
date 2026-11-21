@@ -90,8 +90,11 @@ async function main() {
     const errors = [];
     page.on("pageerror", (error) => errors.push(error.message));
     page.on("console", (message) => { if (message.type() === "error") errors.push(message.text()); });
-    await page.goto(`${info.origin}/classic`);
-    const card = page.locator(`[data-step="${id}"]`).first();
+    await page.goto(`${info.origin}/`);
+    // Picks the step's item in the list at the left, so the card shows the step.
+    await page.locator(`#sidebar li[data-item="${answer.step.item_id}"]`).waitFor({ state: "attached" });
+    await page.evaluate((itemId) => showInSidebar(itemId), answer.step.item_id);
+    const card = page.locator(`#next [data-step="${id}"]`).first();
     // The history sits folded under the step (NEXT-52); open it.
     await card.locator(".fold-all > summary").click();
     await card.locator("section.history .hist-entry.current").waitFor();
@@ -148,7 +151,7 @@ async function main() {
 // for the current entry's age and each added one its green's opacity, its text's contrast on what is behind it
 // (every background from the page down, painted in order), and how many px it reaches left of the history.
 function measure({ stepId, minutes }) {
-  const history = document.querySelector(`[data-step="${stepId}"] section.history`);
+  const history = document.querySelector(`#next [data-step="${stepId}"] section.history`);
   const list = history.querySelector(".hist-list");
   const left = history.getBoundingClientRect().left;
   const probe = document.createElement("canvas").getContext("2d", { willReadFrequently: true });

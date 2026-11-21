@@ -9,7 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from cockpit import config, db, delivery
+from cockpit import config, db, delivery, parts, sweeper
 from cockpit.codex_agent import AppServer, CodexAgent, CodexError, ProviderSessions
 from tests.conftest import SESSION_B
 
@@ -108,6 +108,55 @@ def test_codex_messages_use_the_shared_queue_and_keep_thread_identity(world, age
     assert sum(method == "thread/start" for method, _ in agent.rpc.calls) == 1
 
 
+def test_sweeper_leaves_limited_claude_reuses_codex_and_returns_to_opus(world, agent, monkeypatch):
+    available = {"claude": True, "codex": True}
+    monkeypatch.setattr(parts, "provider_availability", lambda conn, now: available)
+    world.deliverer.short_id_to_uuid = lambda account, short_id: "new-opus-session"
+    first = world.client.post("/api/update", headers=world.user()).json()
+    assert first["provider"] == "claude"  # delivery's default provider is Codex in this fixture
+    assert world.runner.calls[-1][0][2:6] == ["--model", config.MAIN_MODEL, "--effort", "high"]
+    monkeypatch.setattr(sweeper.sessions, "last_answer", lambda sid, since: (since, False) if sid == "new-opus-session" else None)
+    monkeypatch.setattr(sweeper.sessions, "limit_stop", lambda sid: object())
+    available["claude"] = False
+    fallback = world.client.post("/api/update", headers=world.user()).json()
+    assert fallback["provider"] == "codex" and fallback["session_id"] is None
+    start = next(params for method, params in agent.rpc.calls if method == "thread/start")
+    assert start["model"] == "gpt-6.2-sol" and start["serviceTier"] == "default"
+    assert start["config"]["model_reasoning_effort"] == "high"
+    world.cache.sessions = agent.sessions()
+    # Provider recovery cannot replace a sweep that is still starting or running.
+    available["claude"] = True
+    assert world.client.post("/api/update", headers=world.user()).status_code == 409
+    available["claude"] = False
+    finish(agent)
+    monkeypatch.setattr(sweeper.sessions, "last_answer", lambda sid, since: None)
+    started = world.client.post("/api/sweeps/start", json={"reorder": False}, headers=world.agent()).json()
+    world.client.post("/api/sweeps/finish", json={"sweep_id": started["id"], "summary": "done", "error": ""},
+                      headers=world.agent())
+    resumed = world.client.post("/api/update", headers=world.user()).json()
+    assert resumed["provider"] == "codex" and resumed["session_id"] == SESSION_B
+    assert sum(method == "thread/start" for method, _ in agent.rpc.calls) == 1
+    finish(agent)
+    started = world.client.post("/api/sweeps/start", json={"reorder": False}, headers=world.agent()).json()
+    world.client.post("/api/sweeps/finish", json={"sweep_id": started["id"], "summary": "done", "error": ""},
+                      headers=world.agent())
+    available["claude"] = True
+    recovered = world.client.post("/api/update", headers=world.user()).json()
+    assert recovered["provider"] == "claude" and recovered["session_id"] is None
+    assert world.runner.calls[-1][0][2:6] == ["--model", config.MAIN_MODEL, "--effort", "high"]
+
+
+@pytest.mark.parametrize("model,usable", [("gpt-6.2-sol", True), ("gpt-6-luna", False)])
+def test_codex_sweeper_validates_its_own_model(world, agent, model, usable):
+    sid = agent.start(world.checkout, "Cockpit sweep", "hello", model, "high", "standard")
+    conn = db.connect(world.db_path)
+    try:
+        exists = sweeper.resumable(conn, agent.owns, lambda sid: config.MAIN_MODEL)
+        assert exists(sid) is usable
+    finally:
+        conn.close()
+
+
 def test_a_new_codex_session_runs_on_the_model_and_effort_the_user_picked(world, agent):
     # SPEC SESSION-22: the picks reach the thread, and a resume after a restart keeps them.
     response = world.client.post("/api/messages", json={"text": "hello", "target": {
@@ -136,11 +185,11 @@ def test_codex_speed_reaches_start_and_survives_restart(world, agent, speed, tie
     assert response.status_code == 200, response.text
     [started] = [params for method, params in agent.rpc.calls if method == "thread/start"]
     assert started["serviceTier"] == tier
-    assert started["model"] == "gpt-6.1-sol"
+    assert started["model"] == "gpt-6.2-sol"
     conn = db.connect(world.db_path)
     try:
         chosen = conn.execute("SELECT model, speed FROM codex_threads WHERE session_id = ?", (SESSION_B,)).fetchone()
-        assert tuple(chosen) == ("gpt-6.1-sol", speed)
+        assert tuple(chosen) == ("gpt-6.2-sol", speed)
     finally:
         conn.close()
     finish(agent)
@@ -159,7 +208,7 @@ def test_codex_speed_reaches_start_and_survives_restart(world, agent, speed, tie
     ("claude", "claude-opus-5-5", "fast"),
     ("codex", "gpt-6-luna", "ultrafast"),
     ("codex", "gpt-6.1-terra", "ultrafast"),
-    ("codex", "gpt-6.1-sol", "turbo"),
+    ("codex", "gpt-6.2-sol", "turbo"),
 ])
 def test_speed_is_validated_for_the_provider_and_model(world, agent, provider, model, speed):
     response = world.client.post("/api/messages", json={"text": "hello", "target": {
@@ -203,7 +252,7 @@ def test_codex_dropping_requested_speed_fails_before_sending_a_prompt(world, age
 
 
 def test_saved_threads_resume_after_restart_and_send_now_interrupts(world, agent):
-    agent.start(world.checkout, "test", "hello", "gpt-6.1-sol", "high", "standard")
+    agent.start(world.checkout, "test", "hello", "gpt-6.2-sol", "high", "standard")
     finish(agent)
     restarted = CodexAgent(world.db_path)
     restarted.rpc = FakeRpc(restarted)
@@ -217,7 +266,7 @@ def test_saved_threads_resume_after_restart_and_send_now_interrupts(world, agent
 
 def test_an_update_restarts_the_app_server_once_no_turn_needs_it(world, agent):
     # SPEC SESSION-15: new threads and messages run on the Codex version installed, not the one Cockpit started.
-    agent.start(world.checkout, "test", "hello", "gpt-6.1-sol", "high", "standard")
+    agent.start(world.checkout, "test", "hello", "gpt-6.2-sol", "high", "standard")
     agent.rpc.updated = True
     with pytest.raises(CodexError, match="still working"):
         agent.send(SESSION_B, "too soon")
@@ -230,7 +279,7 @@ def test_an_update_restarts_the_app_server_once_no_turn_needs_it(world, agent):
 
 def test_a_turn_cockpit_stopped_during_shows_failed_after_restart(world, agent):
     # the turn's state stays 'working' when Cockpit is killed before the disconnect event.
-    agent.start(world.checkout, "test", "hello", "gpt-6.1-sol", "high", "standard")
+    agent.start(world.checkout, "test", "hello", "gpt-6.2-sol", "high", "standard")
     restarted = CodexAgent(world.db_path)
     restarted.rpc = FakeRpc(restarted)
     from cockpit.codex_agent import mark_interrupted
@@ -246,7 +295,7 @@ def test_a_turn_cockpit_stopped_during_shows_failed_after_restart(world, agent):
 
 
 def test_approvals_require_the_user_and_are_bound_to_the_live_rpc_request(world, agent):
-    agent.start(world.checkout, "test", "hello", "gpt-6.1-sol", "high", "standard")
+    agent.start(world.checkout, "test", "hello", "gpt-6.2-sol", "high", "standard")
     agent.event({"id": "approval1", "method": "item/commandExecution/requestApproval", "params": {
         "threadId": SESSION_B, "turnId": "turn1", "itemId": "cmd1", "command": "git push"}})
     request = agent.requests()[0]
@@ -259,7 +308,7 @@ def test_approvals_require_the_user_and_are_bound_to_the_live_rpc_request(world,
 
 
 def test_each_request_for_approval_and_its_answer_is_logged(world, agent):
-    agent.start(world.checkout, "test", "hello", "gpt-6.1-sol", "high", "standard")
+    agent.start(world.checkout, "test", "hello", "gpt-6.2-sol", "high", "standard")
     agent.event({"id": "approval1", "method": "item/commandExecution/requestApproval", "params": {
         "threadId": SESSION_B, "turnId": "turn1", "itemId": "cmd1", "command": "git push"}})
     command = agent.requests()[0]["id"]
@@ -288,7 +337,7 @@ def test_each_request_for_approval_and_its_answer_is_logged(world, agent):
 
 
 def test_auto_review_decides_escalations_and_each_verdict_is_logged(world, agent):
-    agent.start(world.checkout, "test", "hello", "gpt-6.1-sol", "high", "standard")
+    agent.start(world.checkout, "test", "hello", "gpt-6.2-sol", "high", "standard")
     started = next(params for method, params in agent.rpc.calls if method == "thread/start")
     assert started["approvalsReviewer"] == "auto_review"
     agent.event({"method": "item/autoApprovalReview/completed", "params": {
@@ -306,7 +355,7 @@ def test_auto_review_decides_escalations_and_each_verdict_is_logged(world, agent
 
 
 def test_questions_and_permission_grants_do_not_expand_the_request(world, agent):
-    agent.start(world.checkout, "test", "hello", "gpt-6.1-sol", "high", "standard")
+    agent.start(world.checkout, "test", "hello", "gpt-6.2-sol", "high", "standard")
     agent.event({"id": 12, "method": "item/tool/requestUserInput", "params": {
         "threadId": SESSION_B, "questions": [{"id": "choice", "question": "Which one?"}]}})
     key = agent.requests()[0]["id"]
@@ -322,7 +371,7 @@ def test_questions_and_permission_grants_do_not_expand_the_request(world, agent)
 
 
 def test_disconnect_and_turn_end_clear_stale_approvals(world, agent):
-    agent.start(world.checkout, "test", "hello", "gpt-6.1-sol", "high", "standard")
+    agent.start(world.checkout, "test", "hello", "gpt-6.2-sol", "high", "standard")
     agent.event({"id": 1, "method": "item/fileChange/requestApproval", "params": {"threadId": SESSION_B}})
     agent.event({"method": "serverRequest/resolved", "params": {"threadId": SESSION_B, "requestId": 1}})
     assert agent.requests() == []
@@ -335,7 +384,7 @@ def test_disconnect_and_turn_end_clear_stale_approvals(world, agent):
 
 
 def test_provider_cache_needs_no_claude_when_only_codex_is_enabled(world, agent):
-    agent.start(world.checkout, "test", "hello", "gpt-6.1-sol", "high", "standard")
+    agent.start(world.checkout, "test", "hello", "gpt-6.2-sol", "high", "standard")
     cache = ProviderSessions(None, agent)
     listing = cache.snapshot(wait=False)
     assert [s.provider for s in listing.sessions] == ["codex"]
@@ -343,7 +392,7 @@ def test_provider_cache_needs_no_claude_when_only_codex_is_enabled(world, agent)
 
 
 def test_turn_response_before_notification_is_already_busy(world, agent):
-    agent.start(world.checkout, "test", "hello", "gpt-6.1-sol", "high", "standard")
+    agent.start(world.checkout, "test", "hello", "gpt-6.2-sol", "high", "standard")
     finish(agent)
     real_request = agent.rpc.request
 
@@ -360,7 +409,7 @@ def test_turn_response_before_notification_is_already_busy(world, agent):
 
 
 def test_fast_turn_completion_before_response_stays_done(world, agent):
-    agent.start(world.checkout, "test", "hello", "gpt-6.1-sol", "high", "standard")
+    agent.start(world.checkout, "test", "hello", "gpt-6.2-sol", "high", "standard")
     finish(agent)
     real_request = agent.rpc.request
 
@@ -400,7 +449,7 @@ def test_failed_first_turn_retry_continues_the_created_thread(world, agent):
 
 
 def test_a_failed_state_write_before_the_turn_leaves_the_thread_free(world, agent):
-    agent.start(world.checkout, "test", "hello", "gpt-6.1-sol", "high", "standard")
+    agent.start(world.checkout, "test", "hello", "gpt-6.2-sol", "high", "standard")
     finish(agent)
     real_save = agent._save
 
@@ -416,7 +465,7 @@ def test_a_failed_state_write_before_the_turn_leaves_the_thread_free(world, agen
 
 
 def test_two_turns_that_end_within_one_second_are_both_kept(world, agent):
-    agent.start(world.checkout, "test", "hello", "gpt-6.1-sol", "high", "standard")
+    agent.start(world.checkout, "test", "hello", "gpt-6.2-sol", "high", "standard")
     finish(agent, "First")
     agent.send(SESSION_B, "continue")
     finish(agent, "Second")
@@ -430,7 +479,7 @@ def test_two_turns_that_end_within_one_second_are_both_kept(world, agent):
 
 
 def test_disabling_codex_does_not_reroute_its_thread_to_claude(world, agent):
-    agent.start(world.checkout, "test", "hello", "gpt-6.1-sol", "high", "standard")
+    agent.start(world.checkout, "test", "hello", "gpt-6.2-sol", "high", "standard")
     finish(agent)
     world.deliverer.codex = None
     response = world.client.post("/api/messages", json={"text": "continue", "target": {"session_id": SESSION_B}},
@@ -442,7 +491,7 @@ def test_disabling_codex_does_not_reroute_its_thread_to_claude(world, agent):
 
 def test_the_session_view_shows_a_codex_threads_conversation(world, agent, monkeypatch):
     # the sidebar's session view read only Claude transcripts, so a Codex session showed no conversation.
-    agent.start(world.checkout, "test", "hello", "gpt-6.1-sol", "high", "standard")
+    agent.start(world.checkout, "test", "hello", "gpt-6.2-sol", "high", "standard")
     finish(agent)
     at = 1768471200000  # 2026-01-15T10:00:00Z
     prompt = ("Message from Sam via Cockpit:\nRun the tests\n---\nCockpit context: step 10"
@@ -582,7 +631,7 @@ def synthetic_transport(monkeypatch, on_event):
 @pytest.mark.parametrize("reconnect", [False, True])
 def test_thread_response_followed_by_eof_cannot_restore_loaded_state(world, agent, monkeypatch, method, reconnect):
     if method == "thread/resume":
-        agent.start(world.checkout, "test", "hello", "gpt-6.1-sol", "high", "standard")
+        agent.start(world.checkout, "test", "hello", "gpt-6.2-sol", "high", "standard")
         finish(agent)
         agent.rpc.close()
     agent.rpc, processes = synthetic_transport(monkeypatch, agent.event)
@@ -602,7 +651,7 @@ def test_thread_response_followed_by_eof_cannot_restore_loaded_state(world, agen
     try:
         with pytest.raises(CodexError):
             if method == "thread/start":
-                agent.start(world.checkout, "test", "hello", "gpt-6.1-sol", "high", "standard")
+                agent.start(world.checkout, "test", "hello", "gpt-6.2-sol", "high", "standard")
             else:
                 agent.send(SESSION_B, "continue")
         assert SESSION_B not in agent._loaded
@@ -617,7 +666,7 @@ def test_thread_response_followed_by_eof_cannot_restore_loaded_state(world, agen
 @pytest.mark.parametrize("load_method", ["start", "resume", "loaded"])
 def test_turn_start_uses_the_connection_that_loaded_the_thread(world, agent, monkeypatch, load_method):
     if load_method != "start":
-        agent.start(world.checkout, "test", "hello", "gpt-6.1-sol", "high", "standard")
+        agent.start(world.checkout, "test", "hello", "gpt-6.2-sol", "high", "standard")
         finish(agent)
         agent.rpc.close()
     agent.rpc, processes = synthetic_transport(monkeypatch, agent.event)
@@ -636,7 +685,7 @@ def test_turn_start_uses_the_connection_that_loaded_the_thread(world, agent, mon
     try:
         with pytest.raises(CodexError):
             if load_method == "start":
-                agent.start(world.checkout, "test", "hello", "gpt-6.1-sol", "high", "standard")
+                agent.start(world.checkout, "test", "hello", "gpt-6.2-sol", "high", "standard")
             else:
                 agent.send(SESSION_B, "continue")
         assert processes[1].calls == ["initialize", "initialized"]

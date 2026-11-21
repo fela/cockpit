@@ -1,5 +1,5 @@
 // A move step Cockpit recommends offers "Yes, move it" and "No, let it wait" as one-press answers. On a synthetic
-// database, on /classic at 1440 and 390 px:
+// database, on the main page at 1440 and 390 px:
 // - the card shows both answers in its answer row, and no separate Move button;
 // - "Yes, move it" asks Cockpit to move the session to the step's account (the request is caught, so no session
 //   moves) and hands nothing to a session;
@@ -86,14 +86,16 @@ async function main() {
       });
       const handOffs = [];
       page.on("request", (request) => { if (request.url().includes("/hand-off")) handOffs.push(request.url()); });
-      await page.goto(`${info.origin}/classic`, { timeout: 60000 });
-
-      const card = page.locator(`[data-step="${step.id}"]:visible`).first();
-      await card.waitFor({ timeout: 20000 });
-      if (await card.locator(".row-head .row-title").count()) {
-        if (!(await card.evaluate((el) => el.classList.contains("open")))) await card.locator(".row-head .row-title").click();
-      }
-      await sleep(500);
+      const card = page.locator(`#next [data-step="${step.id}"]`).first();
+      // Loads the page and picks the step's item in the list at the left, so the card shows the step.
+      const open = async () => {
+        await page.goto(`${info.origin}/`, { timeout: 60000 });
+        await page.locator(`#sidebar li[data-item="${step.item_id}"]`).waitFor({ state: "attached", timeout: 20000 });
+        await page.evaluate((itemId) => showInSidebar(itemId), step.item_id);
+        await card.waitFor({ timeout: 20000 });
+        await sleep(500);
+      };
+      await open();
       const answers = await card.locator(".answers .answer:not(.task-done)").allInnerTexts();
       check(`${width} px: the card offers "Yes, move it" and "No, let it wait"`,
         JSON.stringify(answers.map((text) => text.trim())) === JSON.stringify(["Yes, move it", "No, let it wait"]), JSON.stringify(answers));
@@ -109,14 +111,7 @@ async function main() {
       check(`${width} px: "Yes, move it" hands nothing to a session`, handOffs.length === 0, JSON.stringify(handOffs));
 
       // The caught move left the step open; load the page again so the card shows as at first.
-      await page.goto(`${info.origin}/classic`, { timeout: 60000 });
-      await card.waitFor({ timeout: 20000 });
-      await sleep(500);
-      if (!(await card.locator(".answers .answer").count())) {
-        await page.screenshot({ path: path.join(work, `after-yes-${width}.png`) });
-        await card.locator(".row-head .row-title").click();
-        await sleep(500);
-      }
+      await open();
       await card.locator(".answers .answer", { hasText: "No, let it wait" }).evaluate((el) => el.click());
       let status = null;
       for (let i = 0; i < 20 && status !== "dismissed"; i += 1) {

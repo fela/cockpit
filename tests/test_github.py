@@ -189,3 +189,31 @@ def test_githubs_answer_is_read_even_when_gh_exits_nonzero(monkeypatch) -> None:
     )
     with pytest.raises(github.GitHubError, match="not logged in"):
         github.ask_states(refs)
+
+
+@pytest.mark.parametrize("recovers", [True, False])
+def test_a_pr_state_batch_gets_one_more_try_after_gh_times_out(world: World, monkeypatch, caplog, recovers: bool) -> None:
+    conn = db.connect(world.db_path)
+    refs = ["example-org/app#1", "example-org/app#2"]
+    failed: dict[str, datetime] = {}
+    queries: list[list[str]] = []
+    pull = {"issueOrPullRequest": {"__typename": "PullRequest", "state": "OPEN", "isDraft": False}}
+
+    def run(args, *, timeout, **kwargs):
+        queries.append(args)
+        if len(queries) == 1 or not recovers:
+            raise subprocess.TimeoutExpired(args, timeout)
+        return subprocess.CompletedProcess(args, 0, stdout=json.dumps({"data": {"p0": pull, "p1": pull}}))
+
+    monkeypatch.setattr("cockpit.github.subprocess.run", run)
+    assert github.check_states(conn, github.ask_states, refs, failed, NOW) == (refs if recovers else [])
+    assert len(queries) == 2 and queries[0] == queries[1]
+    if recovers:
+        assert failed == {}
+        assert github.pull_states(conn) == dict.fromkeys(refs, "open")
+        assert "asking GitHub the state" not in caplog.text
+    else:
+        assert failed == dict.fromkeys(refs, NOW)
+        assert "gh took over 30 s twice" in caplog.text
+        assert github.check_states(conn, github.ask_states, refs, failed, NOW + timedelta(minutes=1)) == []
+        assert len(queries) == 2

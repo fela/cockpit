@@ -94,8 +94,8 @@ async function main() {
     page.on("console", (message) => { if (message.type() === "error") errors.push(message.text()); });
     const fetches = [];
     page.on("request", (request) => { if (request.url().endsWith(`/history`)) fetches.push(Date.now()); });
-    await page.goto(`${info.origin}/classic`);
-    const card = page.locator(`[data-step="${id}"]`).first();
+    await page.goto(`${info.origin}/`);
+    const card = page.locator(`#next [data-step="${id}"]`).first();
     // The history sits folded under the step (NEXT-52); open it.
     await card.locator(".fold-all > summary").click();
     const history = card.locator("section.history");
@@ -120,7 +120,7 @@ async function main() {
     const added = sql(work, "INSERT INTO session_turns (session_id, started_at, ended_at, reply) VALUES (:a, :before, :now, :b)", SESSION_B, REPLY);
     check("the turn went into the fixture database", added.status === 0, added.stderr);
     const shown = await page.waitForFunction(({ stepId, reply }) => {
-      const whole = document.querySelector(`[data-step="${stepId}"] .hist-text.whole`);
+      const whole = document.querySelector(`#next [data-step="${stepId}"] .hist-text.whole`);
       return whole && whole.textContent.trim() === reply;
     }, { stepId: id, reply: REPLY }, { timeout: 20000, polling: 500 }).then(() => true, () => false);
     check("the reply shows on the card within 20 s, whole", shown, await card.locator("section.history").innerText().catch(() => "no history"));

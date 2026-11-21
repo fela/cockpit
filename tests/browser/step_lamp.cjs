@@ -1,7 +1,7 @@
-// A session linked to an item only through its open step lights the item's lamp. Gives one agents' item no sessions
-// of its own and a working session through its step (`step_sessions`) in the page's state responses, then checks, at
-// desktop and phone width, that the item's lamp on its stage's plate at the top of the classic page is lit and that
-// its entry says it uses Claude now.  Starts serve_preview.py (this checkout's Cockpit on a synthetic database; README.md says what it needs) and drives a headless Chromium. Prints one line per check and exits 1 when
+// A session linked to an item only through its open step marks the item as worked on. Gives one agents' item no
+// sessions of its own and a working session through its step (`step_sessions`) in the page's state responses, then
+// checks, at desktop and phone width, that the item's row in the list ends in the pulsing working dot and that the dot
+// says a session is working on it.  Starts serve_preview.py (this checkout's Cockpit on a synthetic database; README.md says what it needs) and drives a headless Chromium. Prints one line per check and exits 1 when
 // one failed.  Usage, from the checkout: node tests/browser/step_lamp.cjs
 
 "use strict";
@@ -62,18 +62,23 @@ async function main() {
         await route.fulfill({ ...full, json: body }).catch(() => {});
       });
 
-      await page.goto(`${info.origin}/classic`);
-      const group = page.locator("#overview .light-group").filter({ has: page.locator(".light-item", { hasText: item.title }) }).first();
-      await group.waitFor({ state: "attached" });
-      const entry = group.locator(".light-item", { hasText: item.title }).first();
-      const classes = await waitFor(() => entry.getAttribute("class"), (value) => !/\bdim\b/.test(value));
-      check(`${width} px: the plate lamp of an item worked on through its step is lit`, !/\bdim\b/.test(classes), classes);
-      await group.hover();
-      if (width < 641) await group.click();
-      await entry.waitFor();
-      const words = await entry.getAttribute("aria-label");
-      check(`${width} px: its entry on the plate says it uses Claude now`, words.includes("using Claude now"), words);
-      await page.screenshot({ path: path.join(work, `step-lamp-${width}.png`) });
+      await page.goto(`${info.origin}/`);
+      const row = page.locator(`#sidebar li[data-item="${item.id}"]`).first();
+      await row.waitFor({ state: "attached" });
+      // On a phone the list and the item are two screens, and the page opens on the item's.
+      const back = page.locator(".phone-back:visible");
+      if (await back.count()) await back.click();
+      // The item's group, Busy, starts folded; its heading opens it.
+      await row.evaluate((li) => {
+        const group = li.closest("details");
+        if (group && !group.open) group.querySelector(":scope > summary").click();
+      });
+      const dot = row.locator(".sidebar-working");
+      const seen = await waitFor(() => dot.isVisible(), Boolean);
+      check(`${width} px: the row of an item worked on through its step shows the working dot`, seen, `${await dot.count()} dots`);
+      const words = seen ? await dot.getAttribute("aria-label") : "";
+      check(`${width} px: the dot says a session is working on it`, words === "A session is working on this", words);
+      await row.screenshot({ path: path.join(work, `step-lamp-${width}.png`) });
       check(`${width} px: no page errors`, errors.length === 0, errors.join(" | "));
       await page.unrouteAll({ behavior: "ignoreErrors" });
       await context.close();

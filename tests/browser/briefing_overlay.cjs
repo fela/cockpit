@@ -1,6 +1,5 @@
 // The morning briefing on its task's card, and a link to it opening it over Cockpit's page, as a shared page opens
-// (SPEC NEXT-47, VIEW-31). On Cockpit's main page (`/` at desktop width in light, `/classic` at phone width in dark)
-// it checks:
+// (SPEC NEXT-47, VIEW-31). On Cockpit's main page, at desktop width in light and phone width in dark, it checks:
 // - at desktop width, the briefing's read step holds the whole briefing, with no link away to it; selecting part of
 //   it shows Comment, which quotes that part into the card's reply box; the briefing never loads ahead, so it is
 //   still unread a while after the card shows;
@@ -94,8 +93,8 @@ async function main() {
 
     browser = await chromium.launch({ executablePath: CHROMIUM });
     const run = Date.now();
-    const sizes = [["desktop", 1280, 900, "light", "/"], ["phone", 390, 844, "dark", "/classic"]];
-    for (const [label, width, height, scheme, home] of sizes) {
+    const sizes = [["desktop", 1280, 900, "light"], ["phone", 390, 844, "dark"]];
+    for (const [label, width, height, scheme] of sizes) {
       const key = `note:briefing-overlay-${run}-${label}`;
       const item = await agent("PUT", "/api/items", { key, title: `Briefing link ${label}`, priority: "urgent", sessions: [SESSION_B] });
       const answer = await agent("POST", "/api/steps", {
@@ -118,7 +117,7 @@ async function main() {
       };
       watch(page);
       const shot = (name) => page.screenshot({ path: path.join(SHOTS, `${label}-${scheme}-${name}.png`) });
-      const at = `${label} (${scheme}, ${home})`;
+      const at = `${label} (${scheme})`;
       const dialog = page.locator("dialog.page-overlay[open]");
       const drawn = page.locator("dialog.page-overlay[open]:not(.page-overlay-loading-page)");
       const closed = async () => (await waitFor(() => dialog.count(), (count) => count === 0)) === 0;
@@ -146,18 +145,14 @@ async function main() {
         return layer;
       };
 
-      const openCard = async (card) => {
-        await card.waitFor();
-        if (await card.evaluate((el) => el.classList.contains("step-row") && !el.classList.contains("open"))) await card.locator(".row-head").click();
-      };
       const linkIn = (card) => card.locator(`a[href*="/briefing?id=${briefing.id}"]:visible`).first();
       let before;
 
       if (label === "desktop") {
         // The read step holds the whole briefing, so the user reads and comments on all of it on the card.
-        await page.goto(`${info.origin}${home}#home/item/${readItem.id}`);
+        await page.goto(`${info.origin}/#home/item/${readItem.id}`);
         const readCard = page.locator(`#next [data-step="${readStep.step.id}"]`).first();
-        await openCard(readCard);
+        await readCard.waitFor();
         const words = await readCard.innerText();
         check(`${at}: the read step shows the whole briefing`, ["Sam shipped the CSV export", "Two customers asked for a weekly file",
           "saves each reminder on its own"].every((part) => words.includes(part)), words.slice(0, 400));
@@ -184,9 +179,9 @@ async function main() {
       }
 
       // Another step's link to the briefing.
-      await page.goto(`${info.origin}${home}${home === "/" ? `#home/item/${item.id}` : ""}`);
+      await page.goto(`${info.origin}/#home/item/${item.id}`);
       const card = page.locator(`#next [data-step="${answer.step.id}"]`).first();
-      await openCard(card);
+      await card.waitFor();
       before = page.url();
       await linkIn(card).click();
       // The layer takes its place at once, named for the briefing, with a loading sheet until it has drawn.
@@ -201,7 +196,7 @@ async function main() {
         const state = await user("GET", "/api/state");
         const open = [...state.queue, ...state.ready_next].some((step) => step.id === readStep.step.id);
         check(`${at}: and leaves its read step open, for Task done on the card`, open, "the read step closed");
-        // The read step stays open, ahead of the other step; snoozed, it leaves /classic's single Next up to that step.
+        // The read step stays open, ahead of the other step; snoozed, it leaves Next up to that step.
         await user("POST", `/api/steps/${readStep.step.id}/snooze`, { until: "2099-01-01T08:00:00Z" });
       }
       // Escape in the layer closes it.
@@ -211,7 +206,7 @@ async function main() {
       check(`${at}: the main page keeps its address after Escape`, page.url() === before, page.url());
 
       // The browser's Back closes it and stays on the main page.
-      await openCard(card);
+      await card.waitFor();
       await linkIn(card).click();
       const again = await inLayer("the link again");
       // The earlier briefings' list keeps to the layer; a click on a day replaces the briefing shown in it.
@@ -233,7 +228,7 @@ async function main() {
       await shot("4-closed");
 
       // A click with Ctrl opens a tab of its own and leaves the main page as it is.
-      await openCard(card);
+      await card.waitFor();
       const popup = context.waitForEvent("page", { timeout: 5000 }).catch(() => null);
       await linkIn(card).click({ modifiers: ["Control"] });
       const opened = await popup;
@@ -245,25 +240,26 @@ async function main() {
 
       // A task the briefing mentions opens on the main page, and the layer closes, rather than the whole of
       // Cockpit loading inside the layer.
-      await openCard(card);
+      await card.waitFor();
       await linkIn(card).click();
       const mentioning = await inLayer("the link once more");
       const mention = mentioning.locator(`.briefing-body a.item-ref[href="/#item/${target.id}"]`);
       await mention.click();
       check(`${at}: a click on a task the briefing mentions closes the layer`, await closed(), "the layer stayed open");
-      const shown = await waitFor(() => page.evaluate(() => document.querySelector(".keyboard-current")?.closest("[data-item]")?.dataset.item || null),
+      // Next up shows it, on a phone's item screen.
+      const shown = await waitFor(() => page.evaluate(() => ui.shownItem === null || document.body.classList.contains("phone-list") ? null : String(ui.shownItem)),
         (id) => id === String(target.id));
       check(`${at}: and opens that task on the main page, in the same tab`, shown === String(target.id) && tabs() === 1, JSON.stringify({ shown, tabs: tabs() }));
       check(`${at}: the layer's history entry is gone, and the main page keeps its address`,
-        !(await page.evaluate(() => Boolean(history.state?.cockpitPageOverlay))) && new URL(page.url()).pathname === home, page.url());
+        !(await page.evaluate(() => Boolean(history.state?.cockpitPageOverlay))) && new URL(page.url()).pathname === "/", page.url());
       await shot("5-mention");
 
       // A mention of a task the page lists nowhere opens Cockpit's search for it, and that search's address stays
       // once the layer's history entry is gone. The page loads afresh on the step first: the mention above showed
       // another task in its place and left the address as it was, so going to that address again would do nothing.
       await page.goto("about:blank");
-      await page.goto(`${info.origin}${home}${home === "/" ? `#home/item/${item.id}` : ""}`);
-      await openCard(card);
+      await page.goto(`${info.origin}/#home/item/${item.id}`);
+      await card.waitFor();
       before = page.url();
       await linkIn(card).click();
       const searching = await inLayer("the link for the closed task");
@@ -272,13 +268,13 @@ async function main() {
       const found = `#find-closed/${encodeURIComponent(`#${offPage.id}`)}`;
       const address = await waitFor(() => new URL(page.url()).hash, (hash) => hash === found);
       check(`${at}: and the main page searches closed work for it, in the same tab`, address === found && tabs() === 1
-        && !(await page.evaluate(() => Boolean(history.state?.cockpitPageOverlay))) && new URL(page.url()).pathname === home,
+        && !(await page.evaluate(() => Boolean(history.state?.cockpitPageOverlay))) && new URL(page.url()).pathname === "/",
         JSON.stringify({ address, tabs: tabs(), url: page.url() }));
       await shot("6-closed-mention");
 
       check(`${at}: no page or policy errors`, errors.length === 0, errors.join(" | "));
       await context.close();
-      // `/classic` shows the first queued step alone; this round's step moves out of the next round's way.
+      // Next up shows the first queued step alone; this round's step moves out of the next round's way.
       await user("POST", `/api/steps/${answer.step.id}/snooze`, { until: "2099-01-01T08:00:00Z" });
     }
   } finally {

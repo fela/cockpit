@@ -1,13 +1,14 @@
-// The wrong-model banners on the main page (SPEC SESSION-20), at 1280 px in the light look and 390 px in the dark:
-// one red banner per session and model, naming the session, the model it ran on, the one it was started on, how many
-// calls and the last one's time; a session still on the other model says how to move it back, one back on the main
-// model says so; a long first prompt is cut; nothing is wider than the window. On the main page each is a row in Your
-// queue (SPEC UI-52), the rail still starts at the top, and the close on an opened one drops it there and on later
-// polls. Each offers Investigate before its close; pressing it names the session and model, drops the warning and
-// says in a toast that a new session is investigating.
+// The wrong-model warnings on the main page (SPEC SESSION-20), at 1280 px in the light look and 390 px in the dark:
+// one row in Your queue (SPEC UI-52) per session and model, which opens as a red card naming the session, the model it
+// ran on, the one it was started on, how many calls and the last one's time; a session still on the other model says
+// how to move it back, one back on the main model says so; a long first prompt is cut; nothing is wider than the
+// window. No banner shows above the step, the rail starts at the top, and the close on an opened one is the plum close
+// key, drops the warning on the press, while the server is still answering and through the polls meanwhile, and keeps
+// it gone on later polls. Each offers Investigate before its close; pressing it names the session and model, drops the
+// warning and says in a toast that a new session is investigating.
 //
 // Serves this checkout with serve_preview.py and adds two rows to each /api/state answer, so the check needs no
-// transcript on another model. Prints one line per check, saves each width's banners as wrong-model-<width>.png in
+// transcript on another model. Prints one line per check, saves each width's first card as wrong-model-<width>.png in
 // the work folder, and exits 1 when one failed.
 //
 // Usage, from the checkout: node tests/browser/wrong_model.cjs
@@ -32,12 +33,18 @@ const LAST = new Date(Date.now() - 20 * 60e3).toISOString();
 const ROWS = [
   {
     session_id: "33333333-3333-4333-8333-333333333333", name: "Reminder fix", model: "claude-sonnet-5-5", intended: "claude-opus-5-5",
-    first: new Date(Date.now() - 40 * 60e3).toISOString(), last: LAST, calls: 10, back: false,
+    claude: true, latest: "claude-sonnet-5-5", first: new Date(Date.now() - 40 * 60e3).toISOString(), last: LAST, calls: 10, back: false,
   },
   {
     session_id: "44444444-4444-4444-8444-444444444444",
     name: "Plan Tasks exports for completed lists, recurring reminders, shared lists and CSV files",
-    model: "claude-haiku-5-5", intended: "claude-opus-5-5", first: LAST, last: LAST, calls: 1, back: true,
+    model: "claude-haiku-5-5", intended: "claude-opus-5-5", claude: true, latest: "claude-opus-5-5", first: LAST, last: LAST,
+    calls: 1, back: true,
+  },
+  // The hub's fallback model (SPEC SESSION-20): amber, with nothing to investigate.
+  {
+    session_id: "55555555-5555-4555-8555-555555555555", name: "Planner", model: "example-model", intended: "claude-opus-5-5",
+    claude: false, latest: "example-model", first: LAST, last: LAST, calls: 4, back: false,
   },
 ];
 
@@ -57,9 +64,13 @@ async function main() {
     for (const [width, scheme] of [[1280, "light"], [390, "dark"]]) {
       const context = await browser.newContext({ viewport: { width, height: 900 }, colorScheme: scheme });
       await context.setExtraHTTPHeaders({ cookie: `${info.name}=${info.value}` });
-      // The closes the page sends reach the server; the rows it closed leave the later answers, as the server's do.
+      // The closes the page sends reach the server two seconds later, as when the server is busy; the rows it closed
+      // leave the answers after that, as the server's do.
       const closed = [];
+      const sent = [];
       await context.route("**/api/wrong-models/dismiss", async (route) => {
+        sent.push(route.request().postDataJSON());
+        await sleep(2000);
         closed.push(route.request().postDataJSON());
         await route.continue();
       });
@@ -83,59 +94,85 @@ async function main() {
       const page = await context.newPage();
       const errors = [];
       page.on("pageerror", (error) => errors.push(String(error)));
-      await page.goto(`${info.origin}/classic`, { waitUntil: "load", timeout: 120e3 });
+      await page.goto(`${info.origin}/`, { waitUntil: "load", timeout: 120e3 });
       const at = `${width} px ${scheme}`;
-      await page.waitForSelector(".warn-card.fail .warn-text", { timeout: 15e3 });
-      const words = await page.locator("#banner .warn-card.fail .warn-text").allTextContents();
-      const mine = words.filter((text) => text.includes("instead of claude-opus-5-5"));
-      check(mine.length === 2, `${at}: a banner per session and model`);
+      const ROW = "#sidebar li.warn-row[data-warning^='wrong-model:']";
+      await page.waitForFunction((row) => document.querySelectorAll(row).length === 3, ROW, { timeout: 60e3 });
+      // A row's title moves into the page's own tooltip, as data-tip.
+      const tips = await page.evaluate((row) => [...document.querySelectorAll(`${row} .side-row`)]
+        .map((one) => one.getAttribute("title") || one.dataset.tip || ""), ROW);
+      check(tips.filter((tip) => tip.includes("instead of claude-opus-5-5")).length === 2, `${at}: a row per session and model ${JSON.stringify(tips)}`);
+      // Each row opens its warning as a card: what happened in the ask, how to fix it below.
+      const opened = async (row) => {
+        const key = `wrong-model:${row.session_id}:${row.model}`;
+        await page.evaluate((one) => openWarning(one), key);
+        const card = page.locator(`#next > .warn-step:not(.motion-ghost)[data-warning="${key}"]`);
+        // The card it replaces lingers a moment as a leaving copy.
+        await card.waitFor();
+        return { text: `${await card.locator(".ask-text").textContent()} ${await card.locator(".why").textContent()}`,
+          investigates: await card.locator(".answers button", { hasText: "Investigate" }).count() };
+      };
+      // The fallback model is amber, says it moves back by itself and offers nothing to investigate.
+      const fallback = await opened(ROWS[2]);
+      check(/^Session “Planner” ran on example-model in place of Claude: 4 calls, the last at/.test(fallback.text)
+        && fallback.text.includes("It moves back to Claude once the hub reaches Claude again."), `${at}: the fallback model says so (${fallback.text})`);
+      check(fallback.investigates === 0, `${at}: the fallback model offers no Investigate`);
+      const second = await opened(ROWS[1]);
+      const first = await opened(ROWS[0]);
+      const mine = [first.text, second.text];
       check(mine[0].startsWith("Session “Reminder fix” ran on claude-sonnet-5-5 instead of claude-opus-5-5: 10 calls, the last at"),
-        `${at}: the first names the session, both models and the calls`);
+        `${at}: the first names the session, both models and the calls (${mine[0]})`);
       check(mine[0].includes("/model claude-opus-5-5 in that session moves it back."), `${at}: one still off says how to move it back`);
       check(mine[1].includes("1 call,") && mine[1].includes("It is back on claude-opus-5-5."), `${at}: one back says so`);
       check(mine[1].includes("…") && !mine[1].includes("CSV files"), `${at}: a long name is cut`);
       const wide = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
       check(wide <= 0, `${at}: nothing wider than the window (${wide} px over)`);
-      const investigates = await page.locator("#banner .warn-card.fail button", { hasText: "Investigate" }).count();
-      check(investigates === 2, `${at}: each banner has an Investigate key (${investigates})`);
+      check(first.investigates === 1 && second.investigates === 1, `${at}: each card has an Investigate key (${first.investigates}, ${second.investigates})`);
+      // The poll redraws the card, so the screenshot takes the column that holds it.
+      await page.locator("#next").screenshot({ path: path.join(work, `wrong-model-${width}.png`) });
       await page.evaluate(() => { ui.pendingRender = true; return refresh(); });
       await sleep(300);
-      check((await page.locator("#banner .warn-text", { hasText: "instead of claude-opus-5-5" }).count()) === 2, `${at}: a redraw keeps them`);
+      check((await page.locator(ROW).count()) === 3 && (await page.locator(`#next > .warn-step:not(.motion-ghost) .ask-text`, { hasText: "Reminder fix" }).count()) === 1,
+        `${at}: a redraw keeps them`);
       check(errors.length === 0, `${at}: no page errors ${errors.join("; ")}`);
-      await page.locator("#banner").screenshot({ path: path.join(work, `wrong-model-${width}.png`) });
-
-      // The main page: a row per warning in Inbox, and the rail starts at the top of the page.
-      await page.goto(`${info.origin}/`, { waitUntil: "load", timeout: 120e3 });
-      const ROW = "#sidebar li.warn-row[data-warning^='wrong-model:']";
-      await page.waitForFunction((row) => document.querySelectorAll(row).length === 2, ROW, { timeout: 60e3 });
-      check((await page.locator("#banner .warn-card.fail").count()) === 0, `${at}: main page: no banner above the step`);
+      check((await page.locator("#banner .warn-card.fail").count()) === 0, `${at}: no banner above the step`);
       const railTop = await page.evaluate(() => document.querySelector(".rail").getBoundingClientRect().top);
-      check(railTop === 0, `${at}: main page: the rail starts at the top (${railTop} px)`);
+      check(railTop === 0, `${at}: the rail starts at the top (${railTop} px)`);
       await page.evaluate((key) => openWarning(key), `wrong-model:${ROWS[0].session_id}:${ROWS[0].model}`);
-      const answers = await page.locator("#next > .warn-step .answers button").allTextContents();
+      const answers = await page.locator("#next > .warn-step:not(.motion-ghost) .answers button").allTextContents();
       check(answers.length === 2 && answers[0].includes("Investigate") && answers[1].includes("Close this warning"),
-        `${at}: main page: the opened warning offers Investigate, then Close ${JSON.stringify(answers)}`);
+        `${at}: the opened warning offers Investigate, then Close ${JSON.stringify(answers)}`);
       await page.screenshot({ path: path.join(work, `wrong-model-investigate-${width}.png`) });
-      await page.locator("#next > .warn-step .answers button", { hasText: "Close this warning" }).click();
-      await page.waitForFunction((row) => document.querySelectorAll(row).length === 1, ROW, { timeout: 15e3 });
-      check(closed.length === 1 && closed[0].session_id === ROWS[0].session_id && closed[0].model === ROWS[0].model,
-        `${at}: the close names the session and model ${JSON.stringify(closed)}`);
+      const closeKey = page.locator("#next > .warn-step:not(.motion-ghost) .answers button", { hasText: "Close this warning" });
+      check((await closeKey.evaluate((key) => key.classList.contains("confirm") && !!key.querySelector("svg"))),
+        `${at}: the close is the plum close key, with its tick`);
+      await closeKey.click();
+      // Gone on the press, while the server takes two seconds, and through a poll meanwhile.
+      await page.waitForFunction((row) => document.querySelectorAll(row).length === 2, ROW, { timeout: 1000 });
+      await page.evaluate(() => { ui.pendingRender = true; return refresh(); });
+      await sleep(300);
+      check(closed.length === 0 && (await page.locator(ROW).count()) === 2
+        && (await page.locator(`#next > .warn-step:not(.motion-ghost)[data-warning="wrong-model:${ROWS[0].session_id}:${ROWS[0].model}"]`).count()) === 0,
+        `${at}: the warning goes on the press and stays gone while the server answers`);
+      await page.waitForFunction(() => !ui.busy.size, null, { timeout: 15e3 });
+      check(sent.length === 1 && closed.length === 1 && closed[0].session_id === ROWS[0].session_id && closed[0].model === ROWS[0].model,
+        `${at}: the close names the session and model, once ${JSON.stringify(sent)}`);
       await page.evaluate(() => { ui.pendingRender = true; return refresh(); });
       await sleep(300);
       const left = await page.evaluate((row) => [...document.querySelectorAll(row)].map((one) => one.dataset.warning), ROW);
-      check(left.length === 1 && left[0] === `wrong-model:${ROWS[1].session_id}:${ROWS[1].model}`,
-        `${at}: a poll after the close keeps the other warning only ${JSON.stringify(left)}`);
+      check(left.length === 2 && left.includes(`wrong-model:${ROWS[1].session_id}:${ROWS[1].model}`),
+        `${at}: a poll after the close keeps the other warnings ${JSON.stringify(left)}`);
       await page.screenshot({ path: path.join(work, `wrong-model-main-${width}.png`) });
       // Investigate on the other one names its session and model, drops the warning and says a session started.
       await page.evaluate((key) => openWarning(key), `wrong-model:${ROWS[1].session_id}:${ROWS[1].model}`);
-      await page.locator("#next > .warn-step .answers button", { hasText: "Investigate" }).click();
-      await page.waitForFunction((row) => document.querySelectorAll(row).length === 0, ROW, { timeout: 15e3 });
+      await page.locator("#next > .warn-step:not(.motion-ghost) .answers button", { hasText: "Investigate" }).click();
+      await page.waitForFunction((row) => document.querySelectorAll(row).length === 1, ROW, { timeout: 15e3 });
       check(investigated.length === 1 && investigated[0].session_id === ROWS[1].session_id
         && investigated[0].model === ROWS[1].model, `${at}: Investigate names the session and model ${JSON.stringify(investigated)}`);
       const said = await page.locator("#toast").textContent();
       check(said.includes("A new session is investigating") && said.includes("Open"), `${at}: the toast says so, with Open (${said})`);
       await page.screenshot({ path: path.join(work, `wrong-model-investigated-${width}.png`) });
-      check(errors.length === 0, `${at}: main page: no page errors ${errors.join("; ")}`);
+      check(errors.length === 0, `${at}: no page errors ${errors.join("; ")}`);
       // A state poll still on its way would throw once the context is gone.
       await context.unrouteAll({ behavior: "ignoreErrors" });
       await context.close();

@@ -79,7 +79,7 @@ async function main() {
     page.on("pageerror", (error) => errors.push(error.message));
     page.on("console", (message) => { if (message.type() === "error") errors.push(message.text()); });
     // The first load gets a minute: on a loaded machine it can take longer than the waits that follow.
-    await page.goto(`${info.origin}/classic`, { timeout: 60000 });
+    await page.goto(`${info.origin}/`, { timeout: 60000 });
 
     const card = page.locator(`#next [data-step="${id}"]`);
     await card.locator('.step-menu [data-timer="running"]').waitFor({ state: "attached", timeout: 60000 });
@@ -143,15 +143,19 @@ async function main() {
     check("focus outside the step toasts no pause", !(await toastShown()), "the pause toast showed");
     await page.keyboard.press("Escape");
 
-    // A click outside the step leaves the timer running.
-    // The spot is in the page's bottom-left corner, checked to hold no step and nothing to press.
-    const spot = { x: 5, y: 895 };
-    const under = await page.evaluate(({ x, y }) => {
-      const element = document.elementFromPoint(x, y);
-      return element && (element.closest("[data-step], a, button, input, textarea, select, summary, [role=button], [onclick]") ? element.outerHTML.slice(0, 120) : "");
-    }, spot);
-    check("the click outside the step lands on nothing to press", under === "", JSON.stringify(under));
-    await page.mouse.click(spot.x, spot.y);
+    // A click outside the step, on a bare spot of the page that is no control, leaves the timer running.
+    const bare = await page.evaluate((step) => {
+      const control = "button, a, summary, input, textarea, select, label, [role=button], [tabindex], [data-step], [data-item]";
+      for (let y = innerHeight - 20; y > 60; y -= 20) {
+        for (let x = 20; x < innerWidth; x += 40) {
+          const el = document.elementFromPoint(x, y);
+          if (el && el !== document.body && !el.closest(control) && !el.closest(`[data-step="${step}"]`)) return { x, y };
+        }
+      }
+      return null;
+    }, id);
+    if (!bare) throw new Error("no bare spot outside the step to click");
+    await page.mouse.click(bare.x, bare.y);
     await sleep(800);
     check("a click outside the step keeps the timer running", await running(), "the server's timer stopped");
     check("a click outside the step toasts no pause", !(await toastShown()), "the pause toast showed");
