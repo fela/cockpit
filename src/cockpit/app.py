@@ -3166,7 +3166,7 @@ def create_app(
         sweeper.resume(conn, "forked a session")
         session = copyable_session(body.session_id)
         if session.provider != "claude":
-            raise store.Invalid("Fork copies a Claude session; this one runs on Codex")
+            raise store.Invalid(f"Fork copies a Claude session; this one runs on {config.PROVIDER_NAMES[session.provider]}")
         forked = store.fork(conn, item_id, session.session_id, session.cwd, body.text, settings.checkouts_dir)
         background.add_task(deliverer.send, forked["message"]["id"])
         return forked

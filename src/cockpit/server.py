@@ -637,6 +637,15 @@ def check_tools_forever() -> None:
         time.sleep(updates.CHECK_SECONDS)
 
 
+def session_agents(providers: tuple[str, ...], codex_client: codex_worker.WorkerClient | None) -> tuple[
+        acp_agent.Agents | codex_worker.WorkerClient | None, dict[str, acp_agent.AcpAgent]]:
+    """What delivery runs Codex and the ACP agents (SPEC SESSION-30) through, and the ACP agents: one for each ACP
+    provider setup lists. With none, delivery gets the Codex client alone, as without them."""
+    acp = {provider: acp_agent.AcpAgent(config.DB_PATH, provider)
+           for provider in config.ACP_PROVIDERS if provider in providers}
+    return (acp_agent.Agents(codex_client, acp) if acp else codex_client), acp
+
+
 def end_interrupted_runs(deliverer: delivery.Deliverer) -> None:
     """Check commands left unfinished across a restart and tell their sessions what is known."""
     conn = db.connect(config.DB_PATH)
@@ -731,10 +740,7 @@ def main() -> None:
         default_provider=setup.default_provider,
     )
     codex_client = codex_worker.WorkerClient(config.DB_PATH, setup.codex_command) if "codex" in setup.providers else None
-    # The ACP agents (SPEC SESSION-30) and Codex behind one set of methods; None while only Claude is enabled.
-    acp = {provider: acp_agent.AcpAgent(config.DB_PATH, provider, getattr(setup, f"{provider}_command"))
-           for provider in config.ACP_PROVIDERS if provider in setup.providers}
-    agent = acp_agent.Agents(codex_client, acp) if codex_client is not None or acp else None
+    agent, acp = session_agents(setup.providers, codex_client)
     claude_cache = sessions.SessionCache(
         config.ACCOUNTS, lambda: moves.moved(config.DB_PATH), lambda: removals.listed(config.DB_PATH)
     ) if "claude" in setup.providers else None
@@ -764,6 +770,8 @@ def main() -> None:
     capture, capture_writer, capture_db = server_logs.install(config.DB_PATH, started_at)
     view_pool = views.Pool(config.SETUP_PATH, parts.PACKAGE, sessions.PROJECTS_DIR)
     app = create_app(settings, deliverer, session_cache, spend_index, codex_index, parts.installed(), view_pool.read)
+    for each in acp.values():
+        each.mark_interrupted()
     usage_worker = spend_worker.start(spend_index)
     end_interrupted_runs(deliverer)
     threading.Thread(target=backup_forever, name="backup", daemon=True).start()

@@ -687,7 +687,7 @@ class Deliverer:
                     if session is None:
                         raise store.NotFound("The Claude session is no longer available on this machine.")
                     if session.provider != "claude":
-                        raise store.Conflict("This session already runs on Codex.")
+                        raise store.Conflict(f"This session already runs on {config.PROVIDER_NAMES[session.provider]}.")
                     if session.name in store.SWEEP_SESSION_NAMES:
                         raise store.Conflict("The sweeper keeps its own session; choose a task's Claude session.")
                     if not session.cwd or not Path(session.cwd).is_dir():
@@ -1254,6 +1254,9 @@ class Deliverer:
             if session is not None and session.waits_on_dialog and not restart:
                 raise Waiting(f"answer the pending {name} request before sending another message")
             try:
+                if message["new_cwd"] is None and message["new_options"] and not is_codex:
+                    raise DeliveryError(f"A {name} session keeps the model it started with; start a new session for"
+                                        " another model.")
                 if message["new_cwd"] is None and message["new_options"]:
                     conn = db.connect(self.db_path)
                     try:
@@ -1390,6 +1393,9 @@ class Deliverer:
                 raise DeliveryError("The source session is no longer available on this machine.")
             if session.provider == message["provider"] and pending is None:
                 return message, text
+            if {session.provider, message["provider"]} & set(config.ACP_PROVIDERS):
+                raise DeliveryError(f"A {config.PROVIDER_NAMES[session.provider]} session keeps its agent; start a new"
+                                    f" {config.PROVIDER_NAMES[message['provider']]} session instead.")
             if message["provider"] not in self.enabled_providers:
                 raise DeliveryError(f"{message['provider']} is not enabled")
             if parts.is_standing(source) or session.name in store.SWEEP_SESSION_NAMES:
