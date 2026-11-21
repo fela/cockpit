@@ -492,6 +492,15 @@ timezone determines the morning schedule. Collection depends on the selected
 agent's available connectors. The summary comes first; detail remains available
 on the briefing page.
 
+With `weekly_digest` in the setup's `features`, a weekly digest (VIEW-37)
+follows the same path: from 08:00 on Sunday, once that day's briefing is stored
+or by noon, its own task and session, handed that week's stored briefings
+rather than reading the sources again. A week missed on Sunday is asked for
+when Cockpit runs again, until the next Sunday's digest is due. Digests live in
+the `briefings` table with `kind = 'weekly'` and their own read mark, so the
+page, read step and comments work as they do for a briefing. Without the
+feature none of this runs, and the page and API leave digests out.
+
 ## 8. Tracking and usage
 
 Timers record active time on steps and allow corrections. Presence signals and

@@ -4224,6 +4224,53 @@ def reopen_for_message(conn: sqlite3.Connection, item_id: int) -> bool:
     closed, and asks a close left open are withdrawn, so the task is the agents' and not back in the Inbox: the message
     is the new ask, and the session puts again what it still needs. Undo no longer puts the finish back. No change to
     an open task. Returns whether it reopened."""
+    return _take_up_again(conn, item_id, "message")
+
+
+# What the user's Reopen sends the item's session, as the user's own message: fixed words and the numeric ID alone.
+REOPENED_TEXT = (
+    "I reopened item {item_id} on Cockpit, so it takes your steps again. Post there what you still had for it, or"
+    " put a step for me with what is next."
+)
+
+
+def reopen_plainly(conn: sqlite3.Connection, item_id: int, seen_session: str | None, checkouts_dir: Path) -> dict[str, Any]:
+    """The user's Reopen on a finished task (SPEC CONTROL-34): it takes the task up again as a message would
+    (CONTROL-28), and when the task has a session, sends it REOPENED_TEXT as the user's message, so the task shows in
+    Busy while that is on its way. `seen_session` is the primary session the user's page showed (None for none); a
+    different one now, or a handover that would pass the message on to another, refuses the press, so the message
+    reaches the session shown. Returns {item, send}: `send` is the message to deliver now, or None for a task with no
+    session, which then waits with no next move."""
+    with db.transaction(conn):
+        item = get_item(conn, item_id)
+        # A Close that landed after the page drew Reopen wins: a task closed as not needed has Unarchive.
+        if item["stage"] != "done" or item["archived"]:
+            how = "was closed as not needed" if item["archived"] else "is not finished"
+            raise Conflict(f"item {item_id} ({item['title']}) {how}, so Reopen does not apply")
+        session_id = item["sessions"][0] if item["sessions"] else None
+        if session_id != seen_session:
+            raise Conflict(f"item {item_id} has another session since your page showed it; read it again")
+        send = None
+        if session_id is not None:
+            from cockpit.handovers import destination
+
+            # After a handover the session's messages go on to the session that took its work over, which the page
+            # did not show.
+            if destination(conn, session_id) != session_id:
+                raise Conflict(
+                    f"item {item_id}'s session handed its work to another session since your page showed it; write the"
+                    " task a message instead"
+                )
+            send = create_message(
+                conn, "user", REOPENED_TEXT.format(item_id=item_id), {"session_id": session_id, "item_id": item_id},
+                checkouts_dir,
+            )
+        _take_up_again(conn, item_id, "reopen")
+    return {"item": get_item(conn, item_id), "send": send}
+
+
+def _take_up_again(conn: sqlite3.Connection, item_id: int, by: str) -> bool:
+    """reopen_for_message's change, by the user's message or their Reopen (`by`, kept in the history)."""
     item = get_item(conn, item_id)
     if not item["archived"] and item["stage"] != "done":
         return False
@@ -4250,10 +4297,11 @@ def reopen_for_message(conn: sqlite3.Connection, item_id: int) -> bool:
         patterns.record_step(conn, "withdraw", "user", get_step(conn, ask["id"]))
     finish = get_finish(conn, item_id)
     if finish is not None:
-        _retire_finish(conn, finish, now, "took the item up again with a message")
+        reason = {"message": "took the item up again with a message", "reopen": "reopened the item with Reopen"}[by]
+        _retire_finish(conn, finish, now, reason)
     patterns.record(
         conn, "item.reopened", "user", item_id, finish["step_id"] if finish else None, None,
-        {"how": finish["how"] if finish else "agent", "by": "message"},
+        {"how": finish["how"] if finish else "agent", "by": by},
     )
     if asks:
         fill_queue(conn, datetime.now(UTC))

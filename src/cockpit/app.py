@@ -673,6 +673,13 @@ class FollowUp(Body):
     text: Text
 
 
+class ItemTakeUp(Body):
+    nullable = frozenset({"session_id"})
+
+    # The item's primary session as the user's page showed it; null when it showed none.
+    session_id: SessionId | None
+
+
 class ItemFinish(Body):
     nullable = frozenset({"answer", "session_id"})
 
@@ -1151,7 +1158,7 @@ class InProgressIn(Body):
 
 
 class BriefingIn(Body):
-    # The day Cockpit's request named (YYYY-MM-DD); briefing.put refuses an earlier one.
+    # The day Cockpit's request named (YYYY-MM-DD); briefing.put and put_digest refuse an earlier one.
     day: str
     # Markdown; briefing.put names the limit when it is too long.
     body: str
@@ -2140,6 +2147,7 @@ def create_app(
         )
         result["projects"] = projects.listing(conn)
         result["providers"] = list(settings.providers)
+        result["features"] = list(config.setup().features)
         result["default_provider"] = settings.default_provider
         # The user's home folder, which a blocked call's folder shows as `~` (SPEC PERM-26).
         result["home"] = str(Path.home())
@@ -2262,7 +2270,7 @@ def create_app(
             entry | {"waiting": entry["account"] in waiting} for entry in accounts.sign_ins(settings.claude_accounts, now)
         ] if "claude" in settings.providers else []
         result["codex_sign_ins"] = codex_login.status(conn, codex_index, codex_sign_in, request.state.me == "user")
-        result["briefing"] = briefing.status(conn)
+        result["briefing"] = briefing.status(conn, config.setup())
         result["team"] = briefing.team(conn)
         result["side_chats"] = sidechat.recent(conn, now)
         try:
@@ -2952,6 +2960,18 @@ def create_app(
             background,
         )
 
+    # Reopen on a finished task (SPEC CONTROL-34), with "reopen" in the setup's features: back to Busy as a message
+    # would take it, with no words to write.
+    @app.post("/api/items/{item_id}/take-up", dependencies=[Depends(user_only)])
+    def take_up_item(item_id: int, body: ItemTakeUp, background: BackgroundTasks, conn: Conn) -> dict[str, Any]:
+        if "reopen" not in config.setup().features:
+            raise store.NotFound('Reopen is off: add "reopen" to features in the setup file to turn it on')
+        reopened = store.reopen_plainly(conn, item_id, body.session_id, settings.checkouts_dir)
+        sweeper.resume(conn, "reopened a task")
+        if reopened["send"] is not None:
+            background.add_task(deliverer.send, reopened["send"]["id"])
+        return reopened
+
     @app.post("/api/items/{item_id}/reopen", dependencies=[Depends(user_only)])
     def reopen_item(item_id: int, background: BackgroundTasks, conn: Conn) -> dict[str, Any]:
         reopened = store.reopen_item(conn, item_id, settings.checkouts_dir)
@@ -3470,7 +3490,7 @@ def create_app(
 
     @app.get("/api/briefings")
     def briefings(conn: Conn) -> dict[str, Any]:
-        return briefing.listing(conn)
+        return briefing.listing(conn, config.setup(), datetime.now(UTC))
 
     @app.get("/api/briefings/{briefing_id}")
     def get_briefing(briefing_id: int, conn: Conn) -> dict[str, Any]:
@@ -3479,6 +3499,11 @@ def create_app(
     @app.post("/api/briefings")
     def put_briefing(body: BriefingIn, request: Request, conn: Conn) -> dict[str, Any]:
         return briefing.put(conn, request.state.actor, body.day, body.body)
+
+    # The weekly digest (SPEC VIEW-37), when the setup turns it on; it is read like a briefing.
+    @app.post("/api/digests")
+    def put_digest(body: BriefingIn, request: Request, conn: Conn) -> dict[str, Any]:
+        return briefing.put_digest(conn, config.setup(), request.state.actor, body.day, body.body)
 
     # The user's time zone (SPEC CONTROL-32): each page reports its browser's zone and learns whether to ask about
     # switching; the user switches, keeps the zone, or picks one in the menu.
