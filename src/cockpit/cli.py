@@ -1602,6 +1602,9 @@ def main(argv: list[str] | None = None) -> int:
         help="store the briefing Cockpit asked for today, Markdown on stdin; a second put that day replaces it",
     )
     briefing_put.add_argument("--day", required=True, help="the day Cockpit's request names, YYYY-MM-DD")
+    briefing_put.add_argument(
+        "--weekly", action="store_true", help="store the weekly digest Cockpit asked for, when the setup turns it on"
+    )
     briefing_commands.add_parser("get", help="print the newest briefing's Markdown")
 
     progress = commands.add_parser(
@@ -2040,16 +2043,18 @@ def project_command(args: argparse.Namespace) -> Any:
 
 def briefing_command(args: argparse.Namespace) -> str:
     if args.action == "put":
-        stored = call("POST", "/api/briefings", {"day": args.day, "body": sys.stdin.read()}, args.agent)
+        path, what = ("/api/digests", "weekly digest") if args.weekly else ("/api/briefings", "briefing")
+        stored = call("POST", path, {"day": args.day, "body": sys.stdin.read()}, args.agent)
         return (
-            f"stored the briefing for {stored['day']} ({len(stored['body'])} characters);"
+            f"stored the {what} for {stored['day']} ({len(stored['body'])} characters);"
             f" {user_name()} reads it on Cockpit's Briefing tab"
         )
     newest = call("GET", "/api/briefings", None, None)["briefings"]
     if not newest:
         raise CockpitError("no briefing yet")
     shown = call("GET", f"/api/briefings/{newest[0]['id']}", None, None)
-    return f"Briefing for {shown['day']}, covering {shown['since']} to {shown['until']}:\n\n{shown['body']}"
+    label = "Weekly digest for the week to" if shown["kind"] == "weekly" else "Briefing for"
+    return f"{label} {shown['day']}, covering {shown['since']} to {shown['until']}:\n\n{shown['body']}"
 
 
 def attach_command(session_id: str) -> None:

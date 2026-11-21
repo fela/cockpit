@@ -1158,7 +1158,7 @@ class InProgressIn(Body):
 
 
 class BriefingIn(Body):
-    # The day Cockpit's request named (YYYY-MM-DD); briefing.put refuses an earlier one.
+    # The day Cockpit's request named (YYYY-MM-DD); briefing.put and put_digest refuse an earlier one.
     day: str
     # Markdown; briefing.put names the limit when it is too long.
     body: str
@@ -2270,7 +2270,7 @@ def create_app(
             entry | {"waiting": entry["account"] in waiting} for entry in accounts.sign_ins(settings.claude_accounts, now)
         ] if "claude" in settings.providers else []
         result["codex_sign_ins"] = codex_login.status(conn, codex_index, codex_sign_in, request.state.me == "user")
-        result["briefing"] = briefing.status(conn)
+        result["briefing"] = briefing.status(conn, config.setup())
         result["team"] = briefing.team(conn)
         result["side_chats"] = sidechat.recent(conn, now)
         try:
@@ -3490,7 +3490,7 @@ def create_app(
 
     @app.get("/api/briefings")
     def briefings(conn: Conn) -> dict[str, Any]:
-        return briefing.listing(conn)
+        return briefing.listing(conn, config.setup(), datetime.now(UTC))
 
     @app.get("/api/briefings/{briefing_id}")
     def get_briefing(briefing_id: int, conn: Conn) -> dict[str, Any]:
@@ -3499,6 +3499,11 @@ def create_app(
     @app.post("/api/briefings")
     def put_briefing(body: BriefingIn, request: Request, conn: Conn) -> dict[str, Any]:
         return briefing.put(conn, request.state.actor, body.day, body.body)
+
+    # The weekly digest (SPEC VIEW-37), when the setup turns it on; it is read like a briefing.
+    @app.post("/api/digests")
+    def put_digest(body: BriefingIn, request: Request, conn: Conn) -> dict[str, Any]:
+        return briefing.put_digest(conn, config.setup(), request.state.actor, body.day, body.body)
 
     # The user's time zone (SPEC CONTROL-32): each page reports its browser's zone and learns whether to ask about
     # switching; the user switches, keeps the zone, or picks one in the menu.
