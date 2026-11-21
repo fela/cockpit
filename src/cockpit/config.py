@@ -121,7 +121,24 @@ SESSION_OPTIONS: dict[str, dict[str, Any]] = {
             {"name": "ultrafast", "label": "Ultrafast", "hint": "8× included usage · Pro $500"},
         ],
     },
+    # The ACP agents (acp_agent.py, SPEC SESSION-30) pick no effort. Gemini's models are the CLI's own aliases, which it
+    # points at its current models, "auto" letting it choose per request; Grok's "default" is the CLI's own default.
+    "gemini": {
+        "models": [("auto", "Auto"), ("pro", "Pro"), ("flash", "Flash"), ("flash-lite", "Flash-Lite")],
+        "efforts": [],
+        "effort": None,
+    },
+    "grok": {
+        "models": [("default", "Default")],
+        "efforts": [],
+        "effort": None,
+    },
 }
+# Every provider a session can run on, and what the page and messages call each. Claude and Codex have integrations
+# of their own; the others are driven over the Agent Client Protocol (ACP_PROVIDERS, acp_agent.py).
+PROVIDERS = ("claude", "codex", "gemini", "grok")
+PROVIDER_NAMES = {"claude": "Claude", "codex": "Codex", "gemini": "Gemini", "grok": "Grok"}
+ACP_PROVIDERS = ("gemini", "grok")
 
 
 def session_speeds(provider: str, model: str) -> list[dict[str, str]]:
@@ -361,9 +378,9 @@ def read_setup(path: Path, tables: dict[str, TableReader]) -> Setup:
     if "{session}" not in values["attach"]:
         raise SetupError(f"{path}: attach must contain {{session}}, where the session's id goes")
     providers = values["providers"]
-    if (not isinstance(providers, list) or not providers or any(p not in ("claude", "codex") for p in providers)
+    if (not isinstance(providers, list) or not providers or any(p not in PROVIDERS for p in providers)
             or len(set(providers)) != len(providers)):
-        raise SetupError(f"{path}: providers must be a non-empty list of claude and/or codex")
+        raise SetupError(f"{path}: providers must be a non-empty list of {', '.join(PROVIDERS)}, each once")
     if values["default_provider"] not in providers:
         raise SetupError(f"{path}: default_provider must be enabled in providers")
     features = values["features"]

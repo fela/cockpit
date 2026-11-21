@@ -98,7 +98,8 @@ export PATH="$PWD/.venv/bin:$PATH"
 Make the same directory available in the environment that starts Cockpit and your
 agents. Install or link `src/cockpit/skills/cockpit`, `src/cockpit/skills/writing-style` and
 `src/cockpit/skills/sign-in-links` into your agent's skills directory so it can load the bundled instructions. For Claude Code, the usual location is
-`~/.claude/skills/cockpit`; for Codex, it is `~/.codex/skills/cockpit`.
+`~/.claude/skills/cockpit`; for Codex, it is `~/.codex/skills/cockpit`; for Gemini,
+`~/.gemini/skills/cockpit`. Grok Build also reads `~/.claude/skills`.
 
 Setup enables the selected provider. Edit `providers` and `default_provider` in
 `setup.toml` to enable both. The example configuration explains each setting:
@@ -150,6 +151,30 @@ a message, check whether its requested work started or completed before retrying
 The restart test covers Linux with a fake Codex process; the macOS launchd path
 still needs a live check.
 
+### Gemini and Grok
+
+Cockpit can also run sessions on the [Gemini CLI](https://github.com/google-gemini/gemini-cli)
+and on [Grok Build](https://github.com/xai-org/grok-build), xAI's coding agent CLI. It drives
+both over the [Agent Client Protocol](https://agentclientprotocol.com) (ACP): `gemini --acp`
+and `grok agent stdio`. Install the CLI, sign in once by running it in a terminal, and add
+`"gemini"` or `"grok"` to `providers` in `setup.toml`; Cockpit runs `gemini` and `grok` from
+PATH, and a provider left out of `providers` starts nothing and shows nothing. Google has
+[retired Gemini CLI access for individual Google accounts](https://github.com/google-gemini/gemini-cli/discussions/28017),
+so sign in with an account or API key that still has it. The new-session menu then offers them:
+Gemini's models are the CLI's own aliases (Auto, Pro, Flash, Flash-Lite), and Grok runs on
+the CLI's default model. A session keeps the agent and model it started with.
+
+Gemini approves file edits by itself and asks before anything else; Grok asks before each
+tool call. A request either one makes appears as a card on Cockpit, as Codex's do, with the
+command, files and diff the agent sent. Cockpit runs one agent process per model and working
+folder, so a checkout's `.env` reaches only that checkout's sessions. The session view shows
+each session's messages and each tool call's kind and status; Cockpit keeps no call title,
+input or output.
+
+These agents are the server's children. A Cockpit restart ends their running turns and marks
+them failed, and the session's next message loads it again. Cockpit shows no usage meters for
+them, and the emergency session runs only Claude and Codex.
+
 Claude permission prompts reach Cockpit through two hooks in your Claude Code
 settings. Add these entries to the existing `hooks` object, preserving other hooks:
 
@@ -160,8 +185,8 @@ settings. Add these entries to the existing `hooks` object, preserving other hoo
 }
 ```
 
-Claude permission rules and generated explanations are specific to Claude. Codex
-approval and question cards appear directly on Cockpit.
+Claude permission rules and generated explanations are specific to Claude. Codex,
+Gemini and Grok approval and question cards appear directly on Cockpit.
 
 Permission explanations include your optional `~/AGENTS.md` instructions when that
 file exists. Cockpit works without this file.

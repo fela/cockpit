@@ -609,7 +609,7 @@ class NewSessionStart(Body):
     nullable = frozenset({"session_id", "new_cwd", "provider", "model", "effort", "account", "speed"})
 
     new_cwd: str | None
-    provider: Literal["claude", "codex"] | None
+    provider: Literal["claude", "codex", "gemini", "grok"] | None
     model: OptionName | None
     effort: OptionName | None
     account: OptionName | None
@@ -642,7 +642,7 @@ class HandOff(Body):
     session_id: SessionId | None = None
     new_cwd: str | None = None
     # A new session's options (SPEC SESSION-22), each null for the default; store.start_options checks them.
-    provider: Literal["claude", "codex"] | None = None
+    provider: Literal["claude", "codex", "gemini", "grok"] | None = None
     model: OptionName | None = None
     effort: OptionName | None = None
     account: OptionName | None = None
@@ -883,7 +883,7 @@ class ItemAdd(Body):
     pinned: bool
     # What its session starts with (SPEC SESSION-22), each null or left out for the default; a page loaded before
     # these options sends none.
-    provider: Literal["claude", "codex"] | None = None
+    provider: Literal["claude", "codex", "gemini", "grok"] | None = None
     model: OptionName | None = None
     effort: OptionName | None = None
     account: OptionName | None = None
@@ -963,7 +963,7 @@ class Target(Body):
     session_id: SessionId | None = None
     new_cwd: str | None = None
     # A new session's options (SPEC SESSION-22), each null for the default; store.start_options checks them.
-    provider: Literal["claude", "codex"] | None = None
+    provider: Literal["claude", "codex", "gemini", "grok"] | None = None
     model: OptionName | None = None
     effort: OptionName | None = None
     account: OptionName | None = None
@@ -2238,7 +2238,9 @@ def create_app(
         # The model a Claude session's latest own call ran on, which the step menu names.
         models = spend_index.latest_models()
         # What the prompt cache of the session that gets each step's answer holds, and until when.
-        caches = {"claude": spend_index.caches(), "codex": codex_index.caches()}
+        # Cockpit reads no prompt cache for the ACP agents (SPEC SESSION-30).
+        caches = {"claude": spend_index.caches(), "codex": codex_index.caches(),
+                  **{provider: {} for provider in config.ACP_PROVIDERS}}
         for group in ("queue", "ready_next", "snoozed", "with_agents"):
             for step in result[group]:
                 target = step["target"]
@@ -2247,11 +2249,15 @@ def create_app(
         checkpoint("spend")
         codex_settings = {each["session_id"]: dict(each) for each in conn.execute(
             "SELECT session_id, model, effort, speed FROM codex_threads")}
+        acp_models = dict(conn.execute("SELECT session_id, model FROM acp_sessions").fetchall())
         transcript_usages = view.usages
         checkpoint("transcripts")
         for row in result["sessions"]:
             row["spend"] = spent.get(row["session_id"])
-            if row.get("provider") != "codex":
+            if row.get("provider") in config.ACP_PROVIDERS:
+                row["model"] = acp_models.get(row["session_id"])
+                row["settings"] = {"provider": row["provider"], "model": row["model"], "effort": None, "speed": None}
+            elif row.get("provider") != "codex":
                 row["model"] = models.get(row["session_id"])
                 latest = conn.execute(
                     "SELECT new_options FROM messages WHERE session_id = ? AND state = 'sent'"
@@ -2270,7 +2276,7 @@ def create_app(
                 row["model"] = chosen.get("model")
                 row["settings"] = {"provider": "codex", **{key: chosen.get(key) for key in ("model", "effort", "speed")}}
             row["handover"] = handovers.status(conn, row["session_id"])
-            choices = dict(local_capacity.get(row.get("account"), {})) if local_capacity is not None and row.get("provider") != "codex" else dict(capacity)
+            choices = dict(local_capacity.get(row.get("account"), {})) if local_capacity is not None and row.get("provider") not in ("codex", *config.ACP_PROVIDERS) else dict(capacity)
             row["settings"]["capacity"] = model_capacity.for_session(
                 transcript_usages.get(row["session_id"]), row["settings"]["model"], row["settings"]["provider"], choices, now,
             )
@@ -3209,7 +3215,7 @@ def create_app(
         sweeper.resume(conn, "forked a session")
         session = copyable_session(body.session_id)
         if session.provider != "claude":
-            raise store.Invalid("Fork copies a Claude session; this one runs on Codex")
+            raise store.Invalid(f"Fork copies a Claude session; this one runs on {config.PROVIDER_NAMES[session.provider]}")
         forked = store.fork(conn, item_id, session.session_id, session.cwd, body.text, settings.checkouts_dir)
         background.add_task(deliverer.send, forked["message"]["id"])
         return forked

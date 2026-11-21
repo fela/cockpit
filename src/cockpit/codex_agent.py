@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    from cockpit.acp_agent import Agents
     from cockpit.codex_worker import WorkerClient
 
 from cockpit import config, db, patterns
@@ -659,7 +660,7 @@ class ProviderSessions:
     and `snapshot(wait=True)` decides whether a session exists, so both raise; so does every call before the
     worker's first listing, when "none yet" would read as "none"."""
 
-    def __init__(self, claude, codex: CodexAgent | WorkerClient | None) -> None:
+    def __init__(self, claude, codex: CodexAgent | WorkerClient | Agents | None) -> None:
         self.claude, self.codex = claude, codex
         self._codex_last: list[Session] | None = None
 
