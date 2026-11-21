@@ -214,8 +214,9 @@ def _command(call: dict[str, Any]) -> str:
     raw = call.get("rawInput")
     if isinstance(raw, dict) and isinstance(raw.get("command"), str):
         return raw["command"]
-    if not raw and call.get("kind") == "execute" and isinstance(call.get("title"), str):
-        return call["title"]
+    title = call.get("title")
+    if not raw and call.get("kind") == "execute" and isinstance(title, str) and title.strip():
+        return title
     return json.dumps(raw, ensure_ascii=False) if raw else ""
 
 

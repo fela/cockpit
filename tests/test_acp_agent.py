@@ -13,7 +13,7 @@ from typing import Any
 
 import pytest
 
-from cockpit import config, db, parts, server, sweeper
+from cockpit import acp_agent, config, db, parts, server, sweeper
 from cockpit.acp_agent import PERMISSION_METHOD, AcpAgent, AcpError, Agents, agent_args
 from tests.conftest import SESSION_A, make_session
 from tests.test_api import put_item, put_step
@@ -509,3 +509,8 @@ def test_the_board_shows_a_step_for_a_gemini_session(world) -> None:
     assert (step["target"]["provider"], step["cache"]) == ("gemini", None)
     [row] = [each for each in state["sessions"] if each["session_id"] == SESSION_A]
     assert (row["model"], row["settings"]["provider"], row["settings"]["model"]) == ("pro", "gemini", "pro")
+
+
+def test_a_blank_execute_title_is_no_command() -> None:
+    assert acp_agent._command({"kind": "execute", "title": "   "}) == ""
+    assert acp_agent._command({"kind": "execute", "title": "ls -la"}) == "ls -la"
