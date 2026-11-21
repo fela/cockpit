@@ -1,5 +1,6 @@
-"""Separate Cockpits for one user, such as work and personal (SPEC SCOPE-6): each instance keeps its own files,
-port, service, and Claude and Codex folders, and a session reaches the instance its folders belong to."""
+"""Separate Cockpits for one user, such as work and personal (SPEC SCOPE-7): COCKPIT_INSTANCE names the instance,
+each instance keeps its own files, port, service, cookies, and Claude and Codex folders, and without a name Cockpit
+keeps what a single Cockpit has always used."""
 
 from __future__ import annotations
 
@@ -11,39 +12,20 @@ from pathlib import Path
 
 import pytest
 
-from cockpit import accounts, config, parts
+from cockpit import config, parts, permissions, sidechat
+from tests.test_resources import AGENT_SESSION, OTHER_SESSION, FakeProc, Proc, agent_tree, cpu_of, sampler_for, step
 from tests.test_setup import write_setup
 
 
-def test_cockpit_instance_names_the_instance(tmp_path: Path) -> None:
-    assert config.find_instance({}, tmp_path) == ""
-    assert config.find_instance({"COCKPIT_INSTANCE": "personal"}, tmp_path) == "personal"
-    assert config.find_instance({"COCKPIT_INSTANCE": ""}, tmp_path) == ""
+def test_cockpit_instance_alone_names_the_instance() -> None:
+    assert config.find_instance({}) == ""
+    assert config.find_instance({"COCKPIT_INSTANCE": ""}) == ""
+    assert config.find_instance({"COCKPIT_INSTANCE": "personal"}) == "personal"
+    # The Claude or Codex folder a session runs on names no instance.
+    assert config.find_instance({"CLAUDE_CONFIG_DIR": "/home/u/.claude-home", "CODEX_HOME": "/home/u/.codex-home"}) == ""
     for wrong in ("work", "Personal", "home-2", "2home", "a/b", "x" * 21):
         with pytest.raises(config.InstanceError):
-            config.find_instance({"COCKPIT_INSTANCE": wrong}, tmp_path)
-
-
-def test_a_session_reaches_the_instance_its_folders_belong_to(tmp_path: Path) -> None:
-    """A hook or `cockpit` command run by a session that a daemon started without COCKPIT_INSTANCE still finds its
-    instance, by the Claude or Codex folder the session runs on, once that instance is set up."""
-    claude, second, codex = (str(tmp_path / name) for name in (".claude-home", ".claude-home-2", ".codex-home-2"))
-    assert config.find_instance({"CLAUDE_CONFIG_DIR": claude}, tmp_path) == ""  # not set up
-    (tmp_path / ".config" / "cockpit-home").mkdir(parents=True)
-    assert config.find_instance({"CLAUDE_CONFIG_DIR": claude}, tmp_path) == "home"
-    assert config.find_instance({"CLAUDE_CONFIG_DIR": second}, tmp_path) == "home"
-    assert config.find_instance({"CODEX_HOME": codex}, tmp_path) == "home"
-    # COCKPIT_INSTANCE wins over the folders.
-    (tmp_path / ".config" / "cockpit-side").mkdir()
-    assert config.find_instance({"COCKPIT_INSTANCE": "side", "CLAUDE_CONFIG_DIR": claude}, tmp_path) == "side"
-
-
-def test_the_unnamed_instances_folders_name_no_instance(tmp_path: Path) -> None:
-    (tmp_path / ".config" / "cockpit-work").mkdir(parents=True)
-    for environ in ({"CLAUDE_CONFIG_DIR": str(tmp_path / ".claude")}, {"CLAUDE_CONFIG_DIR": str(tmp_path / ".claude-work")},
-                    {"CODEX_HOME": str(tmp_path / ".codex")}, {"CODEX_HOME": str(tmp_path / ".codex-2")},
-                    {"CLAUDE_CONFIG_DIR": str(tmp_path / "elsewhere" / ".claude-home")}):
-        assert config.find_instance(environ, tmp_path) == "", environ
+            config.find_instance({"COCKPIT_INSTANCE": wrong})
 
 
 def test_a_named_instance_has_claude_folders_of_its_own(tmp_path: Path) -> None:
@@ -55,10 +37,8 @@ def test_a_named_instance_has_claude_folders_of_its_own(tmp_path: Path) -> None:
     assert (first.name, first.letter, first.folder, first.state) == (
         "home", "H", tmp_path / ".claude-home", tmp_path / ".claude-home" / ".claude.json")
     assert (second.name, second.folder) == ("home2", tmp_path / ".claude-home-2")
-    assert first.default and not first.claude_default and not second.default and not second.claude_default
-    # Every `claude` a named instance runs names its folder, even on its first account.
-    assert accounts.claude_env(first) == ["env", f"CLAUDE_CONFIG_DIR={first.folder}"]
-    assert accounts.claude_env(unnamed[0]) == ["env", "-u", "CLAUDE_CONFIG_DIR"]
+    assert first.default and not second.default
+    # Every `claude` a named instance runs names its folder, even on its first account: the probe below.
 
 
 def test_the_setup_names_the_port(tmp_path: Path) -> None:
@@ -99,56 +79,120 @@ def test_local_setup_writes_the_port(tmp_path: Path, monkeypatch: pytest.MonkeyP
         config.setup.cache_clear()
 
 
-# What a fresh process of each instance makes of its environment, as the server and the `cockpit` command see it.
+# What a fresh process of an instance makes of its environment, as the server and the `cockpit` command see it.
 PROBE = """
 import json
-from cockpit import auth, config, local
+from cockpit import accounts, auth, config, local, permissions, resources
 print(json.dumps({
     "instance": config.INSTANCE, "data": str(config.DATA_DIR), "config": str(config.CONFIG_DIR),
-    "settings": str(config.CLAUDE_SETTINGS), "accounts": [str(a.folder) for a in config.ACCOUNTS],
-    "codex": [str(home) for home in config.CODEX_HOMES], "label": local.LABEL, "unit": local.SYSTEMD_UNIT,
-    "cookie": auth.LOCAL_SESSION_COOKIE, "environment": config.instance_environment(),
+    "settings": str(config.CLAUDE_SETTINGS), "claude": str(config.CLAUDE_HOME),
+    "accounts": [str(a.folder) for a in config.ACCOUNTS], "codex": [str(home) for home in config.CODEX_HOMES],
+    "first_claude": accounts.claude_env(config.ACCOUNTS[0]), "label": local.LABEL, "unit": local.SYSTEMD_UNIT,
+    "restart": local.SYSTEMD_RESTART_SCRIPT, "attach": local.ATTACH, "port": config.setup().port,
+    "cookies": [auth.SIGN_IN_COOKIE, auth.SESSION_COOKIE, auth.LOCAL_SESSION_COOKIE, auth.VISITOR_COOKIE,
+                auth.VISITOR_SIGN_IN_COOKIE],
+    "environment": config.instance_environment(), "lock": str(config.deploy_lock(config.DATA_DIR)),
+    "transcripts": resources.FD_SESSION[1].pattern.split("/")[0],
+    "secrets": [place for place in permissions.SECRET_PLACES if place.startswith((".config/cockpit", ".codex"))],
 }))
 """
 
 
-def probe(home: Path, **environ: str) -> dict:
-    keep = {key: value for key, value in os.environ.items()
-            if key not in {"COCKPIT_INSTANCE", "CLAUDE_CONFIG_DIR", "CODEX_HOME"}}
-    result = subprocess.run([sys.executable, "-c", PROBE], env=keep | {"HOME": str(home)} | environ,
+def probe(home: Path, environ: dict[str, str]) -> dict:
+    """PROBE run with HOME at `home`, the shell's COCKPIT_INSTANCE and CLAUDE_CONFIG_DIR dropped, and CODEX_HOME at a
+    folder of no instance, then `environ`."""
+    keep = {key: value for key, value in os.environ.items() if key not in {"COCKPIT_INSTANCE", "CLAUDE_CONFIG_DIR"}}
+    result = subprocess.run([sys.executable, "-c", PROBE],
+                            env=keep | {"HOME": str(home), "CODEX_HOME": str(home / "elsewhere")} | environ,
                             capture_output=True, text=True, check=True)
     return json.loads(result.stdout)
 
 
-def test_each_instance_keeps_its_own_files_and_services(tmp_path: Path) -> None:
-    unnamed = probe(tmp_path)
-    assert unnamed == {
+def test_without_a_name_cockpit_uses_what_a_single_cockpit_always_used(tmp_path: Path) -> None:
+    """Every folder, port, service, cookie and variable, written out as main had them before instances."""
+    (tmp_path / ".config" / "cockpit").mkdir(parents=True)
+    write_setup(tmp_path / ".config" / "cockpit", {})
+    assert probe(tmp_path, {}) == {
         "instance": "", "data": str(tmp_path / ".local/share/cockpit"), "config": str(tmp_path / ".config/cockpit"),
-        "settings": str(tmp_path / ".claude/settings.json"),
+        "settings": str(tmp_path / ".claude/settings.json"), "claude": str(tmp_path / ".claude"),
         "accounts": [str(tmp_path / ".claude"), str(tmp_path / ".claude-work")],
         "codex": [str(tmp_path / ".codex"), str(tmp_path / ".codex-2")],
-        "label": "cockpit.server", "unit": "cockpit", "cookie": "cockpit_local_session", "environment": {},
+        "first_claude": ["env", "-u", "CLAUDE_CONFIG_DIR"], "label": "cockpit.server", "unit": "cockpit",
+        "restart": 'sleep "$1"; exec systemctl --user restart cockpit', "attach": "cockpit attach {session}",
+        "port": 8790,
+        "cookies": ["__Host-cockpit_sign_in", "__Host-cockpit_session", "cockpit_local_session", "__Host-p_visitor",
+                    "__Host-p_sign_in"],
+        "environment": {}, "lock": str(tmp_path / ".local/share/cockpit/deploy.lock"), "transcripts": r"\.claude",
+        "secrets": [".config/cockpit/token", ".config/cockpit/local-login-token", ".config/cockpit/cookie-key",
+                    ".config/cockpit/google-oauth-client.json", ".config/cockpit/secrets", ".config/cockpit/signins",
+                    ".codex/auth.json", ".codex-2/auth.json"],
     }
-    named = probe(tmp_path, COCKPIT_INSTANCE="home")
-    assert named == {
+
+
+def test_a_named_instance_keeps_its_own_files_services_and_codex_folder(tmp_path: Path) -> None:
+    (tmp_path / ".config" / "cockpit-home").mkdir(parents=True)
+    write_setup(tmp_path / ".config" / "cockpit-home", {"port": 8791})
+    assert probe(tmp_path, {"COCKPIT_INSTANCE": "home"}) == {
         "instance": "home", "data": str(tmp_path / ".local/share/cockpit-home"),
         "config": str(tmp_path / ".config/cockpit-home"), "settings": str(tmp_path / ".claude-home/settings.json"),
+        "claude": str(tmp_path / ".claude-home"),
         "accounts": [str(tmp_path / ".claude-home"), str(tmp_path / ".claude-home-2")],
         "codex": [str(tmp_path / ".codex-home"), str(tmp_path / ".codex-home-2")],
-        "label": "cockpit.server.home", "unit": "cockpit-home", "cookie": "cockpit_local_session-home",
+        "first_claude": ["env", f"CLAUDE_CONFIG_DIR={tmp_path / '.claude-home'}"], "label": "cockpit.server.home",
+        "unit": "cockpit-home", "restart": 'sleep "$1"; exec systemctl --user restart cockpit-home',
+        "attach": "COCKPIT_INSTANCE=home cockpit attach {session}", "port": 8791,
+        "cookies": ["__Host-cockpit_sign_in-home", "__Host-cockpit_session-home", "cockpit_local_session-home",
+                    "__Host-p_visitor-home", "__Host-p_sign_in-home"],
+        # The server's environment names the instance and its own Codex folder, in place of the shell's CODEX_HOME.
         "environment": {"COCKPIT_INSTANCE": "home", "CODEX_HOME": str(tmp_path / ".codex-home")},
+        # Every instance deploys under one lock, since instances may share one virtualenv.
+        "lock": str(tmp_path / ".local/share/cockpit/deploy.lock"), "transcripts": r"\.claude\-home",
+        "secrets": [".config/cockpit-home/token", ".config/cockpit-home/local-login-token",
+                    ".config/cockpit-home/cookie-key", ".config/cockpit-home/google-oauth-client.json",
+                    ".config/cockpit-home/secrets", ".config/cockpit-home/signins", ".codex-home/auth.json",
+                    ".codex-home-2/auth.json"],
     }
-    # A session on the instance's second Claude account, started without COCKPIT_INSTANCE, reaches the same files.
-    (tmp_path / ".config" / "cockpit-home").mkdir(parents=True)
-    assert probe(tmp_path, CLAUDE_CONFIG_DIR=str(tmp_path / ".claude-home-2")) == named
 
 
-def test_the_page_checks_a_local_origin_on_the_port_it_names() -> None:
-    """The app's own check (create_app) has no setup at hand: an origin on another port passes only when written
-    exactly as the loopback address on that port."""
-    config.validate_local_origin("http://127.0.0.1:8791")
-    config.validate_local_origin("http://localhost:8791")
-    for wrong in ("http://127.0.0.1:8791/", "http://0.0.0.0:8791", "http://localhost:8791@evil.test", "http://127.0.0.1",
-                  "https://127.0.0.1:8791", "http://127.0.0.1:port", "http://127.0.0.1.evil.test:8791"):
+def test_every_instances_credentials_stay_closed(tmp_path: Path) -> None:
+    """The credential files of another instance on the machine are as closed as this instance's own."""
+    others = [".config/cockpit-home/token", ".config/cockpit-home/cookie-key", ".claude-home/.credentials.json",
+              ".claude-home-2/.credentials.json", ".codex-home/auth.json", ".codex-home-2/auth.json"]
+    for name in [*others, ".claude-home/settings.json"]:
+        (tmp_path / name).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / name).write_text("x")
+    assert set(others) <= set(permissions.secret_places(tmp_path))
+    assert [permissions.showable(tmp_path / name, tmp_path) for name in others] == [None] * len(others)
+    assert permissions.showable(tmp_path / ".claude-home/settings.json", tmp_path) is not None
+    denied = sidechat.denied_reads(tmp_path)
+    assert {f"/{tmp_path / name}" for name in others} <= set(denied)
+    assert "~/.codex*/auth.json" in denied
+
+
+def test_without_other_instances_the_credential_places_are_mains(tmp_path: Path) -> None:
+    assert permissions.secret_places(tmp_path) == permissions.SECRET_PLACES
+
+
+def test_the_sampler_leaves_another_instances_programs_unattributed(tmp_path: Path) -> None:
+    """A program whose environment names another instance counts on the host but on none of this instance's
+    sessions, even with a session id in its environment."""
+    proc = FakeProc(tmp_path / "proc")
+    agent_tree(proc)
+    own = proc.add(Proc(40, "python3", 1, "python3 job.py", start=400, env=f"CLAUDE_CODE_SESSION_ID={OTHER_SESSION}\0"))
+    other = proc.add(Proc(41, "python3", 1, "python3 job.py", start=410,
+                          env=f"COCKPIT_INSTANCE=home\0CLAUDE_CODE_SESSION_ID={AGENT_SESSION}\0"))
+    sampler = sampler_for(proc)
+    step(sampler, proc, 0)
+    own.ticks += 10
+    other.ticks += 10
+    step(sampler, proc, 5)
+    assert cpu_of(sampler) == {(OTHER_SESSION, "Other Python"): 0.1, ("", "Other Python"): 0.1}
+
+
+def test_a_local_origin_is_the_loopback_address_on_the_setups_port() -> None:
+    config.validate_local_origin("http://127.0.0.1:8791", 8791)
+    config.validate_local_origin("http://localhost:8791", 8791)
+    for wrong in ("http://127.0.0.1:8790", "http://127.0.0.1:8791/", "http://0.0.0.0:8791",
+                  "http://localhost:8791@evil.test", "http://127.0.0.1", "https://127.0.0.1:8791"):
         with pytest.raises(config.SetupError):
-            config.validate_local_origin(wrong)
+            config.validate_local_origin(wrong, 8791)
