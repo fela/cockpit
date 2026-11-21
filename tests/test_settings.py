@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import dataclasses
 from datetime import UTC, datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -199,3 +200,41 @@ def test_a_failure_too_close_to_the_users_next_digest_promises_no_retry(world: W
     fail(world, first)
     assert listing(world, at(19, 8, 40))["digest"]["retry_at"] is None
     assert digest(world, at(19, 9, 35)) is None
+
+
+@pytest.mark.usefixtures("settings_on", "team")
+def test_a_failed_digest_keeps_its_retry_when_the_user_moves_the_digest_later(world: World) -> None:
+    brief(world, 11, 7, True)
+    first = digest(world, at(11, 8))
+    fail(world, first)
+    put(world, digest_hour=11)
+    assert digest(world, at(11, 9, 10)) is None  # the week starts at 11:00 now
+    assert listing(world, at(11, 11, 0))["digest"]["retry_at"] == "2026-01-11T02:05:00Z"
+    again = digest(world, at(11, 11, 0))
+    assert again is not None and again["id"] != first["id"] and again["new_name"] == "Weekly digest Sun 11 Jan"
+
+
+@pytest.mark.usefixtures("team")
+def test_a_failed_digest_keeps_its_retry_after_a_time_zone_change(world: World) -> None:
+    utc = dataclasses.replace(SETUP(), features=(briefing.DIGEST_FEATURE,), timezone=ZoneInfo("UTC"))
+    new_york = dataclasses.replace(utc, timezone=ZoneInfo("America/New_York"))
+    sunday = datetime(2026, 1, 11, tzinfo=UTC)
+    conn = db.connect(world.db_path)
+    try:
+        assert briefing.launch_once(conn, utc, sunday.replace(hour=7, minute=5)) is not None
+        briefing.put(conn, "agent:briefing", "2026-01-11", "## Executive summary\n\n- News of the 11th.")
+        first = briefing.launch_digest_once(conn, utc, sunday.replace(hour=8, minute=5))
+        assert first is not None
+    finally:
+        conn.close()
+    fail(world, {"id": first})
+    conn = db.connect(world.db_path)
+    try:
+        # 04:05 in New York: the week of 11 January starts at 08:00 there, and the retry waits for it.
+        assert briefing.launch_digest_once(conn, new_york, sunday.replace(hour=9, minute=10)) is None
+        again = briefing.launch_digest_once(conn, new_york, sunday.replace(hour=13, minute=0))
+        assert again is not None and again != first
+        assert store.get_message(conn, again)["new_name"] == "Weekly digest Sun 11 Jan"
+    finally:
+        conn.close()
+

@@ -304,16 +304,17 @@ def _digest_retry(
     conn: sqlite3.Connection, setup: Setup, record: dict[str, Any], launched: dict[str, Any], now: datetime
 ) -> datetime | None:
     """When Cockpit asks again for a digest whose message failed: RETRY_MINUTES later, while a team is set, the
-    request's week is the current one at `now` and the digest is not stored, as for a briefing, and only when the
-    week is still the current one then. The scheduler and the page both ask this, so the page promises only the
-    retry the scheduler runs."""
+    request's week is the current one at `now` and the digest is not stored, as for a briefing, and only when that
+    comes before the next week's digest. A retry time the schedule now places before the week's start, after the
+    user moved the digest later or changed the time zone, still counts: the retry runs once the week is current.
+    The scheduler and the page both ask this, so the page promises only the retry the scheduler runs."""
     current = _digest_week(conn, setup, now)
     if launched["state"] != "failed" or not team(conn) or current is None or record["day"] != current.isoformat():
         return None
     if _written(conn, WEEKLY, record["day"]):
         return None
     retry = datetime.fromisoformat(launched["created_at"]) + timedelta(minutes=RETRY_MINUTES)
-    return retry if _digest_week(conn, setup, retry) == current else None
+    return retry if _digest_week(conn, setup, retry) <= current else None
 
 
 def _quoted(body: str) -> str:
