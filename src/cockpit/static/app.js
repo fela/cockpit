@@ -1626,24 +1626,37 @@ function closeItemRow(item, pressed) {
   closedNotice([item.id], () => patchItem(item, { archived: false }, null), null);
 }
 
-// Reopen on a finished task (SPEC CONTROL-33): the task goes back to Busy as the user's message would take it
-// (CONTROL-28), with no words to write, and Cockpit tells its session it may post there again. A task closed as not
-// needed has Unarchive in its row instead.
+// Reopen on a finished task (SPEC CONTROL-34), with "reopen" in the setup's features: the task is taken up again as
+// the user's message would take it (CONTROL-28), with no words to write, and the server tells its session. A task
+// closed as not needed has Unarchive in its row instead.
 // `close`: the item's Close key, which Reopen keeps beside it at the row's end.
-function closeKeys(item, close) {
-  if (item.stage !== "done" || item.archived) return close;
+function closeKeys(item, state, close) {
+  if (item.stage !== "done" || item.archived || !state.features.includes("reopen")) return close;
   return h("span", { class: "end-keys" }, h("button", {
-    class: "button reopen-task", type: "button", title: "Back to Busy; its session can post here again",
+    class: "button reopen-task", type: "button", title: "Take this task up again; its session can post here again",
     onclick: () => takeUpTask(item),
   }, icon("back"), h("span", { class: "label", text: "Reopen" })), close);
 }
 
+// The page sends the session it showed, and the server refuses the press when the task has another one by then. With a
+// session the task moves to Busy at once, as a Send would move it; with none it waits for its next move in Waiting.
 function takeUpTask(item) {
+  const session = item.sessions[0] ?? null;
+  const send = () => afterFinishes(() => api("POST", `/api/items/${item.id}/take-up`, { session_id: session }));
   return run(`take-up:${item.id}`, async () => {
+    if (session === null) {
+      try {
+        await send();
+      } catch (error) {
+        throw refused("Not reopened", error);
+      }
+      toast(`Reopened “${item.title}”. With no session on it, it waits in Waiting.`);
+      reopenConfirmed(item);
+      return;
+    }
     const task = reopening(item.id);
     try {
-      await optimistic((state) => reopenedByMessage(state, item.id),
-        () => afterFinishes(() => api("POST", `/api/items/${item.id}/take-up`)));
+      await optimistic((state) => reopenedByMessage(state, item.id), send);
     } catch (error) {
       takeBackReopened(task);
       throw refused("Not reopened", error);
@@ -10898,7 +10911,7 @@ function itemRow(item, state, sessions, line) {
       historyBlock(item, state, null, null),
       linkList(key, itemLinks(item, null), ""),
       sessionList(linked, item, null, state),
-      h("div", { class: "item-controls-row" }, itemControls(item, state, `${item.id}`), closeKeys(item, h("button", {
+      h("div", { class: "item-controls-row" }, itemControls(item, state, `${item.id}`), closeKeys(item, state, h("button", {
         class: "button close-item", type: "button",
         onclick: (event) => closeItemRow(item, event.currentTarget),
       }, icon("archive"), h("span", { class: "label", text: "Close" })))),
