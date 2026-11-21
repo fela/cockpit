@@ -77,7 +77,7 @@ def ask(
     if step_id is not None and store.get_step(conn, step_id)["item_id"] != item_id:
         raise store.Invalid(f"step {step_id} is not on item {item_id}")
     if session.provider != "claude":
-        raise store.Invalid("Ask copies a Claude session; this one runs on Codex")
+        raise store.Invalid(f"Ask copies a Claude session; this one runs on {config.PROVIDER_NAMES[session.provider]}")
     if Path.home().is_relative_to(Path(session.cwd).resolve()):
         raise store.Invalid(
             f"this session works in {session.cwd}, which holds the home folder's credentials. Ask's copy reads the"

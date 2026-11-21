@@ -1530,7 +1530,7 @@ function drawSessionLog(first) {
   else if (!log) nodes.push(h("p", { class: "note", text: "Reading its conversation…" }));
   else if (!log.parts.length) nodes.push(h("p", { class: "note", text: "Send a message to start" }));
   else {
-    if (log.total > log.parts.length) nodes.push(h("p", { class: "note log-start", text: `Last ${log.parts.length} entries; ${session.provider === "codex" ? "Codex keeps the earlier ones" : "open iTerm2 for earlier messages"}` }));
+    if (log.total > log.parts.length) nodes.push(h("p", { class: "note log-start", text: `Last ${log.parts.length} entries; ${session.provider === "codex" ? "Codex keeps the earlier ones" : session.provider && session.provider !== "claude" ? "Cockpit keeps the earlier ones" : "open iTerm2 for earlier messages"}` }));
     let calls = [];
     const flush = () => { if (calls.length) nodes.push(callRun(calls)); calls = []; };
     for (const part of log.parts) {
@@ -1610,7 +1610,7 @@ function keptOpen(key, el) {
 function callRun(calls) {
   const counts = new Map();
   for (const call of calls) {
-    const [one, many] = CALL_KINDS[call.tool_name] || [call.tool_name, call.tool_name];
+    const [one, many] = Object.hasOwn(CALL_KINDS, call.tool_name) ? CALL_KINDS[call.tool_name] : [call.tool_name, call.tool_name];
     const seen = counts.get(one) || { many, count: 0 };
     seen.count += 1;
     counts.set(one, seen);

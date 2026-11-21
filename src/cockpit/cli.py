@@ -1415,7 +1415,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     send.add_argument("--item", type=int, help="item id the message is about")
     send.add_argument("--step", type=int, help="with --item: the step it answers; its target session is used")
-    send.add_argument("--provider", choices=("claude", "codex"), help="provider for --new-in (defaults to setup.toml)")
+    send.add_argument("--provider", choices=config.PROVIDERS, help="provider for --new-in (defaults to setup.toml)")
     where = send.add_mutually_exclusive_group()
     where.add_argument("--session", help="session UUID")
     where.add_argument("--new-in", help="start a new session in this checkout")

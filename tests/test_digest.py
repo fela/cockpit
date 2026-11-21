@@ -402,7 +402,8 @@ def test_with_the_digest_off_nothing_of_it_runs_or_shows(world: World, monkeypat
 
 
 def test_the_digest_migration_keeps_each_briefing_as_a_daily_one(tmp_path: Path, monkeypatch) -> None:
-    old = database_at(tmp_path / "old.db", len(db.MIGRATIONS) - 1)
+    digest = next(i for i, sql in enumerate(db.MIGRATIONS) if "CREATE TABLE new_briefings" in sql)
+    old = database_at(tmp_path / "old.db", digest)
     old.execute(
         "INSERT INTO briefings (id, day, since, until, body, created_by, created_at, updated_at)"
         " VALUES (4, '2026-01-11', 'a', 'b', 'Quiet day.', 'agent:briefing', 'c', 'd')"

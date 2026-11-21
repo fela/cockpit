@@ -1777,6 +1777,35 @@ MIGRATIONS: list[str] = [
     DROP TABLE briefings;
     ALTER TABLE new_briefings RENAME TO briefings;
     """,
+    # Sessions on the ACP agents, Gemini and Grok (SPEC SESSION-30, acp_agent.py). A message may ask for one, so
+    # messages.provider's check takes them too: the check only widens, every stored row still meets it, so the
+    # table's SQL is edited in place (SQLite's documented way to loosen a constraint), which keeps its columns,
+    # indexes and triggers as they are. acp_sessions holds the sessions Cockpit started, acp_log each one's
+    # conversation as the session view shows it, one part per row: ACP has no call that lists a session's past
+    # items, so Cockpit keeps them as they stream.
+    """
+    PRAGMA writable_schema = ON;
+    UPDATE sqlite_schema SET sql = replace(sql, "provider IN ('claude', 'codex')",
+        "provider IN ('claude', 'codex', 'gemini', 'grok')") WHERE type = 'table' AND name = 'messages';
+    PRAGMA writable_schema = RESET;
+    CREATE TABLE acp_sessions (
+        session_id TEXT PRIMARY KEY,
+        provider TEXT NOT NULL CHECK (provider IN ('gemini', 'grok')),
+        name TEXT NOT NULL,
+        cwd TEXT NOT NULL,
+        model TEXT NOT NULL,
+        state TEXT NOT NULL DEFAULT 'stopped',
+        detail TEXT NOT NULL DEFAULT '',
+        updated_at TEXT NOT NULL
+    );
+    CREATE TABLE acp_log (
+        id INTEGER PRIMARY KEY,
+        session_id TEXT NOT NULL REFERENCES acp_sessions(session_id) ON DELETE CASCADE,
+        call_id TEXT,
+        part TEXT NOT NULL
+    );
+    CREATE INDEX acp_log_session ON acp_log(session_id, id);
+    """,
 ]
 
 JSON_COLUMNS = frozenset(

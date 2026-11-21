@@ -64,6 +64,7 @@ from pathlib import Path
 from typing import Any
 
 from cockpit import accounts, config, db, handovers, limits, moves, parts, patterns, rank, removals, store
+from cockpit.acp_agent import Agents
 from cockpit.codex_agent import CodexAgent, CodexError
 from cockpit.codex_worker import WorkerClient
 from cockpit.config import Account, user_name
@@ -633,7 +634,8 @@ class Deliverer:
     short_id_to_uuid: ShortIdLookup
     pick: Pick
     listed: Listed
-    codex: CodexAgent | WorkerClient | None = None
+    # Codex, or acp_agent.Agents holding Codex and the ACP agents (SPEC SESSION-30).
+    codex: CodexAgent | WorkerClient | Agents | None = None
     default_provider: str = "claude"
     enabled_providers: tuple[str, ...] = ("claude",)
 
@@ -650,8 +652,8 @@ class Deliverer:
             return self._locks.setdefault(key, threading.Lock())
 
     def has_session(self, session_id: str) -> bool:
-        """Whether a message to `session_id` has a session to go to: a Codex thread Cockpit runs, or a Claude
-        session on this machine."""
+        """Whether a message to `session_id` has a session to go to: a Codex thread or ACP session Cockpit runs, or a
+        Claude session on this machine."""
         if self.codex is not None and self.codex.owns(session_id):
             return True
         return self.lookup(session_id) is not None
@@ -685,7 +687,7 @@ class Deliverer:
                     if session is None:
                         raise store.NotFound("The Claude session is no longer available on this machine.")
                     if session.provider != "claude":
-                        raise store.Conflict("This session already runs on Codex.")
+                        raise store.Conflict(f"This session already runs on {config.PROVIDER_NAMES[session.provider]}.")
                     if session.name in store.SWEEP_SESSION_NAMES:
                         raise store.Conflict("The sweeper keeps its own session; choose a task's Claude session.")
                     if not session.cwd or not Path(session.cwd).is_dir():
@@ -850,7 +852,7 @@ class Deliverer:
                 failure = ""
                 if session is not None and session.pid is not None:
                     try:
-                        if session.provider == "codex" and self.codex is not None:
+                        if session.provider != "claude" and self.codex is not None:
                             self.codex.stop(session.session_id)
                         else:
                             _run_claude(
@@ -1176,17 +1178,23 @@ class Deliverer:
             provider = message.get("provider") or self.default_provider
             if provider not in self.enabled_providers:
                 raise DeliveryError(f"{provider} is not enabled in setup.toml")
-            if provider == "codex":
+            if provider != "claude":
+                # Codex, or an ACP agent (SPEC SESSION-30): self.codex holds them all (acp_agent.Agents).
+                name = config.PROVIDER_NAMES[provider]
                 if self.codex is None:
-                    raise DeliveryError("Codex is not enabled in setup.toml")
+                    raise DeliveryError(f"{name} is not enabled in setup.toml")
                 options = message["new_options"] or {}
-                offered = config.SESSION_OPTIONS["codex"]
+                offered = config.SESSION_OPTIONS[provider]
+                start = (message["id"], Path(message["new_cwd"]), message["new_name"], text,
+                         options.get("model") or offered["models"][0][0], options.get("effort") or offered["effort"],
+                         options.get("speed") or "standard")
                 try:
-                    sid = self.codex.start_for_message(
-                        message["id"], Path(message["new_cwd"]), message["new_name"], text,
-                        options.get("model") or offered["models"][0][0], options.get("effort") or offered["effort"],
-                        options.get("speed") or "standard",
-                    )
+                    if isinstance(self.codex, Agents):
+                        sid = self.codex.start_for_message(*start, provider=provider)
+                    elif provider == "codex":
+                        sid = self.codex.start_for_message(*start)
+                    else:
+                        raise DeliveryError(f"{name} is not enabled in setup.toml")
                 except CodexError as exc:
                     if exc.session_id is not None:
                         conn = db.connect(self.db_path)
@@ -1198,7 +1206,7 @@ class Deliverer:
                         finally:
                             conn.close()
                     raise DeliveryError(str(exc)) from exc
-                return Sent("new", sid, "started a Codex thread")
+                return Sent("new", sid, "started a Codex thread" if provider == "codex" else f"started a {name} session")
             if message.get("handover_context"):
                 # A command-only first resume obtains Claude's UUID without calling a model. Ownership must be
                 # attached before the real prompt can run, just as the independent Codex worker already does.
@@ -1226,20 +1234,29 @@ class Deliverer:
         conn = db.connect(self.db_path)
         try:
             is_codex = conn.execute("SELECT 1 FROM codex_threads WHERE session_id = ?", (message["session_id"],)).fetchone()
+            acp = conn.execute("SELECT provider FROM acp_sessions WHERE session_id = ?", (message["session_id"],)).fetchone()
         finally:
             conn.close()
-        if is_codex and self.codex is None:
+        if is_codex and (self.codex is None or not self.codex.owns(message["session_id"])):
             raise DeliveryError(
                 "This message goes to a Codex thread, and Codex is not enabled in setup.toml. Cockpit cannot deliver"
                 " it to Claude instead."
             )
+        if acp is not None and (self.codex is None or not self.codex.owns(message["session_id"])):
+            name = config.PROVIDER_NAMES[acp["provider"]]
+            raise DeliveryError(f"This message goes to a {name} session, and {name} is not enabled in setup.toml."
+                                " Cockpit cannot deliver it to Claude instead.")
         if self.codex is not None and self.codex.owns(message["session_id"]):
             session = self.codex.lookup(message["session_id"])
+            name = config.PROVIDER_NAMES.get(session.provider if session is not None else "codex", "Codex")
             if session is not None and session.working_now and not restart and not waited:
-                raise Waiting("Codex is in the middle of a turn")
+                raise Waiting(f"{name} is in the middle of a turn")
             if session is not None and session.waits_on_dialog and not restart:
-                raise Waiting("answer the pending Codex request before sending another message")
+                raise Waiting(f"answer the pending {name} request before sending another message")
             try:
+                if message["new_cwd"] is None and message["new_options"] and not is_codex:
+                    raise DeliveryError(f"A {name} session keeps the model it started with; start a new session for"
+                                        " another model.")
                 if message["new_cwd"] is None and message["new_options"]:
                     conn = db.connect(self.db_path)
                     try:
@@ -1257,7 +1274,7 @@ class Deliverer:
                 self.codex.send(message["session_id"], text, restart=restart or waited)
             except CodexError as exc:
                 raise DeliveryError(str(exc)) from exc
-            return Sent("resume", message["session_id"], "sent a prompt to Codex")
+            return Sent("resume", message["session_id"], f"sent a prompt to {name}")
         if "claude" not in self.enabled_providers:
             raise DeliveryError("Claude is not enabled in setup.toml")
         session = self.lookup(message["session_id"])
@@ -1376,6 +1393,9 @@ class Deliverer:
                 raise DeliveryError("The source session is no longer available on this machine.")
             if session.provider == message["provider"] and pending is None:
                 return message, text
+            if {session.provider, message["provider"]} & set(config.ACP_PROVIDERS):
+                raise DeliveryError(f"A {config.PROVIDER_NAMES[session.provider]} session keeps its agent; start a new"
+                                    f" {config.PROVIDER_NAMES[message['provider']]} session instead.")
             if message["provider"] not in self.enabled_providers:
                 raise DeliveryError(f"{message['provider']} is not enabled")
             if parts.is_standing(source) or session.name in store.SWEEP_SESSION_NAMES:
@@ -1560,7 +1580,7 @@ class Deliverer:
         """Run `claude stop` in `cwd` and wait until the session's process is gone; returns it stopped."""
         if parts.is_standing(session.session_id):
             raise DeliveryError(parts.standing().halt_refusal)
-        if session.provider == "codex" and self.codex is not None:
+        if session.provider != "claude" and self.codex is not None:
             try:
                 self.codex.stop(session.session_id)
             except CodexError as exc:
