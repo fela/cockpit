@@ -14,8 +14,12 @@ set -euo pipefail
 umask 077
 
 LABEL="com.cockpit.activity"
+BUNDLE_ID="com.cockpit.recorder"
 DIR="$HOME/Library/Application Support/Cockpit"
 HEADER="$DIR/activity-header"
+# The recorder runs as its own small app, so macOS names it in Login Items and gives the browser permission to it
+# alone, where a script run by /bin/bash would show as "bash" and share bash's permission.
+APP="$DIR/Cockpit Recorder.app"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 DOMAIN="gui/$(id -u)"
 
@@ -43,6 +47,8 @@ if [ "${1:-}" = "uninstall" ]; then
     told="$(curl -sS --max-time 20 -o /dev/null -w '%{http_code}' -H @"$HEADER" -X POST \
       "__ORIGIN__/api/activity/disconnect")" || told=000
   fi
+  # The permission to read the browsers' front tab goes with the app, reset while macOS can still find it.
+  tccutil reset AppleEvents "$BUNDLE_ID" >/dev/null 2>&1 || true
   rm -f "$PLIST"
   rm -rf "$DIR"
   echo "Removed Cockpit's activity recorder from this Mac."
@@ -53,7 +59,7 @@ if [ "${1:-}" = "uninstall" ]; then
   exit 0
 fi
 
-NEW_LINE="In Cockpit's Your time, press New key (or Connect a Mac) and paste the new line."
+NEW_LINE="In Cockpit's Your time, press Install on your Mac (or New key) and paste the new line."
 NEW_LINE_LATER="press New key in Cockpit's Your time and paste the new line."
 CODE="${1:-}"
 case "$CODE" in
@@ -88,13 +94,25 @@ if [ -z "$KEY" ]; then
   exit 1
 fi
 # The key before no longer works, so the new one goes in place first: a recorder that runs now reads it each minute.
-printf 'Authorization: Bearer %s\n' "$KEY" > "$HEADER"
+# Its own header: the proxy in front of Cockpit drops Authorization.
+printf 'X-Cockpit-Mac-Key: %s\n' "$KEY" > "$HEADER"
 
-unload "It goes on with the new key. To update it, restart the Mac, then $NEW_LINE_LATER"
-rm -f "$DIR/activity-key"
-cat > "$DIR/activity.sh" <<'RECORDER'
+# The new app is built beside the recorder that runs now, which goes on with the new key until the swap below.
+BUILD="$DIR/build/Cockpit Recorder.app"
+build_failed() {
+  echo "Could not build the Cockpit Recorder app ($1). A recorder that ran before goes on with the new key; run this line again." >&2
+  exit 1
+}
+rm -rf "$DIR/build"
+mkdir -p "$DIR/build"
+# The app only runs the script inside it. The script's errors go to its log, so the app never shows an error.
+osacompile -o "$BUILD" \
+  -e 'try' \
+  -e 'do shell script "/bin/bash " & quoted form of (POSIX path of (path to me) & "Contents/Resources/recorder.sh") & " >> \"$HOME/Library/Application Support/Cockpit/activity.log\" 2>&1"' \
+  -e 'end try' || build_failed "osacompile"
+cat > "$BUILD/Contents/Resources/recorder.sh" <<'RECORDER'
 #!/bin/bash
-# Cockpit's activity recorder: launchd runs it once a minute. Written by Cockpit's installer.
+# Cockpit's activity recorder: the Cockpit Recorder app runs it once a minute. Written by Cockpit's installer.
 set -u
 umask 077
 ORIGIN="__ORIGIN__"
@@ -113,12 +131,12 @@ front_url() {
   case "$1" in
     "Google Chrome" | "Brave Browser" | "Microsoft Edge")
       osascript -e 'with timeout of 5 seconds' -e "tell application \"$1\"" \
-        -e 'if mode of front window is "incognito" then return "private"' \
-        -e 'get URL of active tab of front window' -e 'end tell' -e 'end timeout' 2>/dev/null ;;
+        -e 'set w to window id (id of front window)' -e 'if mode of w is "incognito" then return "private"' \
+        -e 'get URL of active tab of w' -e 'end tell' -e 'end timeout' 2>/dev/null ;;
     Arc)
       osascript -e 'with timeout of 5 seconds' -e 'tell application "Arc"' \
-        -e 'if incognito of front window then return "private"' \
-        -e 'get URL of active tab of front window' -e 'end tell' -e 'end timeout' 2>/dev/null ;;
+        -e 'set w to window id (id of front window)' -e 'if incognito of w then return "private"' \
+        -e 'get URL of active tab of w' -e 'end tell' -e 'end timeout' 2>/dev/null ;;
   esac
 }
 
@@ -132,6 +150,8 @@ record_minute() {
   esac
   app="$(lsappinfo info -only name "$(lsappinfo front)" 2>/dev/null | sed -n 's/.*"LSDisplayName"="\(.*\)".*/\1/p')"
   [ -n "$app" ] || app="unknown"
+  # The recorder app runs in the background and should never be in front; if it is, the front app is unknown.
+  if [ "$app" = "Cockpit Recorder" ]; then log "the recorder was in front; left this minute out"; return; fi
   url=""
   case "$app" in
     "Google Chrome" | "Brave Browser" | "Microsoft Edge" | Arc)
@@ -179,7 +199,7 @@ send() {
       log "Cockpit refused the send ($code): $(cat "$DIR/reply"); kept it in queue.refused"
       mv "$QUEUE" "$QUEUE.refused" 2>/dev/null ;;
     401)
-      log "Cockpit no longer takes this key: press Connect a Mac there and run its line again; keeping the minutes" ;;
+      log "Cockpit no longer takes this key: press Install on your Mac (or New key) there and run its line again; keeping the minutes" ;;
     *)
       log "could not reach Cockpit ($code); keeping the minutes for the next try" ;;
   esac
@@ -190,8 +210,28 @@ send
 if [ -f "$LOG" ]; then tail -n 200 "$LOG" > "$LOG.tmp" && mv "$LOG.tmp" "$LOG"; fi
 RECORDER
 
-# The plist is XML, so a home path with & or < in it is escaped there.
-XML_DIR=$(printf '%s' "$DIR" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g')
+# No Dock icon; its own name and bundle ID; the sentence macOS shows when it asks to read a browser's front tab.
+INFO="$BUILD/Contents/Info.plist"
+plutil -replace LSUIElement -bool true "$INFO" || build_failed "plutil"
+plutil -replace CFBundleIdentifier -string "$BUNDLE_ID" "$INFO" || build_failed "plutil"
+plutil -replace NSAppleEventsUsageDescription -string \
+  "Cockpit Recorder reads the address of the browser's front tab, to record the site's host once a minute." "$INFO" \
+  || build_failed "plutil"
+# Signed again after the edits, on this Mac only.
+codesign --force --deep --sign - "$BUILD" || build_failed "codesign"
+[ -x "$BUILD/Contents/MacOS/applet" ] || build_failed "no applet in it"
+
+unload "It goes on with the new key. To update it, restart the Mac, then $NEW_LINE_LATER"
+# Files an earlier install left: its key and the script /bin/bash ran.
+rm -f "$DIR/activity-key" "$DIR/activity.sh"
+rm -rf "$APP"
+mv "$BUILD" "$APP"
+rmdir "$DIR/build"
+# A new signature makes macOS ask Allow again, so the answer for an earlier build goes.
+tccutil reset AppleEvents "$BUNDLE_ID" >/dev/null 2>&1 || true
+
+# The plist is XML, so a home path with &, < or > in it is escaped there.
+XML_DIR=$(printf '%s' "$DIR" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g')
 cat > "$PLIST" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -199,7 +239,8 @@ cat > "$PLIST" <<PLIST
 <dict>
   <key>Label</key><string>$LABEL</string>
   <key>ProgramArguments</key>
-  <array><string>/bin/bash</string><string>$XML_DIR/activity.sh</string></array>
+  <array><string>$XML_DIR/Cockpit Recorder.app/Contents/MacOS/applet</string></array>
+  <key>AssociatedBundleIdentifiers</key><string>$BUNDLE_ID</string>
   <key>StartInterval</key><integer>60</integer>
   <key>RunAtLoad</key><true/>
   <key>StandardOutPath</key><string>$XML_DIR/activity.log</string>
@@ -211,5 +252,5 @@ chmod 600 "$PLIST"
 
 launchctl bootstrap "$DOMAIN" "$PLIST"
 echo "Cockpit's activity recorder runs now, once a minute."
-echo "macOS may ask once per browser to let it read the front tab's address: press Allow."
+echo "macOS may ask once per browser to let Cockpit Recorder read the front tab's address: press Allow."
 echo "To remove it: curl -fsSL __ORIGIN__/activity/install.sh | bash -s -- uninstall"

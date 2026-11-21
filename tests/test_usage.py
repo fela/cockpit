@@ -247,6 +247,22 @@ def test_banked_resets_and_windows_are_kept_by_address_so_a_folder_signed_in_ane
     assert (resets.known("ana@example.com"), resets.reading("ana@example.com"), resets.model_limits_of("ana@example.com")) == (None, None, [])
 
 
+def test_a_folder_signed_in_anew_while_its_usage_is_read_files_no_answer_under_the_old_address(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Before this fix, the answer for the new address was kept under the address listed before the read."""
+    work = config.Account(name="work", letter="K", folder=tmp_path, state=tmp_path / "claude-work.json", default=False)
+    body = {"cedar_ember": {"eligible": True, "grants": [GRANT], "cooldown_until": None},
+            "five_hour": None, "seven_day": {"utilization": 1.0, "resets_at": "2026-10-24T12:00:00+00:00"}}
+    monkeypatch.setattr(resets, "_known", {})
+    monkeypatch.setattr(resets, "_readings", {})
+    monkeypatch.setattr(resets, "fetch", lambda account, now: body)
+    resets.refresh(work, "sam@example.com", lambda: [(work, "kim@example.com")], NOW)
+    assert (resets.known("sam@example.com"), resets.reading("sam@example.com")) == (None, None)
+    resets.refresh(work, "kim@example.com", lambda: [(work, "kim@example.com")], NOW)
+    assert resets.known("kim@example.com") is not None
+
+
 def test_an_unreadable_window_is_logged_and_keeps_the_last_reading(caplog: pytest.LogCaptureFixture) -> None:
     assert resets.windows({"seven_day": {"utilization": 3, "resets_at": "Friday"}}, NOW) is None
     assert "unexpected shape" in caplog.text

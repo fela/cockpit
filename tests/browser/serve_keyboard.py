@@ -23,6 +23,7 @@ from parent_watch import stop_with_parent, stopped
 
 from cockpit import auth, config, db, sessions
 from cockpit.app import create_app
+from cockpit.views import read as read_view
 from tests.conftest import COOKIE_KEY, EMAIL, SESSION_A, make_spec_template, migrated_db, world
 
 
@@ -96,7 +97,7 @@ def serve(work: Path) -> None:
     sock.bind(("127.0.0.1", 0))
     origin = f"http://127.0.0.1:{sock.getsockname()[1]}"
     settings = replace(fixture.settings, origin=origin)
-    app = create_app(settings, fixture.deliverer, fixture.cache, fixture.spend_index, fixture.codex_index, app_parts)
+    app = create_app(settings, fixture.deliverer, fixture.cache, fixture.spend_index, fixture.codex_index, app_parts, read_view)
     cookie = auth.session_cookie_value(COOKIE_KEY, EMAIL, int(time.time()) + 3600)
     # The tests wait for this file and read it at once, so it appears whole: written beside, then moved into place.
     written = work / "runtime.json.part"

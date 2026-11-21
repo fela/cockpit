@@ -21,6 +21,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import re
 import subprocess
 import sys
@@ -42,6 +43,8 @@ PROJECTS_DIR = config.CLAUDE_HOME / "projects"
 # How long one `claude agents` listing is reused before the next one starts in the background; the page polls
 # more often. A listing can take seconds on a busy machine (SPEC UI-39), so no page request waits for one.
 CACHE_SECONDS = 10
+# How long one listing of PROJECTS_DIR's transcripts answers which transcripts a session has (transcript_paths).
+TRANSCRIPTS_SECONDS = 1
 # A transcript is read from its end; the last message fits in this many bytes.
 TRANSCRIPT_TAIL_BYTES = 1024 * 1024
 # The latest instruction before a blocked call is looked for this far back from the transcript's end.
@@ -229,12 +232,55 @@ def _assistant_text(entry: Any) -> tuple[str, str]:
     return _text(entry["message"].get("id")), text
 
 
+# The last listing of PROJECTS_DIR's transcripts: the folder listed, when (time.monotonic()), and each session's
+# transcripts by session id.
+_transcripts: tuple[Path, float, dict[str, list[Path]]] = (PROJECTS_DIR, float("-inf"), {})
+_transcripts_lock = threading.Lock()
+
+
+def _listing(max_age: float) -> dict[str, list[Path]]:
+    """Each session's transcripts by session id, from a listing of PROJECTS_DIR at most `max_age` seconds old."""
+    global _transcripts
+    with _transcripts_lock:
+        folder, listed_at, found = _transcripts
+        if folder != PROJECTS_DIR or time.monotonic() - listed_at >= max_age:
+            listed_at, found = time.monotonic(), {}
+            for path in PROJECTS_DIR.glob("*/*.jsonl"):
+                found.setdefault(path.stem, []).append(path)
+            _transcripts = (PROJECTS_DIR, listed_at, found)
+        return found
+
+
+def transcript_paths(session_id: str) -> list[Path]:
+    """The session's transcripts, one per folder it ran in. Each sweeper poll looks up every listed session's
+    transcripts several times, and on a busy host one search of the folders takes about 8 ms, so the answer comes
+    from a listing at most TRANSCRIPTS_SECONDS old."""
+    return list(_listing(TRANSCRIPTS_SECONDS).get(session_id, []))
+
+
+def _newest_transcript(session_id: str, max_age: float) -> tuple[Path, os.stat_result] | None:
+    """The session's most recently written transcript with its stat, from a listing at most `max_age` seconds old;
+    None without one. When every listed copy is gone, Claude moved the session, and a new listing finds it."""
+    def stats(paths: list[Path]) -> list[tuple[Path, os.stat_result]]:
+        found = []
+        for path in paths:
+            try:
+                found.append((path, path.stat()))
+            except FileNotFoundError:
+                continue  # Claude removed it since the listing
+        return found
+
+    paths = _listing(max_age).get(session_id, [])
+    found = stats(paths)
+    if paths and not found:
+        found = stats(_listing(0).get(session_id, []))
+    return max(found, key=lambda pair: pair[1].st_mtime_ns) if found else None
+
+
 def _tail_entries(session_id: str, size: int) -> list[Any]:
     """The entries in the last `size` bytes of the session's transcript, newest first; [] without one."""
-    paths = list(PROJECTS_DIR.glob(f"*/{session_id}.jsonl"))
-    if not paths:
-        return []
-    return _read_tail(max(paths, key=lambda candidate: candidate.stat().st_mtime), size) or []
+    newest = _newest_transcript(session_id, TRANSCRIPTS_SECONDS)
+    return [] if newest is None else _read_tail(newest[0], size) or []
 
 
 def _read_tail(path: Path, size: int) -> list[Any] | None:
@@ -286,6 +332,22 @@ def _model_of(entries: list[Any]) -> str:
             # Claude Code writes "<synthetic>" for the notes it adds itself, such as an API error.
             if model and not model.startswith("<"):
                 return model
+    return ""
+
+
+def last_effort(session_id: str) -> str:
+    """The effort of the session's last own call, from the end of its transcript, or '' without one. Claude Code
+    records it on every assistant entry, also when the session started without `--effort` and runs at the effort
+    its settings give the model."""
+    return transcript_usage(session_id).effort
+
+
+def _effort_of(entries: list[Any]) -> str:
+    for entry in entries:
+        if isinstance(entry, dict) and entry.get("type") == "assistant" and not entry.get("isSidechain"):
+            effort = _text(entry.get("effort")) or _text(entry.get("perTurnEffort"))
+            if effort:
+                return effort
     return ""
 
 
@@ -685,10 +747,10 @@ def skills_loaded(session_id: str, before: str) -> list[dict[str, str]]:
     {name, folder, version, loaded_at} from its latest load, in the order first loaded; [] without a transcript.
 
     The transcript is read whole, but only lines that name a skill's base directory are parsed."""
-    paths = list(PROJECTS_DIR.glob(f"*/{session_id}.jsonl"))
-    if not paths:
+    newest = _newest_transcript(session_id, TRANSCRIPTS_SECONDS)
+    if newest is None:
         return []
-    path = max(paths, key=lambda candidate: candidate.stat().st_mtime)
+    path = newest[0]
     loads: dict[str, tuple[str, str, str]] = {}
     marker = SKILL_BASE.encode()
     with path.open("rb") as handle:
@@ -743,8 +805,11 @@ def _cut(text: str) -> str:
 def turn_ended(session_id: str) -> bool:
     """The session's last turn is over: the newest entry of its transcript is Claude Code's note of the
     turn's length (`turn_duration`) or a reply that ended the turn. While a turn runs, the newest is a tool
-    call, a tool's result or the prompt. Background work the session started can run on after its turn."""
-    for entry in _tail_entries(session_id, TRANSCRIPT_TAIL_BYTES):
+    call, a tool's result or the prompt. Background work the session started can run on after its turn.
+    Delivery stops the session on this answer, so it reads a fresh listing: a session resumed in another folder
+    writes a new transcript there."""
+    newest = _newest_transcript(session_id, 0)
+    for entry in [] if newest is None else _read_tail(newest[0], TRANSCRIPT_TAIL_BYTES) or []:
         if not isinstance(entry, dict):
             continue
         if entry.get("type") == "system" and entry.get("subtype") == "turn_duration":
@@ -789,6 +854,7 @@ class Usage:
     stop: LimitStop | None  # the last turn, when it ended on the usage limit
     answer: tuple[datetime, bool] | None  # Claude's last answer and whether it went through
     model: str  # last real model, or the model named by a synthetic model cooldown error
+    effort: str  # the effort Claude Code recorded on its last own call, or '' without one
 
 
 # transcript_usage's answer for each session: (transcript, its size, its modification time in ns, answer). Every
@@ -799,13 +865,37 @@ _usages: dict[str, tuple[str, int, int, Usage]] = {}
 def transcript_usage(session_id: str) -> Usage:
     """What the end of the session's transcript says about usage. The answer is kept while the transcript stays the
     same size and age; one that could not be read is read again on the next ask."""
-    try:
-        found = [(path, path.stat()) for path in PROJECTS_DIR.glob(f"*/{session_id}.jsonl")]
-    except OSError as exc:
-        log.error("could not read the transcript of session %s: %s", session_id, exc)
-        return Usage(stop=None, answer=None, model="")
+    found = []
+    for path in transcript_paths(session_id):
+        try:
+            found.append((path, path.stat()))
+        except FileNotFoundError:
+            continue  # Claude removed it since the listing
+        except OSError as exc:
+            log.error("could not read the transcript of session %s: %s", session_id, exc)
+            return Usage(stop=None, answer=None, model="", effort="")
+    return _usage_of(session_id, found)
+
+
+def transcript_usages(session_ids: list[str]) -> dict[str, Usage]:
+    """Read a listing's usage with one transcript search, including sessions without a transcript."""
+    found: dict[str, list[tuple[Path, os.stat_result]]] = {session_id: [] for session_id in session_ids}
+    if found:
+        for path in PROJECTS_DIR.glob("*/*.jsonl"):
+            if path.stem not in found:
+                continue
+            try:
+                found[path.stem].append((path, path.stat()))
+            except FileNotFoundError:
+                continue  # Claude can remove a transcript during the search.
+            except OSError as exc:
+                log.error("could not read the transcript of session %s: %s", path.stem, exc)
+    return {session_id: _usage_of(session_id, paths) for session_id, paths in found.items()}
+
+
+def _usage_of(session_id: str, found: list[tuple[Path, os.stat_result]]) -> Usage:
     if not found:
-        return Usage(stop=None, answer=None, model="")
+        return Usage(stop=None, answer=None, model="", effort="")
     path, stat = max(found, key=lambda pair: pair[1].st_mtime_ns)
     key = (str(path), stat.st_size, stat.st_mtime_ns)
     kept = _usages.get(session_id)
@@ -813,7 +903,7 @@ def transcript_usage(session_id: str) -> Usage:
         return kept[3]
     entries = _read_tail(path, TRANSCRIPT_TAIL_BYTES)
     if entries is None:
-        return Usage(stop=None, answer=None, model="")
+        return Usage(stop=None, answer=None, model="", effort="")
     stop = _limit_stop_of(entries)
     # A long user prompt can push earlier cooldown errors outside the initial tail. Read far enough to
     # establish the consecutive failures, or reach the cap, so a restart preserves the retry interval.
@@ -824,9 +914,9 @@ def transcript_usage(session_id: str) -> Usage:
         size *= 4
         entries = _read_tail(path, size)
         if entries is None:
-            return Usage(stop=None, answer=None, model="")
+            return Usage(stop=None, answer=None, model="", effort="")
         stop = _limit_stop_of(entries)
-    found_usage = Usage(stop=stop, answer=_answer_of(entries), model=_model_of(entries))
+    found_usage = Usage(stop=stop, answer=_answer_of(entries), model=_model_of(entries), effort=_effort_of(entries))
     _usages[session_id] = (*key, found_usage)
     return found_usage
 
@@ -932,16 +1022,42 @@ class ErrorStop:
     answered: datetime | None  # the session's last answer that went through before the error, if the tail has one
 
 
+# error_stop's answer for each session: (transcript, its size, its modification time in ns, answer). Every poll asks
+# it of every listed session, and most transcripts do not change between polls.
+_error_stops: dict[str, tuple[str, int, int, ErrorStop | None]] = {}
+
+
 def error_stop(session_id: str) -> ErrorStop | None:
     """The session's last turn when it ended on an API error that limit_stop and login_stop leave to others, else None.
+    The answer is kept while the transcript stays the same size and age; one that could not be read is read again on
+    the next ask.
 
     Claude Code ends such a turn with an assistant entry of its own, marked `"isApiErrorMessage": true`, model
     "<synthetic>", its text the error: "API Error: 400 Claude Code 2.1.280 does not support this model; …".
     """
+    newest = _newest_transcript(session_id, TRANSCRIPTS_SECONDS)
+    if newest is None:
+        return None
+    path, stat = newest
+    key = (str(path), stat.st_size, stat.st_mtime_ns)
+    kept = _error_stops.get(session_id)
+    if kept is not None and kept[:3] == key:
+        return kept[3]
+    try:
+        stop = _error_stop_in(path)
+    except OSError:
+        return None  # _read_tail logged it
+    _error_stops[session_id] = (*key, stop)
+    return stop
+
+
+def _error_stop_in(path: Path) -> ErrorStop | None:
     # The newest assistant entry is near the end; the answer before an error can sit behind long tool results.
     for size in (LOGIN_STOP_TAIL_BYTES, TRANSCRIPT_TAIL_BYTES):
-        entries = [entry for entry in _tail_entries(session_id, size)
-                   if isinstance(entry, dict) and entry.get("type") == "assistant"]
+        tail = _read_tail(path, size)
+        if tail is None:
+            raise OSError("its tail could not be read")
+        entries = [entry for entry in tail if isinstance(entry, dict) and entry.get("type") == "assistant"]
         if not entries:
             continue
         last = entries[0]
@@ -1031,9 +1147,73 @@ def running_version(pid: int) -> str:
     return executable.name.removesuffix(" (deleted)")
 
 
+def _local_command_finished(session_id: str, started_ms: int) -> bool:
+    for entry in _tail_entries(session_id, TRANSCRIPT_TAIL_BYTES):
+        if not isinstance(entry, dict) or (_prompt(entry) is None and entry.get("type") != "assistant"):
+            continue
+        message = entry.get("message")
+        content = message.get("content") if isinstance(message, dict) else None
+        at = _parse_iso(_text(entry.get("timestamp")))
+        return (
+            entry.get("type") == "user" and entry.get("userType") == "external"
+            and entry.get("entrypoint") == "cli" and entry.get("sessionKind") == "bg"
+            and isinstance(content, str) and content.startswith("<local-command-stdout>")
+            and content.endswith("</local-command-stdout>")
+            and at is not None and at.tzinfo is not None and at.timestamp() * 1000 >= started_ms
+        )
+    return False
+
+
+def local_command_ran_since(session_id: str, started_ms: int) -> bool:
+    """Whether the session's transcript holds the output of a command such as `/effort` that Cockpit typed at
+    `started_ms` or later, whatever came after it."""
+    for entry in _tail_entries(session_id, TRANSCRIPT_TAIL_BYTES):
+        if not isinstance(entry, dict):
+            continue
+        message = entry.get("message")
+        content = message.get("content") if isinstance(message, dict) else None
+        at = _parse_iso(_text(entry.get("timestamp")))
+        if at is None or at.tzinfo is None:
+            continue
+        if at.timestamp() * 1000 < started_ms:
+            return False
+        if (
+            entry.get("type") == "user" and entry.get("userType") == "external"
+            and isinstance(content, str) and content.startswith("<local-command-stdout>")
+        ):
+            return True
+    return False
+
+
+def _command_only_boot(row: dict[str, Any], job: dict[str, Any]) -> bool:
+    if not isinstance(row.get("pid"), int) or row.get("status") != "idle" or job.get("state") != "working":
+        return False
+    if _text(job.get("intent")).split(" ", 1)[0] not in ("/effort", "/model"):
+        return False
+    if any(job.get(key) for key in ("needsOverlay", "needsAsk", "block", "queuedPrompt", "replayOwed")):
+        return False
+    flight = job.get("inFlight")
+    if isinstance(flight, dict) and any(flight.get(key) for key in ("tasks", "queued", "kinds")):
+        return False
+    starting = job.get("detail") == "starting…" and job.get("tempo") == "active" and not job.get("needs")
+    wedged = (
+        job.get("detail") == "stuck on a startup dialog" and job.get("tempo") == "blocked"
+        and job.get("needs") == "open this session to continue setup"
+    )
+    started = row.get("startedAt")
+    return (
+        (starting or wedged) and isinstance(started, int)
+        and _local_command_finished(_text(row.get("sessionId")), started)
+    )
+
+
 def _session(account: Account, row: dict[str, Any], warnings: list[str]) -> Session:
     short_id = _text(row.get("id"))
     job = _read_json(account.jobs / short_id / "state.json", warnings) if short_id else {}
+    # A local slash command can finish without starting a model turn, leaving Claude's startup watchdog armed.
+    if _command_only_boot(row, job):
+        row = {**row, "state": "done"}
+        job = {**job, "state": "done", "tempo": "idle", "detail": "", "needs": ""}
     started_ms = row.get("startedAt")
     started = (
         time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(started_ms / 1000)) if isinstance(started_ms, int) else ""

@@ -57,7 +57,8 @@ let browser;
     assert.equal(response.ok, true, await response.clone().text());
     return (await response.json()).id;
   };
-  // The newer call shows as the open card on top; the older one as a line that opens on a press.
+  // Each call has a warning row at the head of the queue in the list on the left. With nothing picked, the newer call
+  // is Next up, with its full card; the older one's row opens its card on a press.
   const outside = await ask(SESSION_B, OTHER, "ls lists");
   await delay(1100);
   const inHome = await ask(SESSION_A, WORKTREE, "ls reminders");
@@ -71,8 +72,12 @@ let browser;
       const errors = [];
       page.on("pageerror", (error) => errors.push(error.message));
       page.on("console", (message) => { if (message.type() === "error") errors.push(message.text()); });
-      await page.goto(origin + "/classic");
-      const card = page.locator(`#blocked .blocked-card[data-request="${inHome}"]`);
+      await page.goto(origin + "/");
+      await page.locator(`#sidebar li.warn-row[data-request="${inHome}"]`).waitFor({ state: "attached" });
+      await page.evaluate(() => { ui.placed.clear(); selectItem(null); });
+      const phone = width < 1000;
+      if (phone) await page.evaluate(() => setPhoneScreen(false, false));
+      const card = page.locator(`#next > .blocked-card[data-request="${inHome}"]`);
       await card.waitFor();
       const folder = card.locator(".call-folder");
       assert.equal((await folder.textContent()).trim(), "Runs in ~/dev/app/.claude/worktrees/reminders");
@@ -83,9 +88,10 @@ let browser;
       assert.equal(Math.round(folderBox.x), Math.round(callBox.x), `${width} ${scheme}: the folder is not aligned with the call`);
       assert.ok(folderBox.y >= callBox.y + callBox.height - 1, `${width} ${scheme}: the folder is not below the call`);
       await card.screenshot({ path: path.join(work, `card-${width}-${scheme}.png`) });
-      // Opening the older call's line shows its card, which names its own folder.
-      await page.locator(`#blocked .blocked-line[data-request="${outside}"]`).click();
-      const other = page.locator(`#blocked .blocked-card[data-request="${outside}"] .call-folder`);
+      // Opening the older call's row shows its card, which names its own folder.
+      if (phone) await page.evaluate(() => setPhoneScreen(true, false));
+      await page.locator(`#sidebar li.warn-row[data-request="${outside}"] .side-row`).click();
+      const other = page.locator(`#next > .blocked-card[data-request="${outside}"] .call-folder`);
       await other.waitFor();
       assert.equal((await other.textContent()).trim(), `Runs in ${OTHER}`);
       const fits = await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth);

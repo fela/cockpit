@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import subprocess
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -11,6 +12,24 @@ from cockpit import config, db, questions, sessions, store
 from tests.conftest import ORIGIN, SESSION_A, SESSION_B, World, make_session
 
 NEED_A = f"question:{SESSION_A}:2026-01-04T09:00:00Z"
+LONG_QUESTION = """
+The CSV export is ready for a decision about completed tasks. People use this export both as a weekly snapshot
+and as a record for their own spreadsheets. Those two uses suggest different defaults.
+
+If we include completed tasks, the file matches the history in the app and people can reconcile it with last
+week's file. If we exclude them, the file is easier to scan during planning and matches the current list.
+Either way, the export can keep the same columns so existing spreadsheets still import it.
+
+The filter would apply before the rows are written:
+
+```python
+for task in tasks:
+    if include_completed or not task.completed:
+        writer.writerow(task.as_row())
+```
+
+I can add a separate export option later if both uses come up often. Should we include completed tasks by default?
+"""
 
 
 @pytest.fixture(autouse=True)
@@ -59,8 +78,50 @@ def test_a_session_s_question_is_a_ranked_step_on_its_item(world: World) -> None
     assert step["ask"] == "Pick A or B"
     assert step["why"] == 'Session "session 1111" stopped to ask you this and waits for your answer.'
     assert step["body"] == "> Commit aaaa111 has A.\n>\n> Which one?"
+    assert step["details"] == []
     assert step["target"]["session_id"] == SESSION_A
     assert (step["score"], step["reasons"], step["updated_by"]) == (50, [], "cockpit")  # the sweeper scores it (SPEC RANK-18)
+
+
+def assert_long_question(step: dict) -> None:
+    assert store.body_words(LONG_QUESTION, step["need"]) > store.BODY_WORDS
+    assert 0 < store.body_words(step["body"], step["need"]) <= store.BODY_WORDS
+    assert "Full question" in step["body"]
+    [detail] = step["details"]
+    assert detail["title"] == "Full question"
+    assert all(line.startswith(">") for line in detail["body"].splitlines())
+    assert re.sub(r"(?m)^> ?", "", detail["body"]) == LONG_QUESTION.strip()
+    assert "<pre><code" in detail["body_html"]
+
+
+@pytest.mark.parametrize("provider", ["claude", "codex"])
+def test_a_long_question_is_put_in_one_section_with_its_session_target(
+    world: World, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, provider: str,
+) -> None:
+    session = make_session(SESSION_A, pid=None)
+    if provider == "claude":
+        monkeypatch.setattr(questions, "last_message", lambda session_id: LONG_QUESTION)
+    else:
+        session = replace(session, provider=provider, detail=LONG_QUESTION)
+    world.cache.sessions = [session]
+    put_item(world, "note:a", [SESSION_A])
+    with caplog.at_level("ERROR", logger=questions.__name__):
+        sync(world)
+        sync(world)
+    assert not caplog.records
+    [step] = state(world)["queue"]
+    assert (step["need"], step["session_id"], step["target"]["session_id"]) == (NEED_A, SESSION_A, SESSION_A)
+    assert_long_question(step)
+
+
+def test_a_question_at_the_body_word_limit_stays_in_the_body(world: World, monkeypatch) -> None:
+    text = "Please " + "review " * (store.BODY_WORDS - 3) + "both options?"
+    monkeypatch.setattr(questions, "last_message", lambda session_id: text)
+    sync(world)
+    [step] = state(world)["queue"]
+    assert store.body_words(step["body"], step["need"]) == store.BODY_WORDS
+    assert step["body"] == f"> {text}"
+    assert step["details"] == []
 
 
 def test_a_session_without_an_item_gets_one_of_its_own(world: World) -> None:
@@ -190,20 +251,32 @@ def handed_step(world: World, fields: dict, to: str) -> dict:
     return step
 
 
-def test_the_session_s_question_replaces_the_handed_step_s_actions_and_target(world: World) -> None:
+def test_a_long_question_replaces_the_handed_step_s_details_actions_and_target(
+    world: World, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+) -> None:
     """The step asks the session's question, of the session that asked it, and nothing else."""
     put_item(world, "note:a", [SESSION_A])
-    fields = {"need": "check", "ask": "Run the readback?", "answers": ["Ship it"], "command": {"run": "true", "cwd": "/tmp", "explain": "Does nothing."}}
+    fields = {
+        "need": "check", "ask": "Run the readback?", "answers": ["Ship it"],
+        "command": {"run": "true", "cwd": "/tmp", "explain": "Does nothing."},
+        "details": [{"title": "Readback", "body": "The command checks the export."}],
+    }
     step = handed_step(world, fields, SESSION_B)
     world.cache.sessions = [make_session(SESSION_A, pid=101, state="working"), make_session(SESSION_B, pid=None)]
-    sync(world)
-    [shown] = state(world)["queue"]
+    monkeypatch.setattr(questions, "last_message", lambda session_id: LONG_QUESTION)
+    with caplog.at_level("ERROR", logger=questions.__name__):
+        sync(world)
+        sync(world)
+    assert not caplog.records
+    board = state(world)
+    assert board["with_agents"] == []
+    [shown] = board["queue"]
     assert (shown["id"], shown["ask"], shown["answers"], shown["command"]) == (step["id"], "Pick A or B", [], None)
-    conn = db.connect(world.db_path)
-    try:
-        assert conn.execute("SELECT session_id FROM steps WHERE id = ?", (step["id"],)).fetchone()[0] == SESSION_B
-    finally:
-        conn.close()
+    assert (shown["session_id"], shown["target"]["session_id"]) == (SESSION_B, SESSION_B)
+    assert_long_question(shown)
+    reply = world.client.post(f"/api/steps/{shown['id']}/hand-off", json={"text": "Include them."}, headers=world.user())
+    assert reply.status_code == 200, reply.text
+    assert reply.json()["session_id"] == SESSION_B
 
 
 def test_the_session_s_question_drops_the_handed_step_s_tasks_to_close(world: World) -> None:
@@ -731,6 +804,31 @@ def test_a_session_that_stopped_again_to_ask_gets_its_new_question(world: World)
     sync(world)
     [new] = state(world)["queue"]
     assert (new["id"], new["ask"], new["need"]) == (old["id"], "Pick C", f"question:{SESSION_A}:2026-01-04T10:00:00Z")
+
+
+def test_a_renewed_question_folds_a_long_message_and_clears_it_when_short(world: World, caplog) -> None:
+    session = replace(make_session(SESSION_A, pid=None), provider="codex", detail="Which format?")
+    world.cache.sessions = [session]
+    sync(world)
+    [old] = state(world)["queue"]
+    world.cache.sessions = [replace(session, detail=LONG_QUESTION, updated_at="2026-01-04T10:00:00Z")]
+    with caplog.at_level("ERROR", logger=questions.__name__):
+        sync(world)
+    assert not caplog.records
+    [long] = state(world)["queue"]
+    assert (long["id"], long["need"], long["session_id"]) == (
+        old["id"], f"question:{SESSION_A}:2026-01-04T10:00:00Z", SESSION_A,
+    )
+    assert_long_question(long)
+
+    world.cache.sessions = [replace(session, detail="Use CSV?", updated_at="2026-01-04T11:00:00Z")]
+    sync(world)
+    [short] = state(world)["queue"]
+    assert (short["id"], short["need"], short["target"]["session_id"]) == (
+        old["id"], f"question:{SESSION_A}:2026-01-04T11:00:00Z", SESSION_A,
+    )
+    assert short["body"] == "> Use CSV?"
+    assert short["details"] == []
 
 
 def test_a_question_step_handed_to_the_session_keeps_its_next_question(world: World) -> None:

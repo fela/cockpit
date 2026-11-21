@@ -121,6 +121,12 @@ Cockpit refuses the rewrite without `changed` when the band would show.
 A separate concern goes on its own item, as "One task, one card" describes.
 Cockpit immediately refuses agent closure of a finish step the user has not handed over.
 
+**Cache** is what the prompt cache holds for the session that gets a step's answer.
+`cockpit get` prints it under the step, and JSON gives each step a `cache` field: `tokens`, `warm_until` (UTC), `minutes_left` (rounded up; 0 once expired), `lifetime_minutes`, `lifetime_estimated`, `cold_usd` and `model`.
+A Claude session's lifetime is the 5 or 60 minutes Claude states (`lifetime_estimated` false). Codex states none, so a Codex session's is 120 minutes, an estimate from measuring Codex's cache (`lifetime_estimated` true).
+`cold_usd` is what an answer after `warm_until` costs over one before, when the session writes those tokens to the cache again; it and `model` are null for Codex, whose prices Cockpit does not hold.
+`cache` is null for a step without a session or a session with nothing cached.
+
 ### The user's controls are the user's
 
 The user writes goals, pins work, reopens or snoozes steps, hands them off and runs their timers.
@@ -270,6 +276,7 @@ cockpit message retry MESSAGE_ID --as NAME
 
 Send text through stdin so shell backticks remain text. `cockpit send` waits for delivery.
 A live session reads it; a stopped session resumes. `--new-in` starts the configured provider and joins any supplied item.
+Before messaging several stopped sessions at once, weigh each as the sweeper does under Deciding what to wake in `references/sweep.md`.
 Use `--provider claude` or `--provider codex` only when that provider is enabled.
 A failed delivery exits one with its reason. Set a new agent wait only after delivery succeeds.
 Use Cockpit between sessions and your provider's subagent messaging for its own subagents.
@@ -304,6 +311,8 @@ Write the prompt so a session with no other context can do the work.
 `cockpit schedule list` shows each schedule's next and last run; `cockpit schedule remove NAME --as NAME` deletes one.
 The sidebar lists each run under Background, since its item is `recurring`.
 Work that repeats on another timer, such as a crontab line that sends to one item, puts `"recurring": true` on that item so it shows there too.
+A scheduled prompt's run with nothing to report closes its own item, as the recurring-run exception under "Only the user closes a task" says.
+An item that several runs share stays open, so the next run can still put a step on it.
 
 ### Wake conditions
 
@@ -383,7 +392,7 @@ A Claude Code connector, such as Slack or Linear, signs in through `cockpit sign
 
 A direct message begins `Message from <user name> via Cockpit:`. Treat it as the user's terminal instruction.
 Its final Cockpit context identifies the step. Delivery interrupts current commands, subagents and scheduled prompts.
-Handle the message and restart work still needed. Send now delivers immediately and ends that turn's work.
+Handle the message and restart work still needed. A message that waited 15 minutes for the turn to end goes then and ends that turn's work.
 Run and Allow arrive as automatic messages from Cockpit itself. After Run, await the result message with output and exit code.
 
 ### Ask and Fork
@@ -449,8 +458,8 @@ Defer lengthy tests, independent review or fresh analysis explicitly. The sweepe
 ### Only the user closes a task
 
 The user closes an item through Task done, a closing answer or Close item.
-A message saying "done" still needs that press, subject to the merged-PR and fire-and-forget exceptions.
-Every session proposing completion writes its own finish step, including the sweeper and cleanup sessions.
+A message saying "done" still needs that press, subject to the merged-PR, fire-and-forget and recurring-run exceptions.
+Outside those exceptions, every session proposing completion writes its own finish step, including the sweeper and cleanup sessions.
 Use need `complete`, then `complete:2` and onward after earlier finish needs close.
 
 An agent put of `stage: done` or `archived: true` usually needs an open finish step first.
@@ -471,6 +480,11 @@ The CLI prints `closed: …`; the user sees the note above the next step.
 Choose routine details and work to the end. Share a step only for a question, issue or action requiring the user.
 Keep early looks, read steps and finish steps out of this flow.
 Close resolved steps, then put `stage: done` with a one-line note. Cockpit accepts the close and shows the note.
+
+**Recurring-run exception.** The session of a scheduled prompt's run, whose item is `recurring` and its own, closes it itself when the run has nothing to report.
+Close resolved steps, then put `stage: done` with a one-line note saying so. Cockpit accepts the close only when no step but a finish step is open on the item, none of them handed back to an agent and none under the user's timer; it refuses the close without a note.
+The exception covers the schedule's latest run only: once the next run starts, an earlier run's item closes with a finish step.
+A run with something for the user puts its step as usual.
 
 Cockpit refuses `done` or `dismiss` on a finish step the user did not hand over.
 Give every ordinary step close a readable reason. After the user's close, a further close asks nothing.

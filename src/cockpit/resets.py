@@ -127,23 +127,32 @@ def refresh_forever(signed_in: Callable[[], list[tuple[Account, str]]]) -> None:
             log.exception("listing the signed-in Claude accounts for their usage failed")
             listed = []
         for account, address in listed:
-            now = datetime.now(UTC)
             try:
-                body = fetch(account, now)
+                refresh(account, address, signed_in, datetime.now(UTC))
             except Exception:
                 log.exception("reading the %s Claude account's usage failed", account.name)
-                continue
-            if body is None:
-                continue
-            banked, windows_now, by_model = parse(body.get("cedar_ember"), now), windows(body, now), model_limits(body)
-            with _lock:
-                if banked is not None:
-                    _known[address] = banked
-                if windows_now is not None:
-                    _readings[address] = windows_now
-                if by_model is not None:
-                    _model_limits[address] = by_model
         time.sleep(EVERY_SECONDS)
+
+
+def refresh(account: Account, address: str, signed_in: Callable[[], list[tuple[Account, str]]], now: datetime) -> None:
+    """Read the account's resets and windows and keep them under `address`, the address it was listed with, if the
+    folder is still signed in with it once the answer is in: a sign-in with another address in between would file
+    that address's answer under this one, as Codex's reading checks too (codex.AccountIndex.ask)."""
+    body = fetch(account, now)
+    if body is None:
+        return
+    if {each.name: again for each, again in signed_in()}.get(account.name) != address:
+        log.info("the %s Claude account was signed in again while its usage was read; the next reading counts",
+                 account.name)
+        return
+    banked, windows_now, by_model = parse(body.get("cedar_ember"), now), windows(body, now), model_limits(body)
+    with _lock:
+        if banked is not None:
+            _known[address] = banked
+        if windows_now is not None:
+            _readings[address] = windows_now
+        if by_model is not None:
+            _model_limits[address] = by_model
 
 
 def fetch(account: Account, now: datetime) -> dict[str, Any] | None:

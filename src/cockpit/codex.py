@@ -12,6 +12,8 @@ the terminal, `subagent` for a subagent). After each model call an `event_msg` o
 (`info.total_token_usage`) and the account's rate limits (`rate_limits.primary` and `.secondary`: the share used, the
 window's length in minutes and when it resets). Input counts the cached input within it, and output the reasoning
 within it. The same count can come twice, so each event adds what grew since the session's previous count.
+`info.last_token_usage` gives the latest call's own tokens, whose input is what the prompt cache likely holds after
+it, until a line of type `compacted` replaces the conversation with a summary.
 
 Cockpit has no list price for Codex's models, so Codex use is shown in tokens and as a share of Codex's own weekly
 limit. That share comes from the meter of the limit named `codex` (another, `codex_bengalfox`, always reads 0 %): the
@@ -19,6 +21,13 @@ meter moves in whole percents, and each rise is shared out over the calls since 
 use of the same account elsewhere counts on the calls here. Codex often resets the week early, to a new `resets_at`;
 a week starts from 0 %, except the first one on record, which starts from its first reading. Sessions running at once
 can read the meter a percent apart, so a week rises only past its highest reading.
+
+A folder whose Codex runs on a provider of its own (on_own_provider), such as a model hub, has no meter in its
+session files: they carry no rate limits. Its calls take their shares from the weekly-limit readings an install part
+reports for the hub's Codex accounts (HubReading) in place of the meter, the same way: each rise of an account's week
+is shared out over the folder's calls since that account's rise before, by their tokens, and the accounts' shares add
+up. The hub may send a call to any of its accounts, so each rise counts on every call since, whichever account served
+it; use of those accounts elsewhere counts here too.
 The index reads each session file once and then only what was appended since, with the Claude transcripts.
 
 The session files do not say how many usage-limit resets an account has banked. Codex's own app-server does, in its
@@ -30,6 +39,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import bisect
 import json
 import logging
 import os
@@ -55,8 +65,12 @@ WEEK_MINUTES = 7 * 24 * 60
 # Readings of one week name the time it resets give or take a few seconds; weeks lie hours or days apart.
 SAME_WEEK_SECONDS = 3600
 KINDS = ("fresh", "cached", "output", "reasoning")
-# Only the first line and the token counts are parsed; the lines between can run to megabytes.
+# Only the first line, the token counts and the compactions are parsed; the lines between can run to megabytes.
 TOKEN_COUNT = b'"type":"token_count"'
+COMPACTED = b'"type":"compacted"'
+# How long Codex's prompt cache likely keeps a session's input after its latest call. Codex states no lifetime, so
+# this is an estimate.
+CACHE_MINUTES = 120
 # When Cockpit starts, the latest weekly meter is read from the end of this many of the newest session files, so the
 # usage display shows each account's week at once, not only after the first full count (SPEC UI-57).
 LATEST_FILES = 5
@@ -86,9 +100,26 @@ class Session:
     source: str = ""
     # The tokens counted so far, and what each count added, by its time.
     total: dict[str, int] = field(default_factory=lambda: dict.fromkeys(KINDS, 0))
+    total_at: datetime | None = None
     added: list[tuple[str, dict[str, int]]] = field(default_factory=list)
     # The week each count's own line reported, by when it resets (epoch seconds); None without a reading.
     weeks: list[int | None] = field(default_factory=list)
+    # The input of the latest call, cached part included, and that call's time; after a compaction, 0 and the
+    # compaction's time; None before either. A count without the call's own tokens gives 0 and the count's time.
+    last_input: int = 0
+    last_input_at: datetime | None = None
+
+
+@dataclass(frozen=True)
+class HubReading:
+    """One change in a hub Codex account's weekly limit, as an install part reports it (parts.codex_weeks): the
+    account, when the provider said it and what it said, the share used in percent and the reset time, both times in
+    epoch seconds."""
+
+    account: str
+    at: float
+    used: float
+    resets_at: float
 
 
 def email(home: Path) -> str:
@@ -116,7 +147,12 @@ def on_own_provider(home: Path) -> bool:
     except (OSError, tomllib.TOMLDecodeError) as exc:
         log.error("reading Codex's config.toml in %s failed: %s", home, exc)
         return False
-    return settings.get("model_provider") in settings.get("model_providers", {})
+    provider, providers = settings.get("model_provider"), settings.get("model_providers", {})
+    if not isinstance(provider, str) or not isinstance(providers, dict):
+        if provider is not None:
+            log.error("Codex's config.toml in %s names its model provider in a shape Codex does not read", home)
+        return False
+    return provider in providers
 
 
 def _weekly(limits: dict[str, Any]) -> list[dict[str, Any]]:
@@ -253,6 +289,33 @@ def _changed(home: Path) -> float | None:
         return None
 
 
+def _same_week(weeks: list[float], resets_at: float) -> float | None:
+    """The week, of `weeks` by when each first said it resets, that a reading saying it resets at `resets_at` belongs
+    to: the nearest within SAME_WEEK_SECONDS, since the time jitters by seconds between readings."""
+    near = [week for week in weeks if abs(week - resets_at) <= SAME_WEEK_SECONDS]
+    return min(near, key=lambda week: abs(week - resets_at), default=None)
+
+
+def _hub_weeks(hub: list[HubReading], since: float, now: float) -> int:
+    """How many of the hub accounts' weeks ran between `since` and `now`: a week runs from its first reading until the
+    account's next week is first read, or until it resets."""
+    # Each week as [its first reading, when it first said it resets, when it said so last].
+    by_account: dict[str, list[list[float]]] = {}
+    for reading in sorted(hub, key=lambda each: each.at):
+        weeks = by_account.setdefault(reading.account, [])
+        week = _same_week([key for _, key, _ in weeks], reading.resets_at)
+        if week is None:
+            weeks.append([reading.at, reading.resets_at, reading.resets_at])
+        else:
+            next(each for each in weeks if each[1] == week)[2] = reading.resets_at
+    count = 0
+    for weeks in by_account.values():
+        for (first, _, resets), following in zip(weeks, [*weeks[1:], None], strict=True):
+            end = min(resets, following[0]) if following else resets
+            count += first <= now and end > since
+    return count
+
+
 class AccountIndex:
     """One Codex account's use, from the session files in its folder."""
 
@@ -278,8 +341,14 @@ class AccountIndex:
         # Every reading of the weekly meter: (time, share used, resets_at in epoch seconds).
         self._readings: list[tuple[str, float, int]] = []
         # Each call's share of the weekly limit, per session file in the order of its `added`, worked out again
-        # whenever a line adds a call or a reading.
+        # whenever a line adds a call or a reading, or the hub's readings it came from change.
         self._shares: dict[Path, list[float]] | None = None
+        self._shares_hub: list[HubReading] = []
+        # Whether the folder's Codex runs on a provider of its own, whose calls take their shares from the hub's
+        # readings; read again on each refresh.
+        self.on_hub = on_own_provider(home)
+        # Whether a count without the latest call's own tokens (`last_token_usage`) was logged, which happens once.
+        self.missing_last_logged = False
         self._latest_week()
 
     def _saved_weeks(self) -> dict[str, dict[str, Any]]:
@@ -310,8 +379,8 @@ class AccountIndex:
                 temporary.unlink(missing_ok=True)
 
     def _latest_week(self) -> None:
-        """The latest weekly meter, from the end of the newest session files. The first full count reads every
-        file and runs after Claude's (spend.refresh_forever):"""
+        """The latest weekly meter, from the end of the newest session files, while the full count reads the
+        history in the background."""
         # Session files carry no account identity; signed-in accounts use the endpoint's saved reading.
         if self.email:
             return
@@ -349,6 +418,10 @@ class AccountIndex:
     def refresh(self, now: datetime) -> None:
         """Read what was appended to every session file written within HORIZON_DAYS."""
         self._note_address(email(self.home))
+        on_hub = on_own_provider(self.home)
+        with self._lock:
+            if on_hub != self.on_hub:
+                self.on_hub, self._shares = on_hub, None
         oldest = (now - timedelta(days=HORIZON_DAYS)).timestamp()
         for path in self.sessions_dir.glob("**/rollout-*.jsonl"):
             try:
@@ -381,10 +454,10 @@ class AccountIndex:
                 # A line still being written is read on the next refresh.
                 if not raw.endswith(b"\n"):
                     break
-                if known.offset == 0 or TOKEN_COUNT in raw[:200]:
+                if known.offset == 0 or TOKEN_COUNT in raw[:200] or COMPACTED in raw[:200]:
                     try:
                         with self._lock:
-                            self._line(known, json.loads(raw))
+                            self._line(path, known, json.loads(raw))
                     except (ValueError, KeyError, TypeError, AttributeError) as exc:
                         log.warning("%s at byte %d is not one Codex entry, skipped: %r", path, known.offset, exc)
                 known.offset += len(raw)
@@ -392,12 +465,15 @@ class AccountIndex:
             self._files[path] = known
             self._shares = None
 
-    def _line(self, known: Session, entry: dict[str, Any]) -> None:
+    def _line(self, path: Path, known: Session, entry: dict[str, Any]) -> None:
         payload, stamp = entry["payload"], str(entry["timestamp"])
         if entry.get("type") == "session_meta":
             source = payload.get("source") or ""
             # A subagent's session names its parent: {"subagent": {"thread_spawn": {"parent_thread_id": ...}}}.
             known.cwd, known.source = str(payload.get("cwd") or ""), source if isinstance(source, str) else "subagent"
+            return
+        if entry.get("type") == "compacted":
+            known.last_input, known.last_input_at = 0, datetime.fromisoformat(stamp)
             return
         if payload.get("type") != "token_count":
             return
@@ -408,27 +484,86 @@ class AccountIndex:
         info = payload.get("info")
         if info:
             total = _tokens(info["total_token_usage"])
-            # A count below the last one starts again from zero.
+            # Without the call's own tokens, what the cache holds after the count is unknown, so it counts as 0.
+            last = info.get("last_token_usage")
+            last_input = int(last["input_tokens"]) if last else 0
+            counted_at = datetime.fromisoformat(stamp)
+            if not last and not self.missing_last_logged:
+                log.error("%s has a Codex token count without last_token_usage; its session shows no cache from then", path)
+                self.missing_last_logged = True
             grew = {kind: total[kind] - known.total[kind] for kind in KINDS}
-            if any(value < 0 for value in grew.values()):
-                grew = total
-            if any(grew.values()):
-                known.added.append((stamp, grew))
-                known.weeks.append(readings[0][2] if readings else None)
-                self._shares = None
-            known.total = total
+            lowered = any(value < 0 for value in grew.values())
+            # A later lower count starts again from zero. A same-time zero also marks a reset.
+            newer = known.total_at is None or counted_at > known.total_at
+            same_time = counted_at == known.total_at and (not lowered or not any(total.values()))
+            if newer or same_time:
+                if lowered:
+                    grew = total
+                if any(grew.values()):
+                    known.added.append((stamp, grew))
+                    known.weeks.append(readings[0][2] if readings else None)
+                    self._shares = None
+                known.total = total
+                known.total_at = counted_at
+                known.last_input, known.last_input_at = last_input, counted_at
         for window, reading in zip(weekly, readings, strict=True):
             self._readings.append(reading)
             self._shares = None
             if not self.email and (self._week is None or stamp >= self._week["captured_at"]):
                 self._week = _week(window, limits, stamp)
 
-    def _week_shares(self) -> dict[Path, list[float]]:
+    def _week_shares(self, hub: list[HubReading]) -> dict[Path, list[float]]:
+        """Each call's share of the weekly limit, in percent: from the hub's readings `hub` in a folder on a provider
+        of its own (_hub_shares), else from the meter in its session files (_meter_shares). Called under the lock."""
+        if self._shares is not None and (not self.on_hub or self._shares_hub == hub):
+            return self._shares
+        self._shares = self._hub_shares(hub) if self.on_hub else self._meter_shares()
+        self._shares_hub = hub
+        return self._shares
+
+    def _hub_shares(self, hub: list[HubReading]) -> dict[Path, list[float]]:
+        """Each call's share of the weekly limit, in percent: every rise of a hub account's week shared out over all
+        the calls since that account's rise before, by their tokens. An account's week starts from 0 %, except the
+        first one on record, which starts from its first reading; so do the calls before it count toward nothing. A
+        later week first read after the week before said it resets counts its calls from that reset, so the calls
+        between the week before's last rise and its reset count toward nothing. A week that reset early gives no such
+        time, so its next week's calls count from the week before's last rise."""
+        shares = {path: [0.0] * len(session.added) for path, session in self._files.items()}
+        calls = sorted(
+            (datetime.fromisoformat(stamp).timestamp(), path, at, grew["fresh"] + grew["cached"] + grew["output"])
+            for path, session in self._files.items() for at, (stamp, grew) in enumerate(session.added))
+        times = [call[0] for call in calls]
+        by_account: dict[str, list[HubReading]] = {}
+        for reading in sorted(hub, key=lambda each: each.at):
+            by_account.setdefault(reading.account, []).append(reading)
+        for readings in by_account.values():
+            # Each week by when it first said it resets, and its highest reading.
+            highest: dict[float, float] = {}
+            counted_from = readings[0].at
+            said_resets = readings[0].resets_at
+            for reading in readings:
+                week = _same_week(list(highest), reading.resets_at)
+                if week is None:
+                    week = reading.resets_at
+                    if highest and said_resets <= reading.at:
+                        counted_from = max(counted_from, said_resets)
+                    highest[week] = 0.0 if highest else reading.used
+                said_resets = reading.resets_at
+                rise = reading.used - highest[week]
+                if rise <= 0:
+                    continue
+                highest[week] = reading.used
+                since = calls[bisect.bisect_right(times, counted_from):bisect.bisect_right(times, reading.at)]
+                counted_from = reading.at
+                total_weight = sum(weight for *_, weight in since)
+                for _, path, at, weight in since if total_weight else ():
+                    shares[path][at] += rise * weight / total_weight
+        return shares
+
+    def _meter_shares(self) -> dict[Path, list[float]]:
         """Each call's share of the weekly limit, in percent: every rise of a week's meter shared out over that
         week's calls since its rise before, by their tokens. A call belongs to the week its own line reported, or,
-        without a reading, to the week read last. Called under the lock."""
-        if self._shares is not None:
-            return self._shares
+        without a reading, to the week read last."""
         shares = {path: [0.0] * len(session.added) for path, session in self._files.items()}
         # A call sorts before a reading of the same moment, since Codex reads the meter after the call, and of two
         # readings of the same moment the higher comes first, so the lower one adds nothing.
@@ -473,16 +608,16 @@ class AccountIndex:
             if total_weight:
                 for (path, at), weight in zip(calls, weights, strict=True):
                     shares[path][at] += rise * weight / total_weight
-        self._shares = shares
         return shares
 
-    def summary(self, since: datetime, now: datetime) -> dict[str, Any]:
-        """The tokens counted since `since`, in total and per session (most first), and the latest weekly meter
-        with its pace at `now`, as Claude's (usage.pace)."""
+    def summary(self, since: datetime, now: datetime, hub: list[HubReading]) -> dict[str, Any]:
+        """The tokens counted since `since`, in total and per session (most first), with their shares of the weekly
+        limit from the hub's readings `hub` or the meter (_week_shares), and the latest weekly meter with its pace at
+        `now`, as Claude's (usage.pace)."""
         start = since.strftime("%Y-%m-%dT%H:%M:%S")
         total, rows = dict.fromkeys(KINDS, 0), []
         with self._lock:
-            shares = self._week_shares()
+            shares = self._week_shares(hub)
             for path, session in self._files.items():
                 calls = [at for at, (stamp, _) in enumerate(session.added) if stamp >= start]
                 if not calls:
@@ -496,13 +631,17 @@ class AccountIndex:
                     "tokens": tokens, "week_percent": round(sum(shares[path][at] for at in calls), 3),
                 })
             # Codex often resets its week early, so a period can span more than one of its weeks.
-            weeks: list[int] = []
-            for stamp, _, resets in self._readings:
-                if stamp >= start and all(abs(each - resets) > SAME_WEEK_SECONDS for each in weeks):
-                    weeks.append(resets)
+            if self.on_hub:
+                weeks = _hub_weeks(hub, since.timestamp(), now.timestamp())
+            else:
+                found: list[int] = []
+                for stamp, _, resets in self._readings:
+                    if stamp >= start and all(abs(each - resets) > SAME_WEEK_SECONDS for each in found):
+                        found.append(resets)
+                weeks = len(found)
         rows.sort(key=_heaviest)
         return {"total": total, "calls": sum(row["calls"] for row in rows), "sessions": rows, "week": self.week(now),
-                "week_percent": round(sum(row["week_percent"] for row in rows), 3), "weeks": len(weeks)}
+                "week_percent": round(sum(row["week_percent"] for row in rows), 3), "weeks": weeks}
 
     def ask(self, command: str, now: datetime) -> None:
         """Note whether Codex's answer refuses this account's sign-in, its banked resets and its weekly meter; a failed
@@ -562,12 +701,13 @@ class AccountIndex:
             return week | {"used": None, "elapsed": None, "pace": None, "counted_until": None, "span": 100}
         return week | usage.week_counted(self.email, week["used"], resets_at, now.timestamp())
 
-    def hours(self, since: datetime) -> list[dict[str, Any]]:
-        """Codex use per hour since `since`: its calls, tokens and share of the weekly limit, for the graph per day."""
+    def hours(self, since: datetime, hub: list[HubReading]) -> list[dict[str, Any]]:
+        """Codex use per hour since `since`: its calls, tokens and share of the weekly limit, from the hub's readings
+        `hub` or the meter (_week_shares), for the graph per day."""
         start = since.strftime("%Y-%m-%dT%H:%M:%S")
         per_hour: dict[str, dict[str, Any]] = {}
         with self._lock:
-            shares = self._week_shares()
+            shares = self._week_shares(hub)
             for path, session in self._files.items():
                 for at, (stamp, grew) in enumerate(session.added):
                     if stamp < start:
@@ -578,6 +718,19 @@ class AccountIndex:
                     for kind in KINDS:
                         hour["tokens"][kind] += grew[kind]
         return [{"hour": hour, **per_hour[hour], "week_percent": round(per_hour[hour]["week_percent"], 3)} for hour in sorted(per_hour)]
+
+    def latest_inputs(self) -> dict[str, tuple[datetime, int]]:
+        """The latest cache state of each session, by session id, from the session file whose state is the latest: the
+        time and input of its latest call, or a compaction's time and 0 input when one came after it."""
+        latest: dict[str, tuple[datetime, int]] = {}
+        with self._lock:
+            for session in self._files.values():
+                if session.last_input_at is None:
+                    continue
+                held = latest.get(session.session_id)
+                if held is None or session.last_input_at > held[0]:
+                    latest[session.session_id] = (session.last_input_at, session.last_input)
+        return latest
 
 
 class CodexIndex:
@@ -590,6 +743,10 @@ class CodexIndex:
     def refresh(self, now: datetime) -> None:
         for account in self.accounts:
             account.refresh(now)
+        on_hub = [account.home.name for account in self.accounts if account.on_hub]
+        if len(on_hub) > 1:
+            log.error("Codex folders %s all run on a provider of their own: each counts the hub's whole use, so Usage "
+                      "counts it %d times", ", ".join(on_hub), len(on_hub))
         self.ready_at = now.strftime("%Y-%m-%dT%H:%M:%SZ")
 
     def ask_accounts(self, command: str) -> None:
@@ -598,11 +755,12 @@ class CodexIndex:
             if email(account.home):
                 account.ask(command, datetime.now(UTC))
 
-    def summary(self, since: datetime, now: datetime) -> dict[str, Any]:
+    def summary(self, since: datetime, now: datetime, hub: list[HubReading]) -> dict[str, Any]:
         """Every account's tokens and sessions since `since`, and in `accounts` each signed-in account's latest
-        weekly meter, in the order of config.CODEX_HOMES. The shares add up in shares of one account's week, as the
-        Claude accounts' do, and `weeks` counts each account's weeks in the period, each allowing 100 %."""
-        parts = [(account, account.summary(since, now)) for account in self.accounts]
+        weekly meter, in the order of config.CODEX_HOMES; a folder on the hub takes its shares from the hub's
+        readings `hub`. The shares add up in shares of one account's week, as the Claude accounts' do, and `weeks`
+        counts each account's weeks in the period, each allowing 100 %."""
+        parts = [(account, account.summary(since, now, hub)) for account in self.accounts]
         return {
             "total": {kind: sum(part["total"][kind] for _, part in parts) for kind in KINDS},
             "calls": sum(part["calls"] for _, part in parts),
@@ -621,11 +779,38 @@ class CodexIndex:
         listed = [(account, account.week(now)) for account in self.accounts]
         return [{"email": account.email, "folder": account.home.name, "week": week} for account, week in listed if account.email or week]
 
-    def hours(self, since: datetime) -> list[dict[str, Any]]:
-        """Every account's Codex use per hour since `since`, added up, for the graph per day."""
+    def caches(self) -> dict[str, dict[str, Any]]:
+        """What Codex's prompt cache likely holds of each session, from every account, by session id, in the shape of
+        spend.SpendIndex.caches: the latest call's input and until when it likely stays warm (CACHE_MINUTES,
+        measured, not stated by Codex). The latest state over all accounts counts, so a session whose latest state
+        is a compaction, or a count without the call's own tokens, has none. Cockpit holds no Codex prices, so
+        `cold_usd` is None, and the index does not follow the model, so `model` is None."""
+        latest: dict[str, tuple[datetime, int]] = {}
+        for account in self.accounts:
+            for session_id, (called_at, tokens) in account.latest_inputs().items():
+                if session_id not in latest or called_at > latest[session_id][0]:
+                    latest[session_id] = (called_at, tokens)
+        caches = {}
+        for session_id, (called_at, tokens) in latest.items():
+            if not tokens:
+                continue
+            until = called_at + timedelta(minutes=CACHE_MINUTES)
+            caches[session_id] = {
+                "tokens": tokens,
+                "warm_until": until.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "lifetime_minutes": CACHE_MINUTES,
+                "lifetime_estimated": True,
+                "cold_usd": None,
+                "model": None,
+            }
+        return caches
+
+    def hours(self, since: datetime, hub: list[HubReading]) -> list[dict[str, Any]]:
+        """Every account's Codex use per hour since `since`, added up, for the graph per day; a folder on the hub
+        takes its shares from the hub's readings `hub`."""
         per_hour: dict[str, dict[str, Any]] = {}
         for account in self.accounts:
-            for hour in account.hours(since):
+            for hour in account.hours(since, hub):
                 merged = per_hour.setdefault(hour["hour"], {"calls": 0, "tokens": dict.fromkeys(KINDS, 0), "week_percent": 0.0})
                 merged["calls"] += hour["calls"]
                 merged["week_percent"] += hour["week_percent"]

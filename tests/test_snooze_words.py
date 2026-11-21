@@ -148,6 +148,23 @@ def test_a_read_that_lands_after_the_step_closed_still_sets_its_time(world: Worl
         conn.close()
 
 
+def test_a_read_cut_off_by_a_restart_wakes_the_step_with_the_reason(world: World, monkeypatch) -> None:
+    step = snoozed_step(world, monkeypatch, lambda *args: READ)
+    target = f"step:{step['id']}"
+    conn = db.connect(world.db_path)
+    try:
+        # The read was under way when Cockpit stopped, so nothing will ever settle it.
+        store.start_snooze_read(conn, target, "friday", STAND_IN, datetime.now(UTC))
+        conn.execute("UPDATE steps SET snoozed_until = ? WHERE id = ?", (STAND_IN, step["id"]))
+        assert store.interrupt_snooze_reads(conn, datetime.now(UTC)) == 1
+        entry = store.snooze_reads(conn, datetime.now(UTC))[target]
+        assert (entry["status"], entry["reason"]) == ("unread", store.SNOOZE_READ_CUT)
+        assert store.get_step(conn, step["id"])["snoozed_until"] is None
+        assert store.interrupt_snooze_reads(conn, datetime.now(UTC)) == 0
+    finally:
+        conn.close()
+
+
 def test_another_snooze_forgets_how_the_words_were_read(world: World, monkeypatch) -> None:
     step = snoozed_step(world, monkeypatch, lambda *args: READ)
     world.client.post(f"/api/steps/{step['id']}/snooze", json={"until": None}, headers=world.user())

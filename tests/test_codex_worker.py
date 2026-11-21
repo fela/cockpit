@@ -14,8 +14,9 @@ import pytest
 
 from cockpit import db
 from cockpit.app import create_app
-from cockpit.codex_agent import CodexError, ProviderSessions
+from cockpit.codex_agent import CodexAgent, CodexError, ProviderSessions, WorkerRetired
 from cockpit.codex_worker import WorkerClient, launch, socket_path
+from cockpit.views import read as read_view
 from tests.conftest import SESSION_B
 from tests.test_api import put_item
 
@@ -57,6 +58,16 @@ for line in sys.stdin:
 '''
 
 
+SRC = Path(__file__).resolve().parents[1] / "src"
+
+
+def start_worker_process(db_path: Path, command: str, installed: Path, stderr=subprocess.DEVNULL) -> subprocess.Popen:
+    """The worker as launch() runs it, but from the source tree; `installed` stands for the deployed package."""
+    return subprocess.Popen([sys.executable, "-m", "cockpit.codex_worker", str(db_path), command, str(installed)],
+                            env={**os.environ, "PYTHONPATH": str(SRC)}, stdout=subprocess.DEVNULL, stderr=stderr,
+                            start_new_session=True)
+
+
 def wait_until(check):
     deadline = time.monotonic() + 10
     while time.monotonic() < deadline:
@@ -75,10 +86,7 @@ def worker(world, monkeypatch):
     processes = []
 
     def start_worker(db_path, command):
-        env = {**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src")}
-        process = subprocess.Popen([sys.executable, "-m", "cockpit.codex_worker", str(db_path), command],
-                                   env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, start_new_session=True)
-        processes.append(process)
+        processes.append(start_worker_process(db_path, command, SRC / "cockpit", stderr=subprocess.PIPE))
 
     monkeypatch.setattr("cockpit.codex_worker.launch", start_worker)
     client = WorkerClient(world.db_path, str(command))
@@ -101,7 +109,7 @@ def test_active_turn_and_original_request_survive_web_process_loss(world, worker
 import sys
 from pathlib import Path
 from cockpit.codex_worker import WorkerClient
-WorkerClient(Path(sys.argv[1]), sys.argv[2]).start(Path(sys.argv[3]), "test", "do work", "gpt-6.1-sol", "high", "standard")
+WorkerClient(Path(sys.argv[1]), sys.argv[2]).start(Path(sys.argv[3]), "test", "do work", "gpt-6.2-sol", "high", "standard")
 ''', str(world.db_path), client.command, str(world.checkout)],
         env={**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src")})
     try:
@@ -111,7 +119,7 @@ WorkerClient(Path(sys.argv[1]), sys.argv[2]).start(Path(sys.argv[3]), "test", "d
         # A new web app and client must not mark the worker's turn interrupted.
         reconnected = WorkerClient(world.db_path, client.command)
         world.deliverer.codex = reconnected
-        create_app(world.settings, world.deliverer, ProviderSessions(None, reconnected), world.spend_index, world.codex_index, [])
+        create_app(world.settings, world.deliverer, ProviderSessions(None, reconnected), world.spend_index, world.codex_index, [], read_view)
         assert reconnected.requests() == [original]
         assert reconnected.lookup(SESSION_B).state == "blocked"
         assert reconnected.lookup(SESSION_B).pid == client.lookup(SESSION_B).pid
@@ -145,7 +153,7 @@ def test_new_thread_attached_before_lost_start_response(world, worker):
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
         connection.connect(str(socket_path(world.db_path)))
         connection.sendall((json.dumps({"method": "start_for_message", "args": [message_id, str(world.checkout),
-            "test", "work", "gpt-6.1-sol", "high", "standard"]}) + "\n").encode())
+            "test", "work", "gpt-6.2-sol", "high", "standard"]}) + "\n").encode())
     request = wait_until(client.requests)[0]
     conn = db.connect(world.db_path)
     try:
@@ -190,13 +198,17 @@ def test_linux_worker_uses_separate_service_and_inherits_provider_config(world, 
     monkeypatch.setattr("cockpit.codex_worker.subprocess.run", lambda args, **kwargs:
                         calls.append(args) or subprocess.CompletedProcess(args, 0, "", ""))
     launch(world.db_path, "codex")
-    [args] = calls
+    launch(world.db_path, "codex")
+    args, replacement = calls
     assert args[:2] == ["systemd-run", "--user"]
     assert "--scope" not in args
     assert "--setenv=CODEX_HOME" in args and "--setenv=PATH" in args
     assert "/private/provider-codex-home" not in args
-    assert args[-2:] == [str(world.db_path), "codex"]
-    assert (Path(args[-3]) / "cockpit" / "codex_worker.py").exists()
+    assert args[-3:] == [str(world.db_path), "codex", str(SRC / "cockpit")]
+    assert (Path(args[-4]) / "cockpit" / "codex_worker.py").exists()
+    unit, next_unit = [next(arg for arg in run if arg.startswith("--unit=")) for run in calls]
+    assert unit.removesuffix(Path(args[-4]).name) == next_unit.removesuffix(Path(replacement[-4]).name)
+    assert unit != next_unit
 
 
 
@@ -207,6 +219,41 @@ def test_failed_linux_launch_removes_its_code_copy(world, monkeypatch):
     with pytest.raises(CodexError, match="already loaded"):
         launch(world.db_path, "codex")
     assert list((world.db_path.parent / "codex-worker-code").iterdir()) == []
+
+
+def test_worker_launch_waits_for_a_slow_predecessor(world, monkeypatch):
+    import fcntl
+    from types import SimpleNamespace
+
+    from cockpit import codex_worker
+
+    now = 0.0
+    started = []
+    client = WorkerClient(world.db_path, "codex")
+
+    def sleep(seconds):
+        nonlocal now
+        now += seconds
+        if now >= 65 and not owner.closed:
+            owner.close()
+
+    connection = object()
+
+    def connect():
+        if not started or now < started[0] + 2:
+            raise FileNotFoundError
+        return connection
+
+    def start():
+        started.append(now)
+
+    monkeypatch.setattr(codex_worker, "time", SimpleNamespace(monotonic=lambda: now, sleep=sleep))
+    monkeypatch.setattr(client, "_connect", connect)
+    monkeypatch.setattr(client, "_launch", start)
+    with (world.db_path.parent / "codex-worker.lock").open("a") as owner:
+        fcntl.flock(owner, fcntl.LOCK_EX)
+        assert client._ready() is connection
+    assert len(started) == 1 and 65 <= started[0] < 66
 
 
 def test_launch_refused_while_old_unit_stops_is_tried_again(world, monkeypatch):
@@ -220,10 +267,7 @@ def test_launch_refused_while_old_unit_stops_is_tried_again(world, monkeypatch):
         attempts.append(time.monotonic())
         if len(attempts) == 1:
             raise CodexError("Cannot start independent Codex worker: Unit was already loaded or has a fragment file.")
-        env = {**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src")}
-        processes.append(subprocess.Popen([sys.executable, "-m", "cockpit.codex_worker", str(db_path), command],
-                                          env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                                          start_new_session=True))
+        processes.append(start_worker_process(db_path, command, SRC / "cockpit"))
 
     monkeypatch.setattr("cockpit.codex_worker.launch", start_worker)
     monkeypatch.setattr("cockpit.codex_worker.LAUNCH_RETRY", 0.1)
@@ -250,7 +294,7 @@ def test_macos_worker_is_a_separate_launchd_job(world, monkeypatch):
     job = plistlib.loads(path.read_bytes())
     assert job["Label"].startswith("cockpit.codex.")
     assert job["EnvironmentVariables"]["PATH"] == os.environ["PATH"]
-    assert job["ProgramArguments"][-2:] == [str(world.db_path), "codex"]
+    assert job["ProgramArguments"][-3:] == [str(world.db_path), "codex", str(SRC / "cockpit")]
 
 
 def test_worker_loss_fails_active_turn_without_replaying_it(world, worker):
@@ -258,7 +302,7 @@ def test_worker_loss_fails_active_turn_without_replaying_it(world, worker):
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
         connection.connect(str(socket_path(world.db_path)))
         connection.sendall((json.dumps({"method": "start", "args": [str(world.checkout),
-            "test", "work", "gpt-6.1-sol", "high", "standard"]}) + "\n").encode())
+            "test", "work", "gpt-6.2-sol", "high", "standard"]}) + "\n").encode())
     wait_until(client.requests)
     processes[0].terminate()
     processes[0].wait(timeout=5)
@@ -288,7 +332,7 @@ def test_worker_queues_many_callers_while_slow_to_accept(world):
     from cockpit.codex_worker import WorkerServer
     path = socket_path(world.db_path)
     # The server is made but never accepts, as when a busy host starves its accept loop.
-    with WorkerServer(path, agent=None) as _server:
+    with WorkerServer(path, agent=None, installed=SRC / "cockpit") as _server:
         waiting = fill_listen_queue(path)
         try:
             # socketserver's default queue held 5, and the 7th caller failed with EAGAIN.
@@ -301,6 +345,7 @@ def test_worker_queues_many_callers_while_slow_to_accept(world):
 def test_full_listen_queue_waits_for_room(tmp_path, monkeypatch):
     import threading
     import types
+
     from cockpit import codex_worker
     refused = threading.Event()
 
@@ -353,11 +398,12 @@ class FlakyCodex:
 
 def test_pages_keep_last_codex_sessions_when_worker_is_busy(world, caplog):
     from fastapi.testclient import TestClient
+
     from tests.conftest import ORIGIN, make_session
     item = put_item(world, key="note:busy-worker", title="Busy worker")
     codex = FlakyCodex(make_session(SESSION_B, pid=None, cwd=str(world.checkout)))
     cache = ProviderSessions(None, codex)
-    client = TestClient(create_app(world.settings, world.deliverer, cache, world.spend_index, world.codex_index, []),
+    client = TestClient(create_app(world.settings, world.deliverer, cache, world.spend_index, world.codex_index, [], read_view),
                         base_url=ORIGIN)
     assert [s.session_id for s in cache.get()] == [SESSION_B]
     response = client.get(f"/api/items/{item['id']}/history", headers=world.agent())
@@ -377,3 +423,92 @@ def test_no_codex_sessions_listed_yet_is_an_error(world):
     codex.listed = []
     with pytest.raises(CodexError):
         ProviderSessions(None, codex).get()
+
+
+def test_idle_worker_on_older_code_hands_new_work_to_a_worker_on_installed_code(world, tmp_path, monkeypatch):
+    """A deploy leaves the worker running; its next new work starts a worker on the deployed code instead."""
+    import shutil
+    import threading
+    command = world.checkout / "fake-codex"
+    command.write_text(FAKE)
+    command.chmod(0o700)
+    deployed = tmp_path / "deployed" / "cockpit"
+    shutil.copytree(SRC / "cockpit", deployed, ignore=shutil.ignore_patterns("__pycache__"))
+    (deployed / "codex_worker.py").write_text((deployed / "codex_worker.py").read_text() + "\n# deployed later\n")
+    # The first worker runs code older than `deployed`; the one after it runs that code.
+    installed, processes = [deployed, SRC / "cockpit"], []
+    monkeypatch.setattr("cockpit.codex_worker.launch", lambda db_path, command:
+                        processes.append(start_worker_process(db_path, command, installed.pop(0))))
+    client = WorkerClient(world.db_path, str(command))
+    try:
+        assert client.sessions() == []
+        started = threading.Thread(target=client.start, args=(world.checkout, "test", "work", "gpt-6.2-sol", "high", "standard"))
+        started.start()
+        request = wait_until(client.requests)[0]
+        assert len(processes) == 2
+        assert processes[0].wait(timeout=10) == 0
+        client.answer(request["id"], {"decision": "accept"})
+        started.join(timeout=10)
+        wait_until(lambda: client.lookup(SESSION_B).state == "done")
+        assert (world.checkout / "executed").read_text() == "once\n"
+    finally:
+        for process in processes:
+            process.terminate()
+            process.wait(timeout=5)
+
+
+def test_worker_with_open_codex_work_keeps_taking_new_work(world):
+    agent = CodexAgent(world.db_path, "unused")
+    agent._active["thread"] = ("turn", "item")
+    assert not agent.retire_if_idle(lambda: True)
+    agent._active.clear()
+    agent._pending["request"] = {}
+    assert not agent.retire_if_idle(lambda: True)
+    agent._pending.clear()
+    assert not agent.retire_if_idle(lambda: False)
+    assert agent.retire_if_idle(lambda: True)
+    with pytest.raises(WorkerRetired):
+        agent.start(world.checkout, "test", "work", "gpt-6.2-sol", "high", "standard")
+
+
+def test_worker_removes_the_code_copies_of_earlier_workers(world, monkeypatch):
+    from cockpit import codex_worker
+    releases = world.db_path.parent / "codex-worker-code"
+    for name in ("old", "own", "starting"):
+        (releases / name / "cockpit").mkdir(parents=True)
+    two_hours_ago = time.time() - 7200
+    os.utime(releases / "old", (two_hours_ago, two_hours_ago))
+    monkeypatch.setattr(codex_worker, "__file__", str(releases / "own" / "cockpit" / "codex_worker.py"))
+    codex_worker._remove_other_copies(world.db_path)
+    assert sorted(path.name for path in releases.iterdir()) == ["own", "starting"]
+
+
+def test_retiring_worker_answers_calls_already_connected(world):
+    """Calls that reached the old worker before it removed its socket get answers; none breaks off unanswered."""
+    import threading
+    import types
+
+    from cockpit.codex_worker import WorkerServer
+
+    def start(*args):
+        raise WorkerRetired("retired")
+    agent = types.SimpleNamespace(retire_if_idle=lambda outdated: True, start=start, sessions=lambda: [])
+    path = socket_path(world.db_path)
+
+    def call(connection, method, args):
+        connection.sendall((json.dumps({"method": method, "args": args}) + "\n").encode())
+        return json.loads(connection.makefile().readline())
+
+    with WorkerServer(path, agent=agent, installed=SRC / "cockpit") as server:
+        serving = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.05})
+        serving.start()
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as first, \
+                socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as second:
+            first.connect(str(path))
+            second.connect(str(path))
+            assert call(first, "start", [str(world.checkout), "test", "work", "gpt-6.2-sol", "high", "standard"])["retired"]
+            assert not path.exists()
+            time.sleep(0.2)
+            assert call(second, "sessions", []) == {"result": []}
+        serving.join(timeout=5)
+        assert not serving.is_alive()

@@ -26,7 +26,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from cockpit import db, limits, projects, rank, store
+from cockpit import db, handovers, limits, projects, rank, store
 from cockpit.sessions import ErrorStop, Session, error_stop, transcript_usage
 
 log = logging.getLogger(__name__)
@@ -95,7 +95,7 @@ def waiting(conn: sqlite3.Connection, sessions: list[Session], now: datetime) ->
     moved = {session.session_id: limits.moved_at(conn, session.session_id) for session in sessions}
     found = []
     for session in sessions:
-        if session.state == "working" or session.working_now:
+        if session.state == "working" or session.working_now or handovers.held(conn, session.session_id):
             continue
         if conn.execute("SELECT 1 FROM error_stops WHERE session_id = ? AND outcome = ''",
                         (session.session_id,)).fetchone():

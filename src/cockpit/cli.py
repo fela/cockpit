@@ -52,14 +52,20 @@ IDLE_LISTED_SECONDS = 60 * 60
 # sends. The tool input goes whole, since Allow lets the whole call run. The transcript tail covers the
 # turn that made the call.
 ASK_POLL_SECONDS = 2.0
+# How long a permission hook keeps sending a request Cockpit refused the connection for: a deploy restarts
+# cockpit.service, which can leave its port closed for up to a minute.
+RESTART_WAIT_SECONDS = 120
+RESTART_POLL_SECONDS = 2.0
+# The report hook's timeout in the session's settings is 10 s, so it keeps sending for a shorter time.
+REPORT_RESTART_WAIT_SECONDS = 8
 REASON_MAX = 2000
 TRANSCRIPT_TAIL_BYTES = 4 * 1024 * 1024
 FAILED_HEAD = (
     "Failed messages.\n"
     "When a failure's work was done another way, such as by a session now working on the item, dismiss it:"
     " `cockpit message dismiss ID --reason TEXT --as NAME`.\n"
-    "When the work still needs it, fix the cause first. Retry your own with `cockpit message retry ID --as NAME`;"
-    " send another sender's again with `cockpit send`."
+    "When the work still needs it, fix the cause first, then retry the unchanged original with"
+    " `cockpit message retry ID --as NAME`, whoever sent it."
 )
 # `cockpit get` shows this much of a failed message's detail, on one line.
 FAILED_DETAIL_CHARS = 300
@@ -74,6 +80,10 @@ WAITING_REVIEW_MAX = 10
 
 class CockpitError(Exception):
     exit_code = 1
+
+
+class CockpitUnreachable(CockpitError):
+    """Cockpit refused the connection, so it did not get the request: sending it again is safe."""
 
 
 class StepSkipped(CockpitError):
@@ -129,7 +139,9 @@ JSON fields (left-out fields keep their value; lists are replaced whole):
               you put first: a step with need complete, where $user presses Task done or Close. The put
               leaves the item open; without that step it is refused. One exception: "stage": "done" on
               an item whose PR has merged closes it with no finish step, when no other step is open on it.
-              So does "stage": "done" with a note on a to-do $user added as fire and forget.
+              So does "stage": "done" with a note on a to-do $user added as fire and forget, and on a
+              scheduled run's own recurring item when the run has nothing to report. An item that
+              several runs share stays open, so the next run can put its step.
 Once $user sets priority, goal_id, blocks or archived on the page, your value for that
 field is ignored. The response lists the fields it left alone in "kept".
 An item $user completed stays done: a put that moves it to another stage is refused (HTTP 409)."""
@@ -229,7 +241,8 @@ def fetch(method: str, path: str, data: tuple[bytes, str] | None, agent: str | N
             detail = ""
         raise CockpitError(f"{method} {path}: HTTP {exc.code}: {detail}") from exc
     except OSError as exc:
-        raise CockpitError(
+        refused = isinstance(getattr(exc, "reason", exc), ConnectionRefusedError)
+        raise (CockpitUnreachable if refused else CockpitError)(
             f"Cockpit is not reachable at {config.api_base()}: {exc}. Check whether cockpit.service is running."
         ) from exc
 
@@ -280,6 +293,7 @@ def lean(state: dict[str, Any]) -> dict[str, Any]:
         "moved_past": [request(entry) for entry in state["moved_past"]],
         "held_requests": [request(entry) for entry in state["held_requests"]],
         "settled_requests": [request(entry) for entry in state["settled_requests"]],
+        "checker_refusals": [request(entry) for entry in state["checker_refusals"]],
     }
 
 
@@ -305,6 +319,20 @@ def _expiry_words(step: dict[str, Any], now: datetime) -> str:
     if rank.expiring(step, now):
         return f", useful until {step['expires_at']} (leads the queue until then)"
     return f", its time ran out at {step['expires_at']}"
+
+
+def _cache_lines(step: dict[str, Any], indent: str) -> list[str]:
+    """What the prompt cache of the session that gets the step's answer holds, when Cockpit knows it: "likely" for a
+    lifetime Cockpit estimates, and what reloading it cold costs when Cockpit knows the price."""
+    cache = step["cache"]
+    if cache is None:
+        return []
+    likely = "likely " if cache["lifetime_estimated"] else ""
+    tokens = f"{cache['tokens'] / 1000:.0f}K tokens"
+    if not cache["minutes_left"]:
+        return [f"{indent}cache {likely}cold, {tokens}"]
+    cold = "" if cache["cold_usd"] is None else f", ${cache['cold_usd']:.2f} to reload cold"
+    return [f"{indent}cache {likely}warm {cache['minutes_left']} more min, {tokens}{cold}"]
 
 
 def summary(state: dict[str, Any]) -> str:
@@ -358,6 +386,15 @@ def summary(state: dict[str, Any]) -> str:
         lines.append(f"WARNING: {problem['text']}")
         lines += [f"  {line}" for line in problem["detail"].splitlines()]
     for wrong in state["wrong_models"]:
+        if not wrong["claude"]:
+            # The fallback while the model hub cannot reach Claude: nothing to move back by hand.
+            now_on = f"It is back on {wrong['latest']}" if wrong["back"] else "It moves back once the hub reaches Claude again"
+            lines.append(
+                f"NOTE: session {wrong['session_id']} ({wrong['name'][:60]}) ran on {wrong['model']} in place of Claude,"
+                f" as the fallback while the model hub could not reach Claude. It made {wrong['calls']}"
+                f" call{'' if wrong['calls'] == 1 else 's'} there, the last at {wrong['last']}. {now_on}."
+            )
+            continue
         now_on = f"It is back on {wrong['intended']}" if wrong["back"] else f"`/model {wrong['intended']}` moves it back"
         lines.append(
             f"WARNING: session {wrong['session_id']} ({wrong['name'][:60]}) ran on {wrong['model']} instead of"
@@ -406,6 +443,7 @@ def summary(state: dict[str, Any]) -> str:
             f"  {position}. {step['ask']}{on_it}",
             f"     step {step['id']}, score {step['score']}, {_bar_words(step)}{_early_words(step)}{_expiry_words(step, now)}",
             f"     item {step['item_id']} {step['item']['key']}, need {step['need']}",
+            *_cache_lines(step, "     "),
         ]
     if not state["queue"]:
         lines.append("  (empty)")
@@ -416,11 +454,13 @@ def summary(state: dict[str, Any]) -> str:
                 f"  - {step['ask']}",
                 f"    step {step['id']}, score {step['score']}, {_bar_words(step)}{_early_words(step)}{_expiry_words(step, now)}",
                 f"    item {step['item_id']} {step['item']['key']}, need {step['need']}",
+                *_cache_lines(step, "    "),
             ]
     if state["snoozed"]:
         lines.append("Snoozed:")
         for step in state["snoozed"]:
             lines.append(f"  step {step['id']} until {step['snoozed_until']}: {step['ask']}")
+            lines += _cache_lines(step, "    ")
     if state["with_agents"]:
         lines.append(f"With agents. {user_name()} handed these off; each stays with its agent until the agent closes or returns it:")
         for step in state["with_agents"]:
@@ -430,6 +470,7 @@ def summary(state: dict[str, Any]) -> str:
                 f"  - {step['ask']}",
                 f"    step {step['id']} to {to}, handed off {_ago(handoff['created_at'], now)}, message {handoff['state']}",
                 f"    item {step['item_id']} {step['item']['key']}, need {step['need']}",
+                *_cache_lines(step, "    "),
             ]
     if state["recent_archives"]:
         lines.append(
@@ -1006,6 +1047,23 @@ def _hook_report(kind: str, payload: Any, tool_use_id: str) -> dict[str, Any] | 
 # closes the dialog; an answer in the session appears in the transcript as the
 # call's result, which ends the wait. A failure exits 1, which Claude Code shows
 # as a hook error and otherwise ignores.
+def _hook_call(method: str, path: str, body: Any, agent: str | None, wait_seconds: float) -> Any:
+    """`call`, sent again while Cockpit refuses the connection, for up to `wait_seconds`: a hook that fails on a
+    restart leaves its dialog to the session's terminal, which Cockpit cannot answer, or its denied call off Cockpit."""
+    deadline = time.monotonic() + wait_seconds
+    waiting = False
+    while True:
+        try:
+            return call(method, path, body, agent)
+        except CockpitUnreachable as exc:
+            if time.monotonic() >= deadline:
+                raise
+            if not waiting:
+                print(f"cockpit: trying again for up to {wait_seconds:.0f} s; {exc}", file=sys.stderr)
+            waiting = True
+            time.sleep(RESTART_POLL_SECONDS)
+
+
 def _hook_decision(decision: dict[str, str]) -> str:
     return json.dumps({"hookSpecificOutput": {"hookEventName": "PermissionRequest", "decision": decision}})
 
@@ -1030,7 +1088,7 @@ def permission_report(payload: Any, agent: str) -> None:
     tool_use_id = payload.get("tool_use_id", "") if isinstance(payload, dict) else ""
     body = _hook_report("denied", payload, tool_use_id)
     if body is not None:
-        call("POST", "/api/permissions/requests", body, agent)
+        _hook_call("POST", "/api/permissions/requests", body, agent, REPORT_RESTART_WAIT_SECONDS)
 
 
 def permission_ask(payload: Any, agent: str) -> str | None:
@@ -1045,6 +1103,9 @@ def permission_ask(payload: Any, agent: str) -> str | None:
     # The emergency page cannot show a dialog's card, so its turns leave every dialog to Claude Code (emergency.py).
     if os.environ.get("COCKPIT_EMERGENCY"):
         return None
+    # The wait counts from the hook's start, so retries through a restart come out of it and the hook ends within
+    # its timeout in the session's settings (1800 s).
+    deadline = time.monotonic() + permissions.ASK_WAIT_SECONDS
     body = _hook_report("asked", payload, "")
     if body is None:
         return None
@@ -1053,7 +1114,7 @@ def permission_ask(payload: Any, agent: str) -> str | None:
     older = set()
     if transcript.is_file():
         older = {tool_use_id for tool_use_id, done in matching_calls(transcript, *tool)[0].items() if done}
-    reported = call("POST", "/api/permissions/requests", body, agent)
+    reported = _hook_call("POST", "/api/permissions/requests", body, agent, RESTART_WAIT_SECONDS)
     # Cockpit answers some dialogs as it records them (permissions.report): it allows entering a worktree of the
     # user's checkouts, and denies a call the session should split, with advice for the session.
     if reported["state"] == "allowed":
@@ -1062,7 +1123,6 @@ def permission_ask(payload: Any, agent: str) -> str | None:
         return _hook_deny(reported["advice"])
     path = f"/api/permissions/requests/{reported['id']}"
     tool_use_id, offset = "", 0
-    deadline = time.monotonic() + permissions.ASK_WAIT_SECONDS
     unreachable = False
     while time.monotonic() < deadline:
         time.sleep(ASK_POLL_SECONDS)
@@ -1075,7 +1135,7 @@ def permission_ask(payload: Any, agent: str) -> str | None:
             if fresh:
                 tool_use_id, answered = fresh[-1]
         if answered:
-            call("POST", f"{path}/settle", {"state": "answered"}, agent)
+            _hook_call("POST", f"{path}/settle", {"state": "answered"}, agent, RESTART_WAIT_SECONDS)
             return None
         try:
             state = call("GET", path, None, None)["state"]
@@ -1090,7 +1150,7 @@ def permission_ask(payload: Any, agent: str) -> str | None:
             return _user_answer(state)
     # The user's answer may land between the last look and the end of the wait; after it, the user's answer restarts
     # the session instead (SPEC PERM-8).
-    settled = call("POST", f"{path}/settle", {"state": "expired"}, agent)["state"]
+    settled = _hook_call("POST", f"{path}/settle", {"state": "expired"}, agent, RESTART_WAIT_SECONDS)["state"]
     return _user_answer(settled)
 
 
@@ -1104,6 +1164,7 @@ def permission_list(state: dict[str, Any], session_id: str) -> str:
     waiting = [
         entry
         for entry in state["permission_requests"] + state["moved_past"] + state["held_requests"]
+        + state["checker_refusals"]
         if entry["session_id"] == session_id
     ]
     if not waiting:
@@ -1157,6 +1218,10 @@ def permission_propose(request_id: int, session_id: str, sentence: str, agent: s
 
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
+    if argv and argv[0] == "connectors":
+        from cockpit import gateway_cli
+
+        return gateway_cli.main(argv[1:])
     if argv and argv[0] in {"setup", "login", "service", "deploy"}:
         from cockpit import local
 
@@ -1291,7 +1356,7 @@ def main(argv: list[str] | None = None) -> int:
     page_choices.add_argument("page_id", type=int, metavar="ID")
 
     message = commands.add_parser(
-        "message", help="a failed or waiting message (ids in `cockpit get`): dismiss it, or retry one of your own"
+        "message", help="a failed or waiting message (ids in `cockpit get`): dismiss it, or retry the unchanged original"
     )
     message_commands = message.add_subparsers(dest="action", required=True)
     dismiss = message_commands.add_parser(
@@ -1307,7 +1372,7 @@ def main(argv: list[str] | None = None) -> int:
         help="one line: why it needs nothing more, e.g. 'the item has a working session since 10:00'",
     )
     retry = message_commands.add_parser(
-        "retry", parents=[agent], help="send one of your failed messages again and wait until it is delivered"
+        "retry", parents=[agent], help="retry an unchanged failed message and wait until it is delivered"
     )
     retry.add_argument("message_id", type=int, metavar="ID")
 
@@ -1633,7 +1698,8 @@ def _held(result: dict[str, Any]) -> Any:
         )
     if result.get("alone"):
         return (
-            f"closed: item {result['id']} is a fire-and-forget to-do, now at stage done. {user_name()} gets no finish"
+            f"closed: item {result['id']} is {'a fire-and-forget to-do' if result['fire_and_forget'] else 'a recurring run'},"
+            f" now at stage done. {user_name()} gets no finish"
             " step, only your note in a line above their next step."
         )
     if result.get("finish_step"):

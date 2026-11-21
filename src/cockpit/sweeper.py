@@ -32,7 +32,7 @@ SLOW_GAP_MINUTES after the last sweep. After PAUSE_AFTER_MINUTES, Cockpit sends
 the sweeper one last check, which puts first in the user's queue a step that will
 still be right when the user comes back, and then sends no wake-ups or checks. The
 page shows a Restart sweeps key. The user writing on Cockpit (a message, a hand-off,
-a to-do, a goal, feedback), Update, Full sweep now and Restart start
+a to-do, a goal, feedback), Update and Restart start
 sweeps again; the restart is a change that wakes the sweeper.
 
 A reorder (SPEC SWEEP-25) is a short sweep that only rescores the user's queue and ready next. It marks no change as seen,
@@ -42,6 +42,7 @@ finishes, as a sweep's do (`store._swap_places`). `reorder_due` stays until a sw
 
 from __future__ import annotations
 
+import json
 import logging
 import sqlite3
 from collections.abc import Callable
@@ -50,7 +51,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from cockpit import config, db, patterns, rank, sessions, store
+from cockpit import accounts, config, db, parts, patterns, rank, sessions, store, usage
 from cockpit.config import user_name
 
 log = logging.getLogger(__name__)
@@ -105,7 +106,7 @@ QUIET_KINDS = (
     "session.closed",
     "message.failed",
     "message.dismissed",
-    "message.restored",
+    "message.retried",
     "sweep.started",
     "sweep.finished",
     "sweep.paused",
@@ -180,7 +181,7 @@ def checking(conn: sqlite3.Connection, now: datetime) -> dict[str, Any] | None:
     launched = store.get_message(conn, launch_record["message_id"])
     if launched["state"] == "failed":
         return None
-    if launched["state"] == "sent" and launch_failure(launched):
+    if launched["state"] == "sent" and launch_failure(conn, launched):
         return None
     if launched["state"] == "sent" and _check_silent(conn, launch_record, launched, now):
         return None
@@ -207,7 +208,7 @@ def launch_status(conn: sqlite3.Connection, now: datetime) -> dict[str, Any] | N
     if launch_record["kind"] == "check":
         if not _unchecked(conn, launch_record["step_ids"], launched["created_at"]):
             return status | {"state": "done"}
-        if failure := launch_failure(launched):
+        if failure := launch_failure(conn, launched):
             return status | {"state": "failed", "detail": failure}
         if _check_silent(conn, launch_record, launched, now):
             return status | {"state": "timed out", "detail": f"no step got a verdict for {CHECK_MINUTES} min"}
@@ -215,7 +216,7 @@ def launch_status(conn: sqlite3.Connection, now: datetime) -> dict[str, Any] | N
     sweep = db.kv_get(conn, "last_sweep")
     if sweep is not None and sweep["started_at"] >= launched["created_at"] and sweep["finished_at"]:
         return status | {"state": "failed", "detail": sweep["error"]} if sweep.get("error") else status | {"state": "done"}
-    if failure := launch_failure(launched):
+    if failure := launch_failure(conn, launched):
         return status | {"state": "failed", "detail": failure}
     if sweep is None or sweep["started_at"] < launched["created_at"]:
         if waited >= timedelta(minutes=store.CHECK_IN_MINUTES):
@@ -226,10 +227,18 @@ def launch_status(conn: sqlite3.Connection, now: datetime) -> dict[str, Any] | N
     return status | {"state": "running"}
 
 
-def launch_failure(launched: dict[str, Any]) -> str | None:
+def launch_failure(conn: sqlite3.Connection, launched: dict[str, Any]) -> str | None:
     """A rejected turn after delivery means the launch failed even though its message arrived."""
     sid = launched["session_id"]
     sent_at = rank.parse_time(launched["sent_at"])
+    thread = conn.execute("SELECT state, detail, updated_at FROM codex_threads WHERE session_id = ?", (sid,)).fetchone()
+    if thread is not None:
+        failed_at = rank.parse_time(thread["updated_at"])
+        attempt_at = rank.parse_time(launched["created_at"])
+        # A fast rejection can arrive before delivery acknowledges the turn and stamps sent_at.
+        if thread["state"] == "failed" and attempt_at is not None and failed_at is not None and failed_at >= attempt_at:
+            return thread["detail"] or "the Codex sweep session stopped with an error"
+        return None
     answer = sessions.last_answer(sid, sent_at) if sid and sent_at is not None else None
     if answer is None or answer[1]:
         return None
@@ -264,8 +273,46 @@ def busy(conn: sqlite3.Connection, now: datetime) -> str | None:
     return None
 
 
+def provider(conn: sqlite3.Connection, now: datetime) -> str:
+    """Prefer Opus; use enabled Codex while Claude is known to be unavailable."""
+    enabled = config.setup().providers
+    if "codex" not in enabled:
+        return "claude"
+    if "claude" not in enabled:
+        return "codex"
+    try:
+        available = parts.provider_availability(conn, now)
+        if available is None:
+            available = _native_availability(now)
+    except Exception:
+        log.exception("reading sweeper provider availability failed; keeping Claude")
+        return "claude"
+    return "codex" if available.get("claude") is False and available.get("codex") is True else "claude"
+
+
+def _native_availability(now: datetime) -> dict[str, bool]:
+    """Local Claude sign-ins and reported limits; custom API servers supply their own availability hook."""
+    if accounts.on_api_server(config.CLAUDE_SETTINGS):
+        return {}
+    active = accounts.usable(accounts.in_use(config.ACCOUNTS, []), now)
+    readings = accounts.readings(active, config.CLAUDE_RATE_LIMITS)
+    if any(record is None for record in readings.values()):
+        return {}
+    # Banked resets remain the user's choice. Enabled native Codex gets a try through normal delivery.
+    return {"claude": any(usage.room(record, now.timestamp(), [], None, 0).blocked_until is None
+                          for record in readings.values()), "codex": True}
+
+
+def _session_provider(conn: sqlite3.Connection, session_id: str) -> str:
+    if conn.execute("SELECT 1 FROM codex_threads WHERE session_id = ?", (session_id,)).fetchone():
+        return "codex"
+    row = conn.execute("SELECT provider FROM messages WHERE session_id = ? AND provider IS NOT NULL"
+                       " ORDER BY id DESC LIMIT 1", (session_id,)).fetchone()
+    return row[0] if row else "claude"
+
+
 def resumable(conn: sqlite3.Connection, exists: SessionExists, latest_model: Callable[[str], str | None]) -> SessionExists:
-    """`exists`, narrowed to a session whose latest own reply uses Opus (SPEC SWEEP-28).
+    """`exists`, narrowed to a session on its provider's sweeper model (SPEC SWEEP-28 and its Codex exception).
     Before its first reply, use the model recorded at launch.
     When a safety check flags a turn, Claude Code moves the session to a fallback model for the rest of its life, and
     resuming it keeps it there; a launch then goes to a new session instead."""
@@ -273,8 +320,16 @@ def resumable(conn: sqlite3.Connection, exists: SessionExists, latest_model: Cal
     def usable(session_id: str) -> bool:
         if not exists(session_id):
             return False
-        latest = latest_model(session_id) or store.started_models(conn).get(session_id)
-        intended = config.MAIN_MODEL
+        runs = _session_provider(conn, session_id)
+        intended = config.MAIN_MODEL if runs == "claude" else config.SESSION_OPTIONS["codex"]["models"][0][0]
+        if runs == "codex":
+            row = conn.execute("SELECT model FROM codex_threads WHERE session_id = ?", (session_id,)).fetchone()
+            started = conn.execute("SELECT json_extract(new_options, '$.model') FROM messages"
+                                   " WHERE session_id = ? AND via = 'new' ORDER BY id DESC LIMIT 1",
+                                   (session_id,)).fetchone()
+            latest = (row[0] if row else None) or (started[0] if started else None)
+        else:
+            latest = latest_model(session_id) or store.started_models(conn).get(session_id)
         if latest is None or latest == intended:
             return True
         log.error("sweeper session %s answered on %s instead of %s; the next launch starts a new session",
@@ -298,17 +353,18 @@ def launch(
     `kind` is "sweep", "check" or "reorder"; a check names the steps it covers. The text quotes agents' asks, titles and
     reasons, so a line in them that reads like a sender header is marked (store.defused).
     """
-    sweeper = _live_sweeper(conn, exists)
+    runs = provider(conn, datetime.now(UTC))
+    sweeper = _live_sweeper(conn, exists, runs)
     with db.transaction(conn):
-        message_id = _queue_launch(conn, author, text, cwd, sweeper, kind, step_ids)
+        message_id = _queue_launch(conn, author, text, cwd, sweeper, kind, step_ids, runs)
     return store.get_message(conn, message_id)
 
 
-def _live_sweeper(conn: sqlite3.Connection, exists: SessionExists) -> str | None:
+def _live_sweeper(conn: sqlite3.Connection, exists: SessionExists, provider: str) -> str | None:
     """The session the last launch reached while it exists; None for a new one. Looked up outside a transaction, as
     `exists` may list sessions."""
     sweeper = store.sweeper_session(conn)
-    if sweeper is not None and not exists(sweeper):
+    if sweeper is not None and (_session_provider(conn, sweeper) != provider or not exists(sweeper)):
         return None
     return sweeper
 
@@ -321,6 +377,7 @@ def _queue_launch(
     sweeper: str | None,
     kind: str,
     step_ids: list[int],
+    provider: str,
 ) -> int:
     """`launch`'s writes, inside the caller's transaction; returns the queued message's id."""
     reason = busy(conn, datetime.now(UTC))
@@ -332,15 +389,17 @@ def _queue_launch(
     # The user's words, and `busy` counts the sweep session as starting until it lands (SPEC MSG-3).
     if sweeper is not None:
         cursor = conn.execute(
-            "INSERT INTO messages (author, session_id, text, state, created_at, as_prompt)"
-            " VALUES (?, ?, ?, 'queued', ?, 0)",
-            (author, sweeper, text, now),
+            "INSERT INTO messages (author, session_id, text, state, created_at, as_prompt, provider)"
+            " VALUES (?, ?, ?, 'queued', ?, 0, ?)",
+            (author, sweeper, text, now, provider),
         )
     else:
         cursor = conn.execute(
-            "INSERT INTO messages (author, new_cwd, new_name, text, state, created_at, as_prompt)"
-            " VALUES (?, ?, ?, ?, 'queued', ?, 0)",
-            (author, str(cwd), store.SWEEP_SESSION_NAME, text, now),
+            "INSERT INTO messages (author, new_cwd, new_name, text, state, created_at, as_prompt, provider, new_options)"
+            " VALUES (?, ?, ?, ?, 'queued', ?, 0, ?, ?)",
+            (author, str(cwd), store.SWEEP_SESSION_NAME, text, now, provider,
+             json.dumps({"model": config.SESSION_OPTIONS[provider]["models"][0][0],
+                         "effort": config.SESSION_OPTIONS[provider]["effort"]})),
         )
     db.kv_set(conn, "sweep_launch", {"message_id": cursor.lastrowid, "kind": kind, "step_ids": step_ids})
     if kind == "sweep":
@@ -662,7 +721,8 @@ def wake_once(conn: sqlite3.Connection, cwd: Path, exists: SessionExists) -> int
     if wake is None:
         return None
     text = wake_text(conn, wake, now)
-    sweeper = _live_sweeper(conn, exists)
+    runs = provider(conn, now)
+    sweeper = _live_sweeper(conn, exists, runs)
     try:
         with db.transaction(conn):
             if wake.stopped is not None:
@@ -670,7 +730,7 @@ def wake_once(conn: sqlite3.Connection, cwd: Path, exists: SessionExists) -> int
                 still = _stopped_sweep(conn, now)
                 if still is None or still["id"] != wake.stopped["id"]:
                     return None
-            message_id = _queue_launch(conn, "cockpit", text, cwd, sweeper, "sweep", [])
+            message_id = _queue_launch(conn, "cockpit", text, cwd, sweeper, "sweep", [], runs)
             if wake.stopped is not None:
                 db.kv_set(conn, "sweep_recovery", {"stopped": wake.stopped["id"], "at": now.strftime("%Y-%m-%dT%H:%M:%SZ")})
     except store.Conflict:

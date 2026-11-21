@@ -87,6 +87,7 @@ WORKTREES = "--exclude=/.claude/worktrees/"
 # What never comes back: the repository, installed packages and caches are the host's own copies.
 NOT_COPIED_BACK = (".git", ".venv", "node_modules", "__pycache__", ".pytest_cache")
 TAG = "[cockpit offload]"
+VANISHED_TRIES = 3
 
 
 class OffloadError(Exception):
@@ -340,13 +341,22 @@ def _connect(host: str) -> None:
                 raise OffloadError(f"ssh to {host} failed: {errors.read().decode(errors='replace').strip()}")
 
 
-def _rsync(*args: str) -> None:
-    result = subprocess.run(
-        ["rsync", "-a", "--timeout=120", "-e", shlex.join(["ssh", *SSH_OPTIONS]), *args],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+def _rsync(*args: str, retry_vanished: bool) -> None:
+    """Copy with rsync. With `retry_vanished`, a copy that saw source files vanish runs again, up to three times."""
+    for _ in range(VANISHED_TRIES if retry_vanished else 1):
+        result = subprocess.run(
+            ["rsync", "-a", "--timeout=120", "-e", shlex.join(["ssh", *SSH_OPTIONS]), *args],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        # rsync exits 24 when its only trouble was source files that vanished during the copy, such as the lock
+        # files git makes and removes in a live checkout. The receiver keeps its older copy of a listed file that
+        # vanished before it was sent, so the copy runs again: the next file list leaves that file out and
+        # --delete removes it there.
+        if result.returncode != 24 or not retry_vanished:
+            break
+        print(f"{TAG} Copying again, as files vanished during the copy: {result.stderr.strip()}", file=sys.stderr, flush=True)
     if result.returncode != 0:
         raise OffloadError(f"rsync {' '.join(args[-2:])} failed ({result.returncode}): {result.stderr.strip()}")
 
@@ -366,12 +376,12 @@ def _hold(root: Path) -> IO[str]:
 def _push(work: Plan) -> None:
     for root in work.roots:
         skip = (WORKTREES,) if root in work.mains else ()
-        _rsync("--delete", "--mkpath", *CACHES, *skip, f"{root}/", f"{work.host}:{root}/")
+        _rsync("--delete", "--mkpath", *CACHES, *skip, f"{root}/", f"{work.host}:{root}/", retry_vanished=True)
     for extra in work.extras:
         if extra.is_dir():
-            _rsync("--delete", "--mkpath", f"{extra}/", f"{work.host}:{extra}/")
+            _rsync("--delete", "--mkpath", f"{extra}/", f"{work.host}:{extra}/", retry_vanished=True)
         elif extra.exists():
-            _rsync("--mkpath", str(extra), f"{work.host}:{extra}")
+            _rsync("--mkpath", str(extra), f"{work.host}:{extra}", retry_vanished=True)
 
 
 def _changed_there(work: Plan, root: Path, marker: str) -> list[str]:
@@ -422,10 +432,14 @@ def _pull_changed(work: Plan, marker: str, copied_at: int) -> None:
                 listing.write(b"\0".join(os.fsencode(name) for name in wanted))
                 listing.flush()
                 # Every listed file changed there, so each is copied even when its size and time look the same.
-                _rsync("--from0", f"--files-from={listing.name}", "--ignore-times", f"{work.host}:{root}/", f"{root}/")
+                # The command has ended there, so a listed file that vanishes is a surprise worth failing on.
+                _rsync(
+                    "--from0", f"--files-from={listing.name}", "--ignore-times", f"{work.host}:{root}/", f"{root}/",
+                    retry_vanished=False,
+                )  # fmt: skip
     for extra in work.extras:
         extra.parent.mkdir(parents=True, exist_ok=True)
-        _rsync("--update", "--ignore-missing-args", f"{work.host}:{extra}", f"{extra.parent}/")
+        _rsync("--update", "--ignore-missing-args", f"{work.host}:{extra}", f"{extra.parent}/", retry_vanished=False)
 
 
 def _remote_script(command: str, cwd: Path, env: Mapping[str, str], work: Plan, marker: str) -> str:

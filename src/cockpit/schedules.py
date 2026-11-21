@@ -201,7 +201,7 @@ def start_run(conn: sqlite3.Connection, name: str, checkouts_dir: Path, now: dat
             return None
         # The slot's time is in the key, so a schedule moved to a later time the same day runs on an item of its own.
         item = store.upsert_item(conn, {
-            "key": f"note:schedule-{name}-{slot:%Y-%m-%d-%H%M}",
+            "key": f"{store.SCHEDULE_RUN_KEY}{name}-{slot:%Y-%m-%d-%H%M}",
             "title": f"{schedule['title']} {slot.day} {slot:%b}",
             "project": schedule["project"],
             "recurring": True,

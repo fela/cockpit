@@ -1,11 +1,11 @@
 // The Mac's record on the page (TRACK-9, TRACK-10). Checks, at laptop and phone width, light and dark:
-// - "Your time" offers "Connect a Mac" while none is connected, and pressing it shows the Terminal line with a one-time
+// - "Your time" offers "Install on your Mac" while none is connected, and pressing it shows the Terminal line with a one-time
 //   code, which the installer trades for the Mac's key;
 // - minutes the Mac sends with that key show under "On your Mac today": the bar, the totals, away time and the labels;
 // - pressing a label's category moves it on to the next one, and Cockpit keeps the choice;
 // - Pause sends the pause, and the panel then offers Resume;
 // - a step's ⋯ menu shows where its timer time went on the Mac, from the item's breakdown;
-// - on /, a #time link and the logo menu open Your time in the center layer;
+// - a #time link and the logo menu open Your time in the center layer, on the same page;
 // - no sideways scroll and no page errors.
 //
 // Starts serve_preview.py (README.md says what it needs) and drives a headless Chromium. The item's breakdown is
@@ -94,18 +94,32 @@ async function main() {
           { label: "Finder", category: "neutral", minutes: 1 },
         ], away: 3 }),
       }));
-      await page.goto(`${info.origin}/classic`, { timeout: 120e3 });
+      await page.goto(`${info.origin}/`, { timeout: 120e3 });
+      await page.locator("#next .next-card").waitFor({ state: "visible", timeout: 120e3 });
       const tag = `${width}-${scheme}`;
-      const panel = page.locator("#time");
-      const openPanel = async () => {
-        if (!(await panel.locator("details").first().evaluate((el) => el.open))) await panel.locator("summary").first().click();
-      };
+      const layer = page.locator(".center-layer:not([hidden])");
+      const panel = layer.locator(".center-time");
+
+      // "Your time" opens over the card in the center layer from the step's "Open Your time" link (#time, as when it
+      // is pressed on the page already open). A step's link chip opens other links in a new tab; this one opens the view
+      // on the page already open. The chip is added and pressed at once, since a live update may redraw the card in
+      // between.
+      const pagesBefore = page.context().pages().length;
+      await page.evaluate((origin) => {
+        window.samePage = true;
+        const chip = Object.assign(document.createElement("a"), { href: `${origin}/#time`, target: "_blank", className: "link-chip", textContent: "Open Your time" });
+        document.querySelector("#next .next-card").prepend(chip);
+        chip.click();
+      }, info.origin);
+      await panel.locator("h3", { hasText: "On your Mac today" }).waitFor({ state: "visible" });
+      check(`${tag}: the step's link opens Your time in the center layer, on the same page`, page.url() === `${info.origin}/`
+        && (await layer.locator(".center-title").textContent()) === "Your time"
+        && await page.evaluate(() => window.samePage === true) && page.context().pages().length === pagesBefore, page.url());
 
       if (first) {
-        await openPanel();
-        const connect = panel.getByRole("button", { name: "Connect a Mac" });
+        const connect = panel.getByRole("button", { name: "Install on your Mac" });
         await connect.waitFor();
-        check(`${tag}: "Connect a Mac" shows before a Mac is connected`, true, "");
+        check(`${tag}: "Install on your Mac" shows before a Mac is connected`, true, "");
         if (shots) await panel.screenshot({ path: path.join(shots, `connect-${tag}.png`) });
         await connect.click();
         const line = panel.locator(".mac-install code");
@@ -127,13 +141,12 @@ async function main() {
           if (back <= 10) entry = { app: "loginwindow", site: null, away: true };
           minutes.push({ minute: minuteAgo(back), ...entry });
         }
-        const sent = await call(info.origin, { authorization: `Bearer ${macKey}`, "content-type": "application/json" }, "POST", "/api/activity/minutes", { minutes });
+        const sent = await call(info.origin, { "x-cockpit-mac-key": macKey, "content-type": "application/json" }, "POST", "/api/activity/minutes", { minutes });
         check(`${tag}: Cockpit stores the Mac's minutes`, sent.stored === 40, JSON.stringify(sent));
-        await page.getByRole("button", { name: "Reload" }).first().click();
+        await layer.locator(".center-tools").getByRole("button", { name: "Reload" }).click();
         first = false;
       }
 
-      await openPanel();
       const labels = panel.locator(".mac-labels li");
       await labels.first().waitFor();
       const names = await panel.locator(".mac-labels .time-name").allTextContents();
@@ -144,13 +157,14 @@ async function main() {
       const overflow = await page.evaluate(() => document.documentElement.scrollWidth - innerWidth);
       check(`${tag}: the page has no sideways scroll`, overflow <= 0, `${overflow}px too wide`);
       if (shots) await panel.screenshot({ path: path.join(shots, `panel-${tag}.png`) });
+      if (shots) await page.screenshot({ path: path.join(shots, `center-${tag}.png`) });
 
       if (tag === "1440-light") {
         const figma = panel.locator(".mac-labels li", { hasText: "Figma" }).locator(".mac-category");
         check(`${tag}: a new app starts unsorted`, (await figma.textContent()) === "Unsorted", await figma.textContent());
         await figma.click();
         // The panel redraws once Cockpit has stored the press and answered the day again.
-        await page.waitForFunction(() => [...document.querySelectorAll("#time .mac-labels li")]
+        await page.waitForFunction(() => [...document.querySelectorAll(".center-time .mac-labels li")]
           .some((row) => row.textContent.includes("Figma") && row.querySelector(".mac-category").textContent === "Work"), null, { timeout: 10e3 }).catch(() => {});
         const moved = await panel.locator(".mac-labels li", { hasText: "Figma" }).locator(".mac-category").textContent();
         const stored = (await user("GET", "/api/activity/day")).labels.find((row) => row.label === "Figma");
@@ -162,6 +176,8 @@ async function main() {
         await panel.getByRole("button", { name: "Resume" }).click();
         await panel.getByRole("button", { name: "Pause" }).waitFor();
       }
+      await layer.locator(".center-close").click();
+      await page.locator(".center-layer").waitFor({ state: "hidden" });
 
       await page.locator("#next .step-menu > summary").first().click();
       const note = page.locator("#next .step-menu .activity-note");
@@ -174,30 +190,8 @@ async function main() {
         if (shot === true) break;
         if (tries === 1) throw shot;
       }
+      await page.keyboard.press("Escape");
 
-      // On the page you use, /, "Your time" opens over the card in the center layer: from the step's "Open Your time"
-      // link (#time, as when it is pressed on the page already open) and from the logo menu.
-      await page.goto(`${info.origin}/`, { timeout: 120e3 });
-      await page.locator("#next").waitFor({ state: "visible" });
-      // A step's link chip opens other links in a new tab; this one opens the view on the page already open. The chip
-      // is added and pressed at once, since a live update may redraw the card in between.
-      const pagesBefore = page.context().pages().length;
-      await page.evaluate((origin) => {
-        window.samePage = true;
-        const chip = Object.assign(document.createElement("a"), { href: `${origin}/#time`, target: "_blank", className: "link-chip", textContent: "Open Your time" });
-        document.querySelector("#next .next-card").prepend(chip);
-        chip.click();
-      }, info.origin);
-      const layer = page.locator(".center-layer:not([hidden])");
-      await layer.locator(".center-time .mac-labels li").first().waitFor({ state: "visible" });
-      check(`${tag}: the step's link opens Your time in the center layer, on the same page`, page.url() === `${info.origin}/`
-        && (await layer.locator(".center-title").textContent()) === "Your time"
-        && await page.evaluate(() => window.samePage === true) && page.context().pages().length === pagesBefore, page.url());
-      const layerOverflow = await page.evaluate(() => document.documentElement.scrollWidth - innerWidth);
-      check(`${tag}: the layer has no sideways scroll`, layerOverflow <= 0, `${layerOverflow}px too wide`);
-      if (shots) await page.screenshot({ path: path.join(shots, `center-${tag}.png`) });
-      await layer.locator(".center-close").click();
-      await page.locator(".center-layer").waitFor({ state: "hidden" });
       // On a phone the logo menu sits on the list screen, which the bar's "Your items" opens.
       if (width <= 1000) await page.locator(".phone-back").click();
       await page.locator(".brand-menu > summary").click();

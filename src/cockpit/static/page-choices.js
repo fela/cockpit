@@ -58,25 +58,47 @@
     }
     const waiting = new Map();
     const running = new Set();
+    const delays = new Map();
     // Per page and name, the save that failed last, to try again, and why; a later save that works clears it.
     const failed = new Map();
     return {
       save,
+      flush(pageId, name) {
+        const key = `${pageId} ${name}`;
+        const next = waiting.get(key);
+        if (next) next.typing = false;
+        delays.get(key)?.();
+      },
       async settled(stepId) {
+        for (const next of waiting.values()) if (next) next.typing = false;
+        for (const flush of delays.values()) flush();
         while (running.size) await Promise.all(running);
-        for (const failure of failed.values()) if (failure.body.step_id === stepId) save(failure.pageId, failure.body, failure.done);
+        for (const failure of failed.values()) if (failure.body.step_id === stepId) save(failure.pageId, failure.body, failure.done, false);
         while (running.size) await Promise.all(running);
         const failure = [...failed.values()].find((entry) => entry.body.step_id === stepId);
         if (failure) throw new Error(`A choice on a page was not saved (${failure.error}); choose it again, then send`);
       },
     };
-    function save(pageId, body, done) {
+    function save(pageId, body, done, typing) {
       const key = `${pageId} ${body.name}`;
       const queued = waiting.has(key);
-      waiting.set(key, { body, done });
+      waiting.set(key, { body, done, typing });
+      // A blur or explicit choice flushes the text that was waiting. More typing restarts its quiet interval.
+      if (delays.has(key)) delays.get(key)(typing);
       if (queued) return;
       const work = (async () => {
         while (waiting.get(key)) {
+          if (waiting.get(key).typing) await new Promise((resolve) => {
+            let timer;
+            const finish = () => { clearTimeout(timer); delays.delete(key); resolve(); };
+            const delay = (again) => {
+              clearTimeout(timer);
+              if (again) timer = setTimeout(finish, 500);
+              else finish();
+            };
+            delays.set(key, delay);
+            delay(true);
+          });
           const next = waiting.get(key);
           waiting.set(key, null);
           const error = await saveOne(pageId, next.body, next.done);
@@ -103,7 +125,7 @@
     const text = typeof message.label === "string" ? message.label : "";
     const label = within(text, LABEL_MAX) ? text : [...text].slice(0, LABEL_MAX).join("");
     const body = { name: message.name, chosen: message.chosen, label, step_id: stepOf(frame) };
-    queue.save(pageId, body, saved);
+    queue.save(pageId, body, saved, message.typing === true);
   }
 
   // `done` tells the view the choice came from; that view may be gone by then. Returns why the save failed, or null
@@ -159,6 +181,7 @@
     if (!pageId) return;
     if (message.type === "ready") restore(frame, pageId);
     else if (message.type === "chose") choose(frame, pageId, message);
+    else if (message.type === "flush" && typeof message.name === "string") queue.flush(pageId, message.name);
   });
 
 })();

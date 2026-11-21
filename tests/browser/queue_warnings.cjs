@@ -46,7 +46,7 @@ const WARNINGS = {
   ],
   wrong_models: [{
     session_id: "33333333-3333-4333-8333-333333333333", name: "Reminder fix", model: "claude-sonnet-5-5", intended: "claude-opus-5-5",
-    first: AGO, last: AGO, calls: 10, back: false,
+    claude: true, latest: "claude-sonnet-5-5", first: AGO, last: AGO, calls: 10, back: false,
   }],
   // This fixture leaves blocked calls empty; tests/browser/blocked_warnings.cjs covers those warnings (PERM-25).
   permission_requests: [], settled_requests: [], waiting_sessions: [], codex_requests: [],

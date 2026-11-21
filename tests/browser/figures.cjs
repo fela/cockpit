@@ -103,8 +103,8 @@ async function main() {
         .catch((error) => { if (!/has been closed/.test(error.message)) throw error; }));
       const errors = [];
       page.on("pageerror", (error) => errors.push(error.message));
-      await page.goto(`${info.origin}/classic`);
-      const card = page.locator(`[data-step="${stepId}"]`).first();
+      await page.goto(`${info.origin}/`);
+      const card = page.locator(`#next .next-card[data-step="${stepId}"]`);
       await card.waitFor();
       const frame = card.locator(`iframe.figure-frame[src^="/pages/${chart.id}/figure?"]`);
       await frame.scrollIntoViewIfNeeded();

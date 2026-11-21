@@ -235,6 +235,11 @@ replaces the whole path and query string, and drops the `Referer` header, which 
 the link when a visitor presses Sign in. Caddy already hides the `Cookie` header in
 logs while `log_credentials` stays off, its default.
 
+Every site in front of Cockpit drops `Authorization`, so the agents' local token
+works only from the machine itself. The Mac recorder therefore sends its key in
+`X-Cockpit-Mac-Key`; Cockpit reads the agent token from `Authorization` alone, so
+that header never counts as the token.
+
 ## 3. Data model
 
 ### Conventions

@@ -202,14 +202,14 @@ def test_a_code_works_once_only_while_newest_and_fresh(world: World, anonymous) 
     key = _mac_key(world)
     # A new line leaves the Mac's key working until the Mac uses it.
     older, newer = _mac_code(world), _mac_code(world)
-    assert anonymous.post("/api/activity/minutes", json=body, headers={"authorization": f"Bearer {key}"}).status_code == 200
+    assert anonymous.post("/api/activity/minutes", json=body, headers={"x-cockpit-mac-key": key}).status_code == 200
     assert _claim(world, older).status_code == 401
     claimed = _claim(world, newer)
     assert claimed.status_code == 200
     assert _claim(world, newer).status_code == 401
-    assert anonymous.post("/api/activity/minutes", json=body, headers={"authorization": f"Bearer {key}"}).status_code == 401
+    assert anonymous.post("/api/activity/minutes", json=body, headers={"x-cockpit-mac-key": key}).status_code == 401
     new_key = claimed.json()["key"]
-    assert anonymous.post("/api/activity/minutes", json=body, headers={"authorization": f"Bearer {new_key}"}).status_code == 200
+    assert anonymous.post("/api/activity/minutes", json=body, headers={"x-cockpit-mac-key": new_key}).status_code == 200
     for bad in ({"code": ""}, {"code": "a b"}, {"code": "x" * 65}, {}):
         assert world.client.post("/api/activity/claim", json=bad).status_code in {400, 422}, bad
     conn = db.connect(world.db_path)
@@ -219,8 +219,17 @@ def test_a_code_works_once_only_while_newest_and_fresh(world: World, anonymous) 
         conn.close()
 
 
+def test_the_mac_sends_its_key_in_a_header_the_proxy_keeps(world: World, anonymous) -> None:
+    key = _mac_key(world)
+    # The proxy drops Authorization, so the key there is not the Mac's.
+    assert anonymous.post("/api/activity/minutes", json={"minutes": []}, headers={"authorization": f"Bearer {key}"}).status_code == 401
+    installer = (Path(activity.__file__).parent / "activity_install.sh").read_text()
+    assert "printf 'X-Cockpit-Mac-Key: %s\\n' \"$KEY\"" in installer
+    assert activity.MAC_KEY_HEADER == "x-cockpit-mac-key"
+
+
 def test_an_uninstalled_mac_stops_its_key(world: World, anonymous) -> None:
-    mac = {"authorization": f"Bearer {_mac_key(world)}"}
+    mac = {"x-cockpit-mac-key": _mac_key(world)}
     assert anonymous.post("/api/activity/disconnect").status_code == 401
     assert world.client.post("/api/activity/disconnect", headers=world.user()).status_code == 401
     assert anonymous.post("/api/activity/disconnect", headers=mac).status_code == 200
@@ -244,7 +253,7 @@ def test_the_mac_sends_with_its_own_key_and_no_origin(world: World, anonymous) -
     key = _mac_key(world)
     minute = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M")
     sent = anonymous.post("/api/activity/minutes", json={"minutes": [_minute(minute, "Cursor", "github.com")]},
-                          headers={"authorization": f"Bearer {key}"})
+                          headers={"x-cockpit-mac-key": key})
     assert sent.status_code == 200, sent.text
     assert sent.json() == {"stored": 1, "skipped": 0, "refused": 0, "why": None, "paused": False}
     now = world.client.get("/api/activity/now").json()
@@ -269,12 +278,12 @@ def test_the_minutes_route_takes_no_other_credential(world: World, anonymous) ->
     key = _mac_key(world)
     body = {"minutes": []}
     assert anonymous.post("/api/activity/minutes", json=body).status_code == 401
-    assert anonymous.post("/api/activity/minutes", json=body, headers={"authorization": "Bearer nope"}).status_code == 401
+    assert anonymous.post("/api/activity/minutes", json=body, headers={"x-cockpit-mac-key": "nope"}).status_code == 401
     assert world.client.post("/api/activity/minutes", json=body, headers=world.user()).status_code == 401
     assert world.client.post("/api/activity/minutes", json=body, headers=world.agent()).status_code == 401
     # A new key replaces the old one.
     _mac_key(world)
-    assert anonymous.post("/api/activity/minutes", json=body, headers={"authorization": f"Bearer {key}"}).status_code == 401
+    assert anonymous.post("/api/activity/minutes", json=body, headers={"x-cockpit-mac-key": key}).status_code == 401
     # A sender without the key is nobody: its refusals add no event that would grow with each try.
     conn = db.connect(world.db_path)
     try:
@@ -285,7 +294,7 @@ def test_the_minutes_route_takes_no_other_credential(world: World, anonymous) ->
 
 def test_the_mac_learns_it_is_paused_and_bad_minutes_are_refused(world: World, anonymous) -> None:
     key = _mac_key(world)
-    mac = {"authorization": f"Bearer {key}"}
+    mac = {"x-cockpit-mac-key": key}
     # The pause below covers the minute it happens in, so the good minute is the one before it.
     good = _minute((datetime.now(UTC) - timedelta(minutes=1)).strftime("%Y-%m-%dT%H:%M"))
     assert world.client.post("/api/activity/pause", json={"paused": True}, headers=world.user()).json()["paused"] is True
@@ -348,4 +357,8 @@ def test_the_installer_is_public_and_names_this_cockpit(anonymous) -> None:
     assert found.text.startswith("#!/bin/bash")
     assert "__ORIGIN__" not in found.text
     assert f'ORIGIN="{ORIGIN}"' in found.text
+    # The recorder runs as its own app, so macOS names it and gives the browser permission to it, not to bash.
+    assert 'APP="$DIR/Cockpit Recorder.app"' in found.text
+    assert "Cockpit Recorder.app/Contents/MacOS/applet</string>" in found.text
+    assert "<string>/bin/bash</string>" not in found.text
     assert anonymous.get("/api/activity/now").status_code == 401

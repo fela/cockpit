@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import json
 import logging
+import shlex
 import sqlite3
 import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -16,7 +18,6 @@ from cockpit import commands, db, delivery, permissions, store, sweeper
 from tests.conftest import SESSION_A, SESSION_B, World
 from tests.test_api import agent_client, put_card, put_item, put_step
 from tests.test_permission_answers import events
-
 
 # A press on a step with a session names no new one; a press on a step without one says where to start it.
 NO_START = {"new_cwd": None, "provider": None, "model": None, "effort": None, "account": None, "speed": None}
@@ -287,6 +288,39 @@ def insert_run(world: World, tmp_path: Path, command: str) -> int:
         ).lastrowid
     finally:
         conn.close()
+
+
+def test_a_run_drains_its_output_while_the_start_message_is_being_delivered(
+    world: World, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    script = 'import sys; sys.stdout.write("x" * (2 * 1024 * 1024))'
+    run_id = insert_run(world, tmp_path, f"{shlex.quote(sys.executable)} -c {shlex.quote(script)}")
+    spawned: list[subprocess.Popen[bytes]] = []
+    popen = subprocess.Popen
+
+    def start(*args, **kwargs):
+        process = popen(*args, **kwargs)
+        spawned.append(process)
+        return process
+
+    monkeypatch.setattr(commands.subprocess, "Popen", start)
+    delivered: list[int] = []
+    completed_during_delivery: list[bool] = []
+
+    def deliver(message_id: int) -> None:
+        delivered.append(message_id)
+        if len(delivered) == 1:
+            try:
+                completed_during_delivery.append(spawned[0].wait(timeout=5) == 0)
+            except subprocess.TimeoutExpired:
+                completed_during_delivery.append(False)
+
+    commands.execute(world.db_path, world.checkout.parent, run_id, 12345, deliver)
+    run = wait_for_run(world, run_id)
+    assert completed_during_delivery == [True]
+    assert run["exit_code"] == 0
+    assert delivered == [12345, run["result_message_id"]]
+    assert run["output"].endswith("x" * commands.OUTPUT_CHARS)
 
 
 def test_a_run_whose_output_cannot_be_read_still_ends_and_reports(

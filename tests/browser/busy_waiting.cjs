@@ -1,4 +1,5 @@
-// Busy and Waiting below the queue on a synthetic board (SPEC VIEW-27).
+// Busy and Waiting below the queue in the list on the left, on a synthetic board (SPEC VIEW-27): both start folded,
+// no group goes by who holds the ball, and a row's hover shows its tip in a dark tooltip.
 
 "use strict";
 
@@ -52,10 +53,8 @@ async function main() {
     const items = new Map(state.items.map((item) => [String(item.id), item]));
 
     browser = await chromium.launch({ executablePath: CHROMIUM });
-    for (const [page_path, groupSel, rowSel, hoverSel] of [
-      ["/", (group) => `#sidebar details.sidebar-group.${group}`, "li[data-item]", ".side-row"],
-      ["/classic", (group) => `#work details.group.${group}`, ".row[data-item]", ".row-title"],
-    ]) {
+    const groupSel = (group) => `#sidebar details.sidebar-group.${group}`;
+    {
       const context = await browser.newContext({ viewport: { width: 1280, height: 900 }, colorScheme: "light" });
       await context.setExtraHTTPHeaders({ cookie });
       const page = await context.newPage();
@@ -68,36 +67,34 @@ async function main() {
       page.setDefaultNavigationTimeout(60000);
       const errors = [];
       page.on("pageerror", (error) => { errors.push(error.message); console.error(`page error: ${error.message}`); });
-      await page.goto(`${info.origin}${page_path}`);
+      await page.goto(`${info.origin}/`);
       await page.locator(groupSel("waiting")).waitFor({ state: "attached" });
       for (const group of ["busy", "waiting"]) {
         const open = await page.locator(groupSel(group)).evaluate((el) => el.open);
-        check(`${page_path}: ${group} starts folded`, !open, "open");
+        check(`${group} starts folded`, !open, "open");
       }
       const old = await page.evaluate((names) => names.filter((name) => document.querySelector(`details.${name}`)), OLD_GROUPS);
-      check(`${page_path}: no group by who holds the ball`, old.length === 0, old.join(", "));
+      check(`no group by who holds the ball`, old.length === 0, old.join(", "));
       for (const group of ["waiting", "busy"]) {
         await page.locator(`${groupSel(group)} > summary`).click();
         // A snoozed step's row in Waiting says when it wakes instead (snoozed_waiting.cjs).
-        const row = page.locator(`${groupSel(group)} ${rowSel}:not(.snoozed)`).first();
+        const row = page.locator(`${groupSel(group)} li[data-item]:not(.snoozed)`).first();
         const item = items.get(await row.getAttribute("data-item"));
         // The page adds the time in the user's zone to a line with tip_at; the check reads the line's start.
         const expected = (one) => one.tip;
-        await row.locator(hoverSel).first().hover();
+        await row.locator(".side-row").first().hover();
         const tip = page.locator(".tip");
         await waitFor(() => tip.evaluate((el) => !el.hidden), (shown) => shown);
         const seen = await tip.evaluate((el) => ({ text: el.textContent, hidden: el.hidden, bg: getComputedStyle(el).backgroundColor }));
-        check(`${page_path}: a ${group} row's hover shows "${expected(item)}"`, !seen.hidden && seen.text.includes(expected(item)), JSON.stringify(seen));
+        check(`a ${group} row's hover shows "${expected(item)}"`, !seen.hidden && seen.text.includes(expected(item)), JSON.stringify(seen));
         const [r, g, b] = seen.bg.match(/[\d.]+/g).map(Number);
-        check(`${page_path}: the ${group} tooltip is dark`, r + g + b < 200, seen.bg);
-        // Both groups are open by this point; one image per layout records them together.
-        if (group === "busy") await page.screenshot({
-          path: path.join(work, `${page_path === "/" ? "sidebar" : "classic"}-groups.png`), animations: "disabled",
-        });
+        check(`the ${group} tooltip is dark`, r + g + b < 200, seen.bg);
+        // Both groups are open by this point; one image records them together.
+        if (group === "busy") await page.screenshot({ path: path.join(work, "sidebar-groups.png"), animations: "disabled" });
         await page.mouse.move(0, 0);
         await sleep(300);
       }
-      check(`${page_path}: no page errors`, errors.length === 0, errors.join(" | "));
+      check(`no page errors`, errors.length === 0, errors.join(" | "));
       await context.close();
     }
     console.error(`  screenshots in ${work}`);

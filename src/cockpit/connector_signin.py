@@ -356,7 +356,9 @@ def _rpc(url: str, token: str, session: str | None, message: dict[str, Any]) -> 
     text = body.decode()
     kind = next((value for name, value in answer_headers.items() if name.lower() == "content-type"), "")
     if "text/event-stream" in kind:
-        datas = [line[5:].strip() for line in text.splitlines() if line.startswith("data:")]
+        # SSE lines end at CR or LF; Unicode separators can occur in the JSON data.
+        lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+        datas = [line[5:].strip() for line in lines if line.startswith("data:")]
         answers = [json.loads(data) for data in datas if data]
         answer = next((each for each in answers if each.get("id") == message["id"]), None)
     else:
@@ -390,6 +392,22 @@ def state_of(entry: dict[str, Any], tools: int) -> dict[str, Any]:
 def check(account: Account, name: str) -> dict[str, Any] | None:
     """The working sign-in the account has for the connector (`state_of`), renewing an ended token first; None
     when the user has to sign in."""
+    from cockpit import gateway_claude
+    from cockpit.gateway_store import GatewayError
+
+    try:
+        bound = gateway_claude.bound_store(account, name)
+        if bound is not None:
+            gateway, provider = bound
+            token, _ = gateway_claude.legacy_access_token(gateway, provider)
+            row = gateway.provider(provider)
+            _, entry, _ = gateway_claude.source(provider, row["config"]["source"])
+            server = server_config(account, name)
+            tools = tool_count(server["url"], token)
+            clear_needs_auth(account, name)
+            return state_of(entry, tools) | {"renewal_owner": "claude"}
+    except (GatewayError, SigninError):
+        return None
     server = server_config(account, name)
     key = credential_key(name, server)
     entry = read_entry(account, key)
@@ -417,7 +435,7 @@ def check(account: Account, name: str) -> dict[str, Any] | None:
 
 
 def finish(account: Account, pending: dict[str, Any], address: str) -> dict[str, Any]:
-    """Trade the pasted address's code for tokens, store them, renew them once and confirm the connector lists its
+    """Trade the pasted address's code for tokens, store them and confirm the connector lists its
     tools; returns `state_of`. A SigninError says what went wrong; `stale` on it means the address is from an
     older link, and the pending sign-in stays."""
     query = callback_query(address)
@@ -436,6 +454,21 @@ def finish(account: Account, pending: dict[str, Any], address: str) -> dict[str,
     })
     entry = _entry(pending, tokens)
     write_entry(account, pending["key"], entry)
+    from cockpit import gateway_claude
+    from cockpit.gateway_store import GatewayError
+
+    try:
+        bound = gateway_claude.bound_store(account, pending["server"])
+        if bound is not None:
+            gateway, provider = bound
+            token, _ = gateway_claude.legacy_access_token(gateway, provider)
+            row = gateway.provider(provider)
+            _, entry, _ = gateway_claude.source(provider, row["config"]["source"])
+            tools = tool_count(pending["server_url"], token)
+            clear_needs_auth(account, pending["server"])
+            return state_of(entry, tools) | {"renewal_owner": "claude"}
+    except GatewayError as exc:
+        raise SigninError(str(exc)) from None
     # One renewal now shows whether the sign-in lasts past its first token; a refusal leaves that token working.
     renews = False
     if entry.get("refreshToken"):
@@ -561,6 +594,8 @@ def _finished_text(step: dict[str, Any], account: Account, state: dict[str, Any]
     until = time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(expires / 1000)) if expires else None
     if until is None:
         lasting = "Its token has no end time."
+    elif state.get("renewal_owner") == "claude":
+        lasting = f"Its token works until {until}. Claude Code owns renewal for this shared sign-in."
     elif state["renews"]:
         lasting = f"Its token works until {until}; Cockpit renewed it once, so Claude Code renews it from there."
     else:

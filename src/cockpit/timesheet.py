@@ -261,24 +261,37 @@ def progress_check(conn: sqlite3.Connection, of_user_time: bool) -> dict[str, An
         " AND EXISTS (SELECT 1 FROM progress_marks WHERE item_id = i.id AND of_user_time = ?)",
         (int(of_user_time),),
     ).fetchall()
+    if not finished:
+        return None
+    ids = [item["id"] for item in finished]
+    finish_times = {item["id"]: item["finished_at"] for item in finished}
+    placeholders = ",".join("?" for _ in ids)
+    spans_by_item: dict[int, list[sqlite3.Row]] = defaultdict(list)
+    for span in conn.execute(
+        "SELECT s.item_id, t.started_at, t.ended_at FROM time_spans t JOIN steps s ON s.id = t.step_id"
+        f" WHERE s.item_id IN ({placeholders})", ids,
+    ):
+        spans_by_item[span["item_id"]].append(span)
+    marks_by_item: dict[int, list[sqlite3.Row]] = defaultdict(list)
+    for mark in conn.execute(
+        "SELECT item_id, at, progress FROM progress_marks"
+        f" WHERE item_id IN ({placeholders}) AND of_user_time = ?",
+        (*ids, int(of_user_time)),
+    ):
+        if mark["at"] <= finish_times[mark["item_id"]]:
+            marks_by_item[mark["item_id"]].append(mark)
     gaps = []
     items = 0
     for item in finished:
         end = _time(item["finished_at"])
         timed = _merged(_clipped([
             (_time(row["started_at"]), _time(row["ended_at"]) if row["ended_at"] else end)
-            for row in conn.execute(
-                "SELECT t.started_at, t.ended_at FROM time_spans t JOIN steps s ON s.id = t.step_id WHERE s.item_id = ?",
-                (item["id"],),
-            )
+            for row in spans_by_item[item["id"]]
         ], datetime.min.replace(tzinfo=UTC), end))
         total = _seconds(timed)
         if not total:
             continue
-        marks = conn.execute(
-            "SELECT at, progress FROM progress_marks WHERE item_id = ? AND of_user_time = ? AND at <= ?",
-            (item["id"], int(of_user_time), item["finished_at"]),
-        ).fetchall()
+        marks = marks_by_item[item["id"]]
         if marks:
             items += 1
         for mark in marks:

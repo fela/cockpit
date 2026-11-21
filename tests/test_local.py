@@ -15,6 +15,7 @@ from fastapi.testclient import TestClient
 
 from cockpit import app, cli, config, local, parts
 from cockpit.app import create_app
+from cockpit.views import read as read_view
 from tests.test_setup import write_setup
 
 ORIGIN = "http://127.0.0.1:8790"
@@ -35,7 +36,7 @@ def sign_in(browser, origin):
 def client(world, peer="127.0.0.1", **changes):
     settings = dataclasses.replace(world.settings, **({"auth_mode": "local", "origin": ORIGIN, "google": None,
                                                       "local_login_token": LOGIN_TOKEN} | changes))
-    app = create_app(settings, world.deliverer, world.cache, world.spend_index, world.codex_index, [])
+    app = create_app(settings, world.deliverer, world.cache, world.spend_index, world.codex_index, [], read_view)
     return TestClient(app, base_url=settings.origin, client=(peer, 15432), follow_redirects=False)
 
 
@@ -595,7 +596,7 @@ def test_local_subresources_work_with_only_a_cookie_and_api_aliases_require_secr
                         headers=headers).json()
     assert browser.get(f"/pages/{page['id']}").status_code == 200
     assert browser.get(f"/pages/{page['id']}/figure").status_code == 200
-    for path in ("/", "/classic", "/spec", "/skills", "/writing", "/usage", "/server", "/briefing", "/pages", "/emergency"):
+    for path in ("/", "/spec", "/skills", "/writing", "/usage", "/server", "/briefing", "/pages", "/emergency"):
         response = browser.get(path)
         assert response.status_code == 200
         assert "local-auth.js" in response.text.split("<script", 1)[1].split("</script>", 1)[0]

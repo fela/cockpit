@@ -1,7 +1,7 @@
-// Hover texts stay short (SPEC UI-46, UI-27): on a synthetic database, every hover text the main page and the
-// classic page give, with their folded parts open and the first items' cards shown, is a name or a short result of at
-// most two lines of 80 characters (a name and one detail, UI-27). Values (an item's or step's own words, a rule) may
-// run longer; the tooltip shows at most six lines of 120 characters of them.
+// Hover texts stay short (SPEC UI-46, UI-27): on a synthetic database, every hover text the main page gives, with its
+// folded parts open and the first items' cards shown, is a name or a short result of at most two lines of 80
+// characters (a name and one detail, UI-27). Values (an item's or step's own words) may run longer; the tooltip shows
+// at most six lines of 120 characters of them.
 
 "use strict";
 
@@ -22,8 +22,7 @@ const LINES = 2;
 const LINE = 80;
 // Elements whose hover text is a value written by an agent or by the user, or a session's own name and folder, shown
 // in full up to the tooltip's own limit.
-const VALUES = [".side-row", ".row-title", ".row-sub", ".hist-tag", ".rule-sentence", ".time-part", ".checked",
-  ".chip.blocks", ".closed-by", ".composer-target select"];
+const VALUES = [".side-row", ".row-title", ".row-sub", ".hist-tag", ".time-part", ".chip.blocks", ".composer-target select"];
 
 // Every element's hover text: its title, or the data-tip the page moved it to.
 const harvest = (values) => [...document.querySelectorAll("[title], [data-tip]")].map((el) => ({
@@ -57,12 +56,10 @@ async function main() {
       await sleep(300);
       for (const text of await page.evaluate(harvest, VALUES)) found.set(`${text.what}\u0000${text.text}`, text);
     };
-    for (const where of ["/classic", "/"]) {
-      await page.goto(`${info.origin}${where}`);
-      await page.locator(".side-row, .row").first().waitFor();
-      await sleep(1500);
-      await collect();
-    }
+    await page.goto(`${info.origin}/`);
+    await page.locator(".side-row").first().waitFor();
+    await sleep(1500);
+    await collect();
     // The first items' cards, as a press on their rows shows them.
     const rows = await page.locator("li.side-item[data-item] > button.side-row").count();
     for (let row = 0; row < Math.min(rows, 15); row += 1) {

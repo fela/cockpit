@@ -129,7 +129,7 @@ function renderMachine(data) {
         "The share of time at least one program stalled while the kernel freed memory for it.")),
     h("p", { class: "spend-note" }, m.sampled_hours
       ? `Measured for ${figure(m.sampled_hours)} hours of ${RANGE_WORDS[data.range]}.${data.now ? ` Last written at ${clock(new Date(data.now.at))}.` : ""}`
-      : "Nothing measured in this range yet. Cockpit writes its first figures a minute after it starts."),
+      : "Nothing measured in this range yet. Resource recording runs on Linux only; there, first figures appear a minute after Cockpit starts."),
   ]);
 }
 

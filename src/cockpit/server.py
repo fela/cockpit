@@ -21,6 +21,7 @@ from cockpit import (
     activity,
     auth,
     briefing,
+    checker,
     codex,
     codex_agent,
     codex_login,
@@ -50,10 +51,12 @@ from cockpit import (
     sessions,
     sidechat,
     spend,
+    spend_worker,
     stages,
     store,
     sweeper,
     updates,
+    views,
     wakes,
 )
 from cockpit.app import HidePublicLinks, Settings, create_app
@@ -274,6 +277,11 @@ def wake_sweeper_forever(
                 except Exception as exc:
                     if not cut_short("resending to sessions stopped on an API error", exc):
                         log.exception("resending to sessions stopped on an API error failed")
+                try:
+                    to_send += checker.sync(conn, datetime.now(UTC), config.setup().checkouts)
+                except Exception as exc:
+                    if not cut_short("asking sessions to try calls again that auto mode's checker gave no verdict on", exc):
+                        log.exception("asking sessions to try calls again that auto mode's checker gave no verdict on failed")
                 sidechat.expire(conn, datetime.now(UTC))
                 if not failed:
                     to_send += delivery.waiting_due(conn, listed, datetime.now(UTC))
@@ -310,6 +318,8 @@ def wake_sweeper_forever(
 
                 # On its own: a failed lookup here must not keep the messages queued above from going out.
                 try:
+                    # Keep the install's background availability read fresh between launches, also with no page open.
+                    sweeper.provider(conn, datetime.now(UTC))
                     message_id = sweeper.pause_once(conn, config.setup().checkouts, exists)
                     purpose = f"a last check before sweeps stop while {user_name()} is away"
                     if message_id is None and swept is not None and sweeper.paused(conn) is None:
@@ -355,7 +365,8 @@ def wake_sweeper_forever(
                     ).start()
             if message_id is not None:
                 log.info("%s with message %s", purpose, message_id)
-                deliverer.send(message_id)
+                # On a thread like the sends above: a resume holds its send until the prompt is in the transcript.
+                deliverer.start(f"send-{message_id}", deliverer.send, message_id)
         except Exception as exc:
             if not cut_short("waking the sweeper", exc):
                 log.exception("waking the sweeper failed")
@@ -749,7 +760,9 @@ def main() -> None:
     codex_index = codex.CodexIndex(config.CODEX_HOMES)
     # Before the app, whose start logs the deliveries and turns a restart cut off (SPEC TRACK-12).
     capture, capture_writer, capture_db = server_logs.install(config.DB_PATH, started_at)
-    app = create_app(settings, deliverer, session_cache, spend_index, codex_index, parts.installed())
+    view_pool = views.Pool(config.SETUP_PATH, parts.PACKAGE, sessions.PROJECTS_DIR)
+    app = create_app(settings, deliverer, session_cache, spend_index, codex_index, parts.installed(), view_pool.read)
+    usage_worker = spend_worker.start(spend_index)
     end_interrupted_runs(deliverer)
     threading.Thread(target=backup_forever, name="backup", daemon=True).start()
     threading.Thread(target=fold_activity_forever, name="activity-fold", daemon=True).start()
@@ -764,7 +777,7 @@ def main() -> None:
         threading.Thread(target=read_turns_forever, name="item-turns", daemon=True).start()
         threading.Thread(target=history_forever, args=(session_cache,), name="item-history", daemon=True).start()
         threading.Thread(target=resets.refresh_forever, args=(signed_in,), name="banked-resets", daemon=True).start()
-    threading.Thread(target=spend.refresh_forever, args=(spend_index, codex_index), name="claude-spend", daemon=True).start()
+    threading.Thread(target=spend.refresh_codex_forever, args=(codex_index,), name="codex-spend", daemon=True).start()
     threading.Thread(target=check_codex_forever, args=(codex_index, setup.codex_command), name="codex-accounts", daemon=True).start()
     threading.Thread(target=check_tools_forever, name="tool-versions", daemon=True).start()
     threading.Thread(
@@ -788,6 +801,8 @@ def main() -> None:
 
     def finish() -> None:
         """Writes the last minute's request counts and the log lines still queued."""
+        usage_worker.stop()
+        view_pool.stop()
         flush_requests(app.state.requests)
         capture_writer.stop()
 

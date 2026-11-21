@@ -1,6 +1,6 @@
 """Ask (SPEC MSG-11): a quick answer about an item's work while the user goes on writing, and its session works on.
 
-A message to a busy session waits for its turn to end, or cuts the turn with Send now; a message over the socket
+A message to a busy session waits for its turn to end, or cuts the turn once it waited too long; a message over the socket
 reaches it between tool calls but counts as another agent's words. Ask does neither. Each question goes to a fresh
 copy of the session as it stands then: `claude -p --resume --fork-session` on the session's own account and model, so
 the copy reads the session's prompt cache and costs about one more turn. The copy gets the earlier questions and

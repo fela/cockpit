@@ -1,7 +1,7 @@
 // A step card's images (SPEC NEXT-17, NEXT-64): the card shows the images its text places, where the text places
 // them; the user's own images and the agents' images from this step's round stay in the strip under the body; the
-// agents' images from earlier rounds (before the item's previous step was put) wait under a closed "Other images on
-// this task". Pressing an image opens it full size, with next and previous through every image on the card.
+// agents' images from earlier rounds wait under a closed "Earlier images". A round can start on a new step or on
+// a rewritten reply to the same step. Pressing an image opens it full size, with next and previous through every image.
 // Checks, on the main page at phone and desktop width, for the step in Next up:
 // - the image the body places shows in the body and not in the strip;
 // - the user's image and the agents' unplaced image from this round show in the strip;
@@ -16,13 +16,14 @@
 // A run takes about half a minute.
 //
 // Usage, from the checkout: node tests/browser/step_images.cjs
+// For a conversation that keeps rewriting its first step: node tests/browser/step_images.cjs --same-step
 
 "use strict";
 
 const { spawn } = require("node:child_process");
 const fs = require("node:fs");
 const path = require("node:path");
-const { workFolder } = require("./work.cjs");
+const { workFolder, screenshotRedrawn } = require("./work.cjs");
 const zlib = require("node:zlib");
 
 // Browser dependencies can be selected through the environment (README.md).
@@ -40,7 +41,8 @@ const { chromium } = require(PLAYWRIGHT);
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 async function main() {
-  const work = workFolder("cockpit-step-images-");
+  const sameStep = process.argv.includes("--same-step");
+  const work = workFolder(sameStep ? "cockpit-same-step-images-" : "cockpit-step-images-");
   const server = spawn(PYTHON, [path.join(__dirname, "serve_preview.py"), work], { stdio: ["ignore", "inherit", "inherit"] });
   let browser = null;
   const results = [];
@@ -68,16 +70,25 @@ async function main() {
     const older = [await addImage(TOKEN, 200), await addImage(TOKEN, 210)];
     await sleep(1100);
     const earlier = await agent("POST", "/api/steps", { item_key: key, need: `earlier-${run}`, ask: "Which form layout?", session_id: SESSION_B });
-    await agent("POST", `/api/steps/${earlier.step.id}/done`, { note: "the layout was chosen" });
+    if (sameStep) await user("POST", "/api/messages", {
+      text: "Use the original layout", target: { step_id: earlier.step.id, session_id: SESSION_B },
+    });
+    else await agent("POST", `/api/steps/${earlier.step.id}/done`, { note: "the layout was chosen" });
     const placed = await addImage(TOKEN, 240);
     const unplaced = await addImage(TOKEN, 250);
     const pasted = await addImage(cookie, 160);
     const answer = await agent("POST", "/api/steps", {
-      item_key: key, need: `images-${run}`, ask: "Ship the new form?", score: 100, session_id: SESSION_B,
+      item_key: key, need: sameStep ? `earlier-${run}` : `images-${run}`, ask: "Ship the new form?", score: 100, session_id: SESSION_B,
       body: `The export form now asks which lists to include.\n\n![The new form](image:${placed.id})\n\nSay yes and I merge it.`,
       details: [{ title: "The situation from scratch", body: "The form chooses which Tasks lists to export." }],
     });
     const stepId = answer.step.id;
+    if (sameStep) {
+      await sleep(1100);
+      await agent("POST", "/api/steps", {
+        item_key: key, need: `earlier-${run}`, why: "The original layout and export are checked.",
+      });
+    }
 
     browser = await chromium.launch({ executablePath: CHROMIUM });
     for (const [width, height] of [[390, 844], [1280, 900]]) {
@@ -87,8 +98,8 @@ async function main() {
       page.setDefaultTimeout(5000);
       const errors = [];
       page.on("pageerror", (error) => errors.push(error.message));
-      await page.goto(`${info.origin}/classic`, { timeout: 60e3 });
-      const card = page.locator(`[data-step="${stepId}"]`).first();
+      await page.goto(`${info.origin}/`, { timeout: 60e3 });
+      const card = page.locator(`#next [data-step="${stepId}"]`).first();
       // The first drawing can take a while on a busy host.
       await card.waitFor({ timeout: 30e3 });
       const src = (image) => `/item-images/${image.id}`;
@@ -102,7 +113,7 @@ async function main() {
         await strip.locator(`img[src="${src(pasted)}"]`).isVisible(), "not in the strip");
       check(`${width} px: this round's unplaced agent image shows in the strip`,
         await strip.locator(`img[src="${src(unplaced)}"]`).isVisible(), "not in the strip");
-      const section = card.locator("details.detail", { hasText: "Other images on this task" });
+      const section = card.locator("details.detail", { hasText: "Earlier images" });
       check(`${width} px: the older images wait under a closed section that counts them`,
         (await section.count()) === 1 && !(await section.evaluate((el) => el.open))
           && (await section.locator("summary").textContent()).includes("(2)")
@@ -111,8 +122,12 @@ async function main() {
       check(`${width} px: the section follows the step's details`,
         await card.evaluate((el) => {
           const folds = [...el.querySelectorAll("details.detail")].map((fold) => fold.querySelector("summary").textContent);
-          return folds.indexOf("The situation from scratch") === folds.findIndex((words) => words.startsWith("Other images")) - 1;
+          return folds.indexOf("The situation from scratch") === folds.findIndex((words) => words.startsWith("Earlier images")) - 1;
         }), "out of order");
+
+      const closedShot = path.join(work, `step-images-closed-${width}.png`);
+      await screenshotRedrawn(card, { path: closedShot, timeout: 30e3 });
+      console.error(`  screenshot: ${closedShot}`);
 
       await section.locator("summary").click();
       check(`${width} px: opened, it shows both older images`,
@@ -121,11 +136,11 @@ async function main() {
       await page.evaluate(() => { ui.pendingRender = true; return refresh(); });
       await waitFor(() => card.locator(".prose.body").first().getAttribute("data-old"), (value) => value === null);
       check(`${width} px: it stays open through a redraw`,
-        await card.locator("details.detail", { hasText: "Other images on this task" }).evaluate((el) => el.open), "closed");
+        await card.locator("details.detail", { hasText: "Earlier images" }).evaluate((el) => el.open), "closed");
 
       await sleep(300);
       const shot = path.join(work, `step-images-${width}.png`);
-      await card.screenshot({ path: shot, timeout: 30e3 });
+      await screenshotRedrawn(card, { path: shot, timeout: 30e3 });
       console.error(`  screenshot: ${shot}`);
 
       // The card's images in its order: the body's figure, the strip, then the opened earlier-round section.

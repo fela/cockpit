@@ -475,7 +475,7 @@
     }, (error) => console.warn(`demo: the ${view} view did not arrive`, error));
   }
   // The main page opens shared pages and briefings in a layer; their views come ahead, so the layer opens at once.
-  if (boot.depth === 1 && (here.pathname === "/" || here.pathname === "/classic")) {
+  if (boot.depth === 1 && here.pathname === "/") {
     for (const view of VIEWS) wantTemplate(view);
   }
 

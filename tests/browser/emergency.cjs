@@ -198,7 +198,7 @@ async function main() {
     check("no sideways scroll at 390 px",
       await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), "it scrolls sideways");
     const ground = await page.evaluate(() => getComputedStyle(document.body).backgroundColor);
-    check("the dark look has a dark ground", ground === "rgb(20, 18, 16)", ground);
+    check("the dark look has a dark ground", ground === "rgb(9, 38, 46)", ground);
     if (shots) await page.screenshot({ path: path.join(shots, "emergency-390-dark.png"), fullPage: true });
     await context.close();
 

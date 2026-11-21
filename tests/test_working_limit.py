@@ -302,23 +302,6 @@ def test_a_message_that_waits_for_a_place_can_be_set_aside(world: World, tmp_pat
     assert places_due(world) == []
 
 
-def test_send_now_sends_a_message_that_waits_for_a_place_and_stops_no_session(
-    world: World, tmp_path: Path, monkeypatch
-) -> None:
-    resumes(world, monkeypatch)
-    world.cache.sessions = [stopped(SESSION_A, tmp_path), *at_work(store.WORKING_LIMIT)]
-    waiting = send_as_agent(world, {"session_id": SESSION_A})
-    assert held(waiting), waiting
-    agent = TestClient(world.client.app, base_url=ORIGIN)
-    assert agent.post(f"/api/messages/{waiting['id']}/send-now", headers=world.agent()).status_code == 403
-    response = world.client.post(f"/api/messages/{waiting['id']}/send-now", headers=world.user())
-    assert response.status_code == 200, response.text
-    sent = message(world, waiting["id"])
-    assert sent["state"] == "sent" and sent["via"] == "resume", sent
-    assert [args[1] for args, _ in world.runner.calls] == ["--bg"]
-    assert world.client.post(f"/api/messages/{waiting['id']}/send-now", headers=world.user()).status_code == 409
-
-
 def test_the_page_counts_the_limit_and_the_messages_that_wait(world: World, tmp_path: Path) -> None:
     world.cache.sessions = [stopped(SESSION_A, tmp_path), *at_work(store.WORKING_LIMIT)]
     waiting = send_as_agent(world, {"session_id": SESSION_A})

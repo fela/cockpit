@@ -28,6 +28,16 @@ ISSUER = "https://auth.example.test"
 ITEM_KEY = "gh:example-org/app#10"
 
 
+@pytest.mark.parametrize("ending", ["\n", "\r\n", "\r"])
+def test_streamed_json_preserves_unicode_separators(monkeypatch, ending) -> None:
+    result = {"tools": [{"name": "example", "description": "One\u2028two\u2029three\u0085four"}]}
+    event = json.dumps({"jsonrpc": "2.0", "id": 1, "result": result}, ensure_ascii=False)
+    body = ending.join(["event: message", f"data: {event}", "", ""]).encode()
+    monkeypatch.setattr(connector_signin, "_request", lambda *args: (200, {"Content-Type": "text/event-stream"}, body))
+    answer, session = connector_signin._rpc(MCP_URL, "test-token", None, {"id": 1, "method": "tools/list"})
+    assert answer == result and session is None
+
+
 class FakeConnector:
     """An MCP connector with an OAuth server of its own, as Linear's is."""
 

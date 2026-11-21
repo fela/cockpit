@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from cockpit import db, store
+from cockpit import db, patterns, store
 
 GUIDANCE = "my priority is finishing list sharing and writing the reminder guide"
 
@@ -1140,3 +1140,177 @@ def test_migration_97_names_opus_5_5_for_claude_sessions_started_on_the_default(
         4: None,
         5: None,
     }
+
+
+def test_pending_quota_recovery_is_tagged_without_changing_explicit_requests(tmp_path):
+    path = tmp_path / "old.db"
+    old = database_at(path, 120)
+    cases = [
+        ("cockpit", "Claude's model cooldown retry: 80 minutes have passed", "queued", 1),
+        ("cockpit", "Claude's usage works again: the limit has reset.", "queued", 1),
+        ("cockpit", "Claude's usage works again: Sam moved you to the work account.", "queued", 0),
+        ("user", "Claude's model cooldown retry: do this", "queued", 0),
+        ("cockpit", "Claude's model cooldown retry: historical message", "sent", 0),
+    ]
+    for author, text, state, _ in cases:
+        old.execute("INSERT INTO messages (author, text, state, created_at) VALUES (?, ?, ?, '2026-11-15T00:00:00Z')",
+                    (author, text, state))
+    old.close()
+    conn = db.connect(path)
+    db.migrate(conn)
+    assert [r[0] for r in conn.execute("SELECT quota_recovery_stop IS NOT NULL FROM messages ORDER BY id")] == [r[3] for r in cases]
+    assert [r[0] for r in conn.execute("SELECT text FROM messages ORDER BY id")] == [r[1] for r in cases]
+    conn.close()
+
+
+def test_status_metadata_reads_stay_on_small_indexes_after_upgrade(tmp_path):
+    path = tmp_path / "old.db"
+    conn = database_at(path, 121)
+    conn.row_factory = sqlite3.Row
+    try:
+        items = [store.upsert_item(conn, {"key": f"note:metadata-{n}", "title": f"Item {n}"}, "user") for n in range(2)]
+        for item in items:
+            conn.execute(
+                "INSERT INTO item_images (item_id, content_type, size, content, created_at, added_by)"
+                " VALUES (?, 'image/png', ?, ?, '2026-11-16T00:00:00Z', 'user')",
+                (item["id"], 1000000, b"x" * 1000000),
+            )
+            conn.execute(
+                "INSERT INTO item_pages (item_id, title, html, size, created_at, updated_at, added_by)"
+                " VALUES (?, 'Report', ?, ?, '2026-11-16T00:00:00Z', '2026-11-16T00:00:00Z', 'user')",
+                (item["id"], "x" * 1000000, 1000000),
+            )
+        before = store._with_attachments(conn, items)
+        db.migrate(conn)
+        assert store._with_attachments(conn, items) == before
+        ids = [item["id"] for item in items]
+        for table, columns in (("item_pages", store.PAGE_FIELDS), ("item_images", store.IMAGE_FIELDS)):
+            query = f"SELECT {columns} FROM {table} WHERE item_id IN (?, ?) ORDER BY id"
+            plan = [row[3] for row in conn.execute("EXPLAIN QUERY PLAN " + query, ids)]
+            assert any(f"USING COVERING INDEX {table}_metadata" in line for line in plan), plan
+    finally:
+        conn.close()
+
+
+def test_session_launch_lookup_skips_resumes_after_upgrade(tmp_path):
+    conn = database_at(tmp_path / "old.db", 122)
+    conn.row_factory = sqlite3.Row
+    try:
+        conn.executemany(
+            "INSERT INTO messages (author, text, state, created_at, session_id, new_cwd, new_name)"
+            " VALUES ('user', 'Start', 'sent', '2026-11-16T00:00:00Z', ?, ?, ?)",
+            [("first", None, None), ("first", "/task", "Original name"), ("second", "/other", "Other name"),
+             *(('first', None, None) for _ in range(100)), ("first", "/task", "Later launch")],
+        )
+        before = store.session_starts(conn, {"first", "second", "unknown"})
+        assert before["first"]["new_name"] == "Original name"
+        db.migrate(conn)
+        queries = []
+        conn.set_trace_callback(queries.append)
+        try:
+            assert store.session_starts(conn, {"first", "second", "unknown"}) == before
+        finally:
+            conn.set_trace_callback(None)
+        plan = [row[3] for row in conn.execute("EXPLAIN QUERY PLAN " + queries[0])]
+        assert any("messages_session_start" in line for line in plan), plan
+    finally:
+        conn.close()
+
+
+def test_page_agent_activity_skips_message_bodies_after_upgrade(tmp_path):
+    conn = database_at(tmp_path / "old.db", 123)
+    conn.row_factory = sqlite3.Row
+    try:
+        item = store.upsert_item(conn, {"key": "note:activity", "title": "Activity"}, "user")
+        conn.executemany(
+            "INSERT INTO messages (author, item_id, session_id, text, state, created_at)"
+            " VALUES (?, ?, ?, ?, 'sent', ?)",
+            [(author, item["id"], session, "Long message " * 1000, at) for author, session, at in [
+                ("agent:first", "first", "2026-11-16T00:00:00Z"),
+                ("agent:second", "second", "2026-11-16T01:00:00Z"),
+                ("Agent:third", None, "2026-11-16T02:00:00Z"),
+                ("user", "second", "2026-11-16T03:00:00Z"),
+                ("cockpit", "first", "2026-11-16T04:00:00Z"),
+            ]],
+        )
+        before = store.page_state(conn, "user", [], [], tmp_path, set())
+        assert before["items"][0]["last_agent_message_at"] == "2026-11-16T02:00:00Z"
+        db.migrate(conn)
+        queries = []
+        conn.set_trace_callback(queries.append)
+        try:
+            after = store.page_state(conn, "user", [], [], tmp_path, set())
+        finally:
+            conn.set_trace_callback(None)
+        for state in (before, after):
+            state.pop("now")
+            state.pop("local_now")
+        assert after == before
+        query = next(query for query in queries if "MAX(created_at) AS at FROM messages" in query)
+        plan = [row[3] for row in conn.execute("EXPLAIN QUERY PLAN " + query)]
+        assert any("messages_agent_activity" in line for line in plan), plan
+        assert all("TEMP B-TREE" not in line for line in plan), plan
+        conn.execute("UPDATE messages SET author = 'user' WHERE author = 'Agent:third'")
+        latest = store.page_state(conn, "user", [], [], tmp_path, set())
+        assert latest["items"][0]["last_agent_message_at"] == "2026-11-16T01:00:00Z"
+    finally:
+        conn.close()
+
+
+def test_page_reads_sends_failures_and_sweeps_by_index_after_upgrade(tmp_path):
+    conn = database_at(tmp_path / "old.db", 124)
+    conn.row_factory = sqlite3.Row
+    try:
+        item = store.upsert_item(conn, {"key": "note:sends", "title": "Sends", "sessions": ["first"]}, "user")
+        conn.executemany(
+            "INSERT INTO messages (author, item_id, session_id, text, state, created_at, sent_at, dismissed_at,"
+            " capacity_since) VALUES ('user', ?, 'first', 'Hello', ?, '2026-11-16T00:00:00Z', ?, ?, ?)",
+            [
+                (item["id"], "sent", "2026-11-16T00:00:00Z", None, None),
+                (item["id"], "failed", None, None, None),
+                (item["id"], "failed", None, "2026-11-16T01:00:00Z", None),
+                (item["id"], "queued", None, None, "2026-11-16T02:00:00Z"),
+            ],
+        )
+        conn.executemany(
+            "INSERT INTO events (kind, at, actor, data) VALUES (?, ?, 'sweep', ?)",
+            [("sweep.started", "2026-11-16T00:00:00Z", '{"sweep_id": 1}'),
+             ("sweep.finished", "2026-11-16T00:01:00Z", '{"sweep_id": 1, "error": null, "summary": "Full sweep"}')],
+        )
+        now = datetime(2026, 11, 16, 12, tzinfo=UTC)
+
+        def read():
+            return (store.page_state(conn, "user", [], [], tmp_path, set()), store.session_tasks(conn, {"first"}),
+                    patterns.sweep_times(conn, 7, now))
+
+        before = read()
+        assert before[1] == {"first": item["id"]}
+        assert before[2]["full"] is not None
+        db.migrate(conn)
+        queries = []
+        conn.set_trace_callback(queries.append)
+        try:
+            after = read()
+        finally:
+            conn.set_trace_callback(None)
+        for state in (before[0], after[0]):
+            state.pop("now")
+            state.pop("local_now")
+        assert after == before
+        for marker, index in (("state = 'sent' AND item_id IS NOT NULL", "messages_sent_session"),
+                              ("(state = 'failed' AND dismissed_at IS NULL)", "messages_state"),
+                              ("'sweep.started', 'sweep.finished'", "events_kind_at")):
+            query = next(query for query in queries if marker in query)
+            plan = [row[3] for row in conn.execute("EXPLAIN QUERY PLAN " + query)]
+            assert any(index in line for line in plan), (index, plan)
+        # Nearly every message is sent, so the models read stays a table scan rather than most of messages_state.
+        queries.clear()
+        conn.set_trace_callback(queries.append)
+        try:
+            store.chosen_models(conn)
+        finally:
+            conn.set_trace_callback(None)
+        plan = [row[3] for row in conn.execute("EXPLAIN QUERY PLAN " + queries[0])]
+        assert not any("messages_state" in line for line in plan), plan
+    finally:
+        conn.close()

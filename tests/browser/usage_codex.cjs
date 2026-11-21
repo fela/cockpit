@@ -1,5 +1,5 @@
 // The Usage page with Codex beside Claude, compact (SPEC SESSION-10), at 1280 and 390 px in both themes: a meter
-// for each Codex account signed in on the host among the weekly limits, with their sum when there are several, its chart in the last 30 days, its tile among the totals, its card under "Where it
+// for each Codex account signed in on the host among the weekly limits, with their sum when there are several, its chart in the last 30 days, its readout among the totals, its list under "Where it
 // went" and the "Of its week" column in its table; thin bars and little padding; nothing wider than the window.
 //
 // Starts serve_preview.py (this checkout's Cockpit on a synthetic database; README.md says what it needs)
@@ -34,11 +34,17 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 function pageNow() {
   const text = (el) => (el ? el.textContent.replace(/\s+/g, " ").trim() : "");
   const px = (el, property) => (el ? parseFloat(getComputedStyle(el)[property]) : NaN);
-  const card = document.querySelector(".spend-card.codex");
+  const hover = (selector) => {
+    const el = document.querySelector(selector);
+    return el?.title || el?.dataset.tip || "";
+  };
+  const card = document.querySelector(".rank-list.codex");
   return {
     meters: [...document.querySelectorAll("#spend-limits .meter")].map(text).filter((line) => line.startsWith("Codex")),
     chart: text(document.querySelector(".daily-chart.codex .daily-title")),
+    chartTitle: hover(".daily-chart.codex .daily-title"),
     tile: text(document.querySelector(".spend-readout.codex")),
+    tileTitle: hover(".spend-readout.codex"),
     cardRows: card ? card.querySelectorAll(".spend-rank li").length : 0,
     cardPadding: px(card, "paddingTop"),
     rankBar: px(document.querySelector(".spend-rank .rank-bar"), "height"),
@@ -83,7 +89,7 @@ async function main() {
         const page = await context.newPage();
         page.on("pageerror", (error) => pageErrors.push(error.message));
         await page.goto(`${info.origin}/usage`);
-        await page.waitForSelector(".spend-card.codex", { timeout: COUNTED_MS });
+        await page.waitForSelector(".rank-list.codex", { timeout: COUNTED_MS });
         // Cockpit's first count reads the Codex accounts one after another, and the page asks again every minute.
         await page.waitForFunction((count) => [...document.querySelectorAll("#spend-limits .meter")]
           .filter((el) => el.textContent.startsWith("Codex · ") && /%/.test(el.querySelector(".spend-figure").textContent)).length >= count,
@@ -92,6 +98,8 @@ async function main() {
         await page.evaluate(() => document.fonts.ready);
         const now = await page.evaluate(pageNow);
         if (width === 1280 && scheme === "light") await page.locator("#spend-limits").screenshot({ path: path.join(work, "limits.png") });
+        await page.locator(".spend-readout.codex").click();
+        now.tileDetails = await page.locator(".spend-readout.codex .breakdown").textContent();
         await context.close();
         const where = `${width} px ${scheme}`;
         const accounts = now.meters.filter((line) => line.startsWith("Codex · "));
@@ -99,11 +107,13 @@ async function main() {
           now.meters.join(" | "));
         check(`${where}: the Codex accounts' sum when there are several`,
           (CODEX_ACCOUNTS > 1) === now.meters.some((line) => line.startsWith("Codex, all accounts")), now.meters.join(" | "));
-        check(`${where}: Codex's chart in the last 30 days`, now.chart === "Codex, as a share of its own weekly limit", now.chart);
-        check(`${where}: Codex's tile`, /%.*Codex, of .*(own weekly limit|weeks in this period allow)/.test(now.tile), now.tile);
-        check(`${where}: Codex sessions card with rows`, now.cardRows > 0, `${now.cardRows} rows`);
+        check(`${where}: Codex's chart in the last 30 days`, now.chart === "Codex" && /weekly limit|own week/.test(now.chartTitle), now.chart);
+        check(`${where}: Codex's readout with detail on hover`, /%.*Codex/.test(now.tile) && /own weekly limit|weeks in this period allow/.test(now.tileTitle), `${now.tile}; ${now.tileTitle}`);
+        check(`${where}: Codex's full weekly allowance and tokens in its breakdown`,
+          /Codex, of .*(own weekly limit|weeks in this period allow)/.test(now.tileDetails) && /tokens/.test(now.tileDetails), now.tileDetails);
+        check(`${where}: Codex sessions list with rows`, now.cardRows > 0, `${now.cardRows} rows`);
         check(`${where}: "Of its week" column in the Codex table`, now.column.includes("Of its week"), now.column.join(", "));
-        check(`${where}: cards padded at most 8 px, rank bars at most 3 px`, now.cardPadding <= 8 && now.rankBar <= 3,
+        check(`${where}: lists padded at most 8 px, rank bars 2 px`, now.cardPadding <= 8 && now.rankBar === 2,
           `padding ${now.cardPadding}, bar ${now.rankBar}`);
         check(`${where}: nothing wider than the window`, now.overflow <= 0, `${now.overflow} px over`);
       }

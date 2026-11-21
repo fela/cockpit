@@ -25,21 +25,26 @@
 
 .spend-head { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 24px; margin-bottom: 4px; }
 .spend-head h1 { margin: 0; font: 700 30px/1.2 var(--sans); letter-spacing: -.022em; }
-/* The period and the measure: two switches at the head's right end. */
+/* The period and measure sit with the first figures they change. */
+.spend-use-head { flex-wrap: wrap; align-items: center; gap: 8px 24px; margin-top: 24px; }
+.spend-use-head h2 { margin: 0; }
 .spend-controls { display: flex; flex-wrap: wrap; gap: 8px; margin-left: auto; }
 .spend-controls button[aria-pressed="true"] { background: var(--surface); color: var(--text); box-shadow: var(--shadow-card); }
-.spend-lede { margin: 14px 0 8px; max-width: 72ch; color: var(--text-2); font-size: var(--fs-meta); }
+.spend-lede { min-height: 18px; margin: 0 0 12px; color: var(--text-3); font-size: var(--fs-meta); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
-/* The weekly meters and the period's tiles as readouts: a large figure with its label. The :root rules
-   below make them cards of the page. */
+/* Weekly meters keep their shared component; use figures align directly on the page. */
 .meters { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 8px; }
 .meters + .meters { margin-top: 8px; }
-:is(.meter, .spend-readout) {
+.meter {
   display: flex; flex-direction: column; gap: 3px; padding: 8px 12px;
   background: var(--shield-well); box-shadow: var(--shield-well-in); cursor: help;
 }
-/* A tile with a breakdown is a button: a press opens its figures under its line. */
-button.spend-readout { border: 0; margin: 0; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+/* A figure opens its explanation in place. */
+.spend-readout { display: flex; flex-direction: column; gap: 6px; min-width: 0; min-height: 60px; padding: 0; }
+.spend-readout .spend-figure { color: var(--text); }
+.spend-readout .spend-label { color: var(--text-2); white-space: nowrap; }
+.spend-readout .spend-label strong { font-weight: 600; }
+button.spend-readout { border: 0; margin: 0; background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; }
 .spend-readout > .breakdown { display: block; margin-bottom: 0; }
 .spend-figure { font: 400 32px/1 var(--sans); font-synthesis: none; font-variant-numeric: tabular-nums; color: var(--shield-lit); }
 :is(.spend-label, .meter-line) { font-size: var(--fs-meta); line-height: 16px; color: var(--lamp-grey); }
@@ -55,36 +60,48 @@ button.spend-readout { border: 0; margin: 0; color: inherit; font: inherit; text
 .meter-tick { position: absolute; top: -3px; width: 1px; height: 10px; margin-left: -1px; background: var(--shield-text); }
 .meter.unknown .spend-figure { color: var(--lamp-grey); }
 
-/* The period's core numbers (SESSION-16): three tiles, then the cost by kind of token as one bar with its legend. */
-.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 8px; }
-.tile-line { color: var(--text-3); font-size: var(--fs-meta); line-height: 16px; }
-.spend-note { max-width: 72ch; margin: 10px 0 0; color: var(--text-2); font-size: var(--fs-meta); }
+/* Four aligned figures, then one slim token-kind bar. */
+.tiles { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); align-items: start; gap: 24px; }
+.spend-note { min-height: 18px; margin: 8px 0 0; color: var(--text-3); font-size: var(--fs-meta); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .kinds { margin-top: 12px; }
+.kinds[data-ghost] { min-height: 36px; }
+.kinds[data-ghost] > .ghost-bar { height: 6px; }
 .kinds .kind-bar { height: 6px; gap: 2px; border-radius: 0; }
 .kinds .kind-bar > span:first-child { border-radius: var(--radius-xs) 0 0 var(--radius-xs); }
 .kinds .kind-bar > span:last-child { border-radius: 0 var(--radius-xs) var(--radius-xs) 0; }
 .kinds-legend { display: flex; flex-wrap: wrap; gap: 4px 20px; margin: 6px 0 0; padding: 0; list-style: none; font-size: var(--fs-meta); line-height: 16px; }
-.kinds-legend li { display: flex; align-items: center; gap: 6px; cursor: help; }
+.kind-detail { display: flex; align-items: center; gap: 6px; min-height: 24px; padding: 0; border: 0; background: none; color: var(--text-2); font: inherit; white-space: nowrap; cursor: pointer; }
 .kinds-name { color: var(--text-2); }
-.kinds-figure { color: var(--text); font-variant-numeric: tabular-nums; }
 .kinds-legend .kind-key { margin: 0; border-radius: 2px; }
 .card-title { margin: 0 0 6px; color: var(--text-2); font: 600 var(--fs-meta)/16px var(--sans); }
 
-/* Cards of ranked bars (SESSION-16): where the use went, and the work with the costliest cache misses. */
-.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 8px; }
+/* Ranked bars align in open columns; extensions can still use .spend-card. */
+.cards { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 24px; }
+.cards.two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.rank-list { min-width: 0; }
+.rank-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; min-height: 28px; }
+.rank-head .card-title { margin: 0; white-space: nowrap; }
 .spend-card { display: flex; flex-direction: column; min-width: 0; padding: 8px 12px; background: var(--surface); box-shadow: var(--shadow-card); border-radius: var(--radius); }
-.card-more { align-self: flex-start; margin-top: 6px; font-size: var(--fs-meta); }
-.spend-rank { display: grid; gap: 5px; margin: 0; padding: 0; list-style: none; }
+.card-more { min-width: 24px; min-height: 24px; font-size: var(--fs-meta); color: var(--text-3); white-space: nowrap; }
+.spend-rank { display: grid; gap: 4px; margin: 0; padding: 0; list-style: none; }
+/* A row gives its name the column's whole width beside the figure; its bar runs under both. */
 .rank-row {
-  display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: baseline; gap: 2px 12px; width: 100%;
+  display: grid; grid-template-columns: minmax(0, 1fr) auto; align-content: center; gap: 4px 12px; width: 100%; min-height: 28px;
   margin: 0; padding: 0; border: 0; background: none; color: inherit; font: inherit; text-align: left; cursor: pointer;
 }
+.rank-row > .rank-name { grid-area: 1 / 1; }
+.rank-row > .rank-figure { grid-area: 1 / 2; }
+.rank-row > .rank-bar { grid-area: 2 / 1 / auto / -1; }
 .rank-row:hover .rank-name, .rank-row[aria-expanded="true"] .rank-name { text-decoration: underline; text-decoration-color: var(--line-strong); text-underline-offset: 3px; }
 /* A row's, a day's or a turn's figures, opened by a press on it. */
 .breakdown {
   margin: 4px 0 6px; padding: 6px 10px; border-left: 2px solid var(--line-strong); color: var(--text-2);
   font-size: var(--fs-meta); line-height: 18px; white-space: pre-line; overflow-wrap: anywhere;
 }
+/* A pinned day's figures: names and values in two aligned columns under the day. */
+.breakdown.day-figures { display: grid; grid-template-columns: max-content max-content; gap: 0 20px; width: max-content; max-width: 100%; margin-top: 10px; white-space: normal; }
+.day-figures > .day-when { grid-column: 1 / -1; color: var(--text); font-weight: 600; }
+.day-figures > .day-value { color: var(--text); text-align: right; font-variant-numeric: tabular-nums; }
 .breakdown-row > td { padding-top: 0; text-align: left; white-space: normal; }
 .breakdown-row > td > .breakdown { max-width: 80ch; margin-top: 0; }
 .row-open {
@@ -94,12 +111,9 @@ button.spend-readout { border: 0; margin: 0; color: inherit; font: inherit; text
 .row-open:hover > .row-name, .row-open[aria-expanded="true"] > .row-name { text-decoration: underline; text-decoration-color: var(--line-strong); text-underline-offset: 3px; }
 .rank-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); font-size: var(--fs-meta); line-height: 16px; }
 .rank-figure { color: var(--text); font-size: var(--fs-meta); line-height: 16px; font-weight: 600; font-variant-numeric: tabular-nums; }
-.rank-bar { grid-column: 1 / -1; height: 3px; background: var(--line); border-radius: 2px; }
+.rank-bar { height: 2px; background: var(--line); border-radius: 2px; }
 .rank-fill { display: block; height: 100%; min-width: 2px; background: var(--working); border-radius: 2px; }
-.spend-card.codex .rank-fill { background: var(--codex); }
-.rank-meta { grid-column: 1 / -1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-3); font-size: 11px; line-height: 14px; }
-.spend-define { max-width: 80ch; margin: 0 0 8px; color: var(--text-2); font-size: var(--fs-meta); }
-
+.rank-list.codex .rank-fill, .spend-card.codex .rank-fill { background: var(--codex); }
 /* The full tables, behind one disclosure. */
 .spend-more { margin-top: 20px; border-top: 1px solid var(--line); }
 .spend-more > summary {
@@ -111,7 +125,7 @@ button.spend-readout { border: 0; margin: 0; color: inherit; font: inherit; text
 .spend-more[open] > summary::before { transform: rotate(90deg); }
 .spend-more > section { margin-top: 20px; }
 .spend-more > section:first-of-type { margin-top: 8px; }
-/* Opened by a card's "All in the table" button: open at once, so the page can scroll to the table. */
+/* Opened by a list's "All" button: open at once, so the page can scroll to the table. */
 details.spend-more.at-once::details-content { transition: none; }
 @media (prefers-reduced-motion: reduce) { .spend-more > summary::before { transition: none; } }
 
@@ -119,6 +133,7 @@ details.spend-more.at-once::details-content { transition: none; }
 .spend-layout > #spend-limits, .spend-layout > #spend-totals { margin-top: 8px; }
 .spend-layout > section > .section-head + .cards { margin-top: 0; }
 .spend-layout .section-head .hint { flex: 1 1 24ch; }
+#spend-misses .section-head .hint { white-space: nowrap; }
 
 /* A cost split by kind of token, as one bar. */
 .kind-bar { display: flex; height: 8px; overflow: hidden; border-radius: var(--radius-xs); }
@@ -146,21 +161,22 @@ details.spend-more.at-once::details-content { transition: none; }
 .kinds-table { min-width: min(100%, 420px); }
 .kinds-table tbody th { cursor: help; }
 
-/* The graph per day (SESSION-14): two column charts over one row of days, Claude use in the working blue and
-   steps done in the accent. Each has its own scale on the left; hairlines mark its top, half and baseline.
-   A day's column lights across both charts under the pointer. */
-.daily { display: grid; gap: 10px; }
-.daily-title { margin-bottom: 4px; color: var(--text-2); font-size: var(--fs-meta); }
-.daily-plot { display: grid; grid-template-columns: 48px minmax(0, 1fr); }
-.daily-axis { position: relative; color: var(--text-3); font-size: 11px; line-height: 12px; font-variant-numeric: tabular-nums; }
-.daily-axis > span { position: absolute; right: 8px; transform: translateY(-50%); white-space: nowrap; }
-.daily-axis > span:nth-child(1) { top: 0; }
-.daily-axis > span:nth-child(2) { top: 50%; }
-.daily-axis > span:nth-child(3) { top: 100%; }
+/* Daily columns keep only a top-scale value, the zero baseline and a shared date axis. */
+.daily { display: grid; gap: 12px; }
+.daily-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; min-height: 22px; }
+.daily-title { color: var(--text-2); font-size: var(--fs-meta); }
+.daily-scale { color: var(--text-3); font-size: var(--fs-meta); font-variant-numeric: tabular-nums; }
+.daily-plot { display: grid; grid-template-columns: 48px minmax(0, 1fr); min-width: 0; }
+.daily-plot.daily-columns { grid-template-columns: minmax(0, 1fr); }
+/* Keep the shared vertical-axis styles available to extensions. */
+.daily-axis { position: relative; color: var(--text-3); font-size: var(--fs-meta); line-height: 16px; font-variant-numeric: tabular-nums; }
+.daily-axis:not(.daily-dates) > span { position: absolute; right: 8px; transform: translateY(-50%); white-space: nowrap; }
+.daily-axis:not(.daily-dates) > span:nth-child(1) { top: 0; }
+.daily-axis:not(.daily-dates) > span:nth-child(2) { top: 50%; }
+.daily-axis:not(.daily-dates) > span:nth-child(3) { top: 100%; }
 .daily-days {
   display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); height: 96px;
-  border-top: 1px solid var(--line); border-bottom: 1px solid var(--line-strong);
-  background: linear-gradient(var(--line), var(--line)) center / 100% 1px no-repeat;
+  border-bottom: 1px solid var(--line-strong);
 }
 :is(.codex, .steps) .daily-days { height: 56px; }
 .use { --daily-fill: var(--working); }
@@ -171,13 +187,28 @@ details.spend-more.at-once::details-content { transition: none; }
   background: none; cursor: pointer;
 }
 .daily-day:is(.lit, [aria-pressed="true"]) { background: color-mix(in oklch, var(--text) 7%, transparent); }
-/* At most 24 px wide, with at least 2 px of air between neighbours; rounded at the top only. */
+.daily-day:focus-visible { outline: 2px solid var(--text-2); outline-offset: -2px; }
 .daily-bar { width: min(24px, calc(100% - 2px)); background: var(--daily-fill); border-radius: var(--radius-xs) var(--radius-xs) 0 0; }
 .daily-day.today .daily-bar { background: color-mix(in oklab, var(--daily-fill) 45%, var(--surface)); }
-/* Each Monday's date, at the start of its column; near the right end, at the end of it. */
-.daily-dates { position: relative; height: 16px; margin: -14px 0 0 48px; color: var(--text-3); font-size: 11px; line-height: 16px; }
-.daily-dates > span { position: absolute; left: calc(var(--at) / var(--days) * 100%); padding-left: 4px; border-left: 1px solid var(--line-strong); white-space: nowrap; }
-.daily-dates > span.end { left: auto; right: calc((var(--days) - var(--at) - 1) / var(--days) * 100%); padding: 0 4px 0 0; border: 0; border-right: 1px solid var(--line-strong); }
+.daily-dates { position: relative; height: 16px; color: var(--text-3); font-size: var(--fs-meta); line-height: 16px; }
+.daily-dates > span { position: absolute; left: calc(var(--at) / var(--days) * 100%); white-space: nowrap; }
+.daily-dates > span.end { left: auto; right: calc((var(--days) - var(--at) - 1) / var(--days) * 100%); }
+
+/* Shared with other charts on this page. The selected column stays outside the tooltip. */
+.chart-tip {
+  position: absolute; z-index: 100; width: max-content; max-width: calc(100vw - 16px); box-sizing: border-box;
+  padding: 6px 10px; pointer-events: none; background: var(--surface); color: var(--text);
+  box-shadow: var(--shadow-pop); border-radius: var(--radius); font-size: var(--fs-meta); line-height: 18px;
+  font-variant-numeric: tabular-nums; animation: usage-tip-in 100ms ease-out;
+}
+#usage-day-tip { position: fixed; }
+@keyframes usage-tip-in { from { opacity: 0; } to { opacity: 1; } }
+.chart-tip[hidden] { display: none; }
+.chart-tip .tip-when { margin-bottom: 2px; color: var(--text-3); }
+.chart-tip .tip-row { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; }
+.chart-tip .tip-row > :first-child { color: var(--text-2); white-space: nowrap; }
+.chart-tip .tip-row > :last-child { margin-left: auto; text-align: right; overflow-wrap: anywhere; }
+@media (prefers-reduced-motion: reduce) { .chart-tip { animation: none; } }
 
 /* The wide tables scroll sideways on their own on a narrow screen, so the page itself never does. */
 .table-scroll { overflow-x: auto; margin-bottom: 8px; }
@@ -200,10 +231,12 @@ th[aria-sort] > .sort-key { color: var(--text); font-weight: 600; }
 .spend-method { margin: 4px 0 8px; max-width: 72ch; color: var(--text-2); font-size: var(--fs-meta); }
 
 .codex-kinds { margin-bottom: 8px; }
+/* Other models in Claude Code sessions, under Codex's own sessions. */
+.other-title { margin-top: 20px; }
 
 /* The readouts are cards of the page, the figures in Inter, the bars plain lines as in the header. Under
 :root, so they win over the base rules above. */
-:root :is(.meter, .spend-readout) { background: var(--surface); box-shadow: var(--shadow-card); border-radius: var(--radius); }
+:root .meter { background: var(--surface); box-shadow: var(--shadow-card); border-radius: var(--radius); }
 :root .spend-figure { font: 600 30px/1 var(--sans); letter-spacing: -.02em; }
 :root .meter-name { color: var(--text-2); }
 :root .meter.near { --pace-fill: var(--lamp-orange-fill); }
@@ -222,6 +255,7 @@ th[aria-sort] > .sort-key { color: var(--text); font-weight: 600; }
 #spend-session-kinds .section-head h2::before { --glyph: var(--mark-people); }
 #spend-top .section-head h2::before { --glyph: var(--mark-radar); }
 #spend-limits .section-head h2::before { --glyph: var(--mark-clock); }
+.spend-use-head h2::before { --glyph: var(--mark-meter); }
 /* Which account new sessions start on, and the user's choice of one for a while. */
 .prefer { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; margin-top: 8px; font-size: var(--fs-meta); line-height: 16px; }
 .prefer-status { flex-basis: 100%; color: var(--shield-text); }
@@ -240,6 +274,8 @@ th[aria-sort] > .sort-key { color: var(--text); font-weight: 600; }
 @media (max-width: 900px) {
   .spend-layout { padding-top: 16px; }
   .spend-figure, :root .spend-figure { font-size: 20px; }
+  .cards { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .spend-use-head .spend-controls { width: 100%; margin-left: 0; }
 }
 
 @media (max-width: 640px) {
@@ -248,12 +284,22 @@ th[aria-sort] > .sort-key { color: var(--text); font-weight: 600; }
   .spend-controls { margin-left: 0; }
   /* Two meters to a row, so Claude's accounts and Codex fit on one screen. */
   .meters { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .tiles, .cards { grid-template-columns: minmax(0, 1fr); }
-  :is(.meter, .spend-readout, .spend-card) { padding: 7px 10px; }
+  .cards, .cards.two { grid-template-columns: minmax(0, 1fr); }
+  /* The four figures stand two to a row; an opened one takes the row for its explanation. */
+  .tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px 24px; }
+  .spend-readout[aria-expanded="true"] { grid-column: 1 / -1; }
+  .spend-readout { min-height: 44px; }
+  .spend-controls { width: 100%; }
+  .spend-controls .seg { max-width: 100%; }
+  .spend-controls .seg button { min-height: 44px; padding-inline: 8px; white-space: nowrap; }
+  .rank-row, .card-more, .kind-detail { min-height: 44px; }
+  .card-more { min-width: 44px; }
+  .kinds[data-ghost] { min-height: 104px; }
+  #spend-misses .section-head .hint { flex-basis: 100%; }
+  :is(.meter, .spend-card) { padding: 7px 10px; }
   .spend-table .name-col { max-width: 200px; }
   .measure .kind-bar { width: 64px; }
   .daily-plot { grid-template-columns: 40px minmax(0, 1fr); }
-  .daily-dates { margin-left: 40px; }
   .daily-days { height: 72px; }
   :is(.codex, .steps) .daily-days { height: 44px; }
   .sort-key { min-height: 32px; }
@@ -261,6 +307,6 @@ th[aria-sort] > .sort-key { color: var(--text); font-weight: 600; }
 
 /* While another period loads, the figures shown fade back; the period and measure buttons stay as they are (UI-48),
    and so do a part's sections (class usage-part), which no period changes. */
-.spend-layout > :not(.spend-head, .usage-part) { transition: opacity 160ms ease-out; }
-.spend-layout.switching > :not(.spend-head, .usage-part) { opacity: .45; transition-delay: 120ms; }
-@media (prefers-reduced-motion: reduce) { .spend-layout > :not(.spend-head, .usage-part) { transition: none; } }
+.spend-layout > :not(.spend-head, .spend-use-head, .usage-part) { transition: opacity 160ms ease-out; }
+.spend-layout.switching > :not(.spend-head, .spend-use-head, .usage-part) { opacity: .45; transition-delay: 120ms; }
+@media (prefers-reduced-motion: reduce) { .spend-layout > :not(.spend-head, .spend-use-head, .usage-part) { transition: none; } }

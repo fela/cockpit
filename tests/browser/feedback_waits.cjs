@@ -153,6 +153,11 @@ async function run(page, origin, where, [partA, partB]) {
   await page.unroute("**/api/feedback");
   await page.unroute("**/api/writing");
   await page.evaluate(() => addEventListener("pageshow", (event) => { window.restoredFromCache = event.persisted; }));
+  // Chrome says why it loaded the page anew rather than from the cache.
+  const cdp = await page.context().newCDPSession(page);
+  await cdp.send("Page.enable");
+  let notCached = [];
+  cdp.on("Page.backForwardCacheNotUsed", (event) => { notCached = event.notRestoredExplanations.map((reason) => reason.reason); });
   await page.goto(elsewhere(origin));
   // Another tab writes the box while this page is away; coming back leaves its words in storage.
   const other = await page.context().newPage();
@@ -164,7 +169,12 @@ async function run(page, origin, where, [partA, partB]) {
   await wait(500);
   check((await storedBox(page, where)).includes("edited in another tab"), `${where}: back from the cache, another tab's words stay in storage`);
   await other.close();
-  check(await page.evaluate(() => window.restoredFromCache === true), `${where}: Back restores the page from the back-forward cache`);
+  const restored = await page.evaluate(() => window.restoredFromCache === true);
+  // The headless shell build has no back-forward cache: this check needs a full Chromium (README.md).
+  const noCache = notCached.includes("BackForwardCacheDisabledForDelegate") ? "; this browser has no back-forward cache: run with a full Chromium" : "";
+  check(restored, `${where}: Back restores the page from the back-forward cache${restored ? "" : ` (Chrome: ${notCached.join(", ") || "no reason given"}${noCache})`}`);
+  await cdp.detach();
+  if (noCache) throw new Error("this browser has no back-forward cache, so the rest of this check cannot run");
   now = await box(page);
   check(now.open && now.text === "open at sign-in", `${where}: back from the cache, the open box holds only its own words`);
   await page.locator("#pick-box textarea").press("End");
@@ -188,20 +198,22 @@ const elsewhere = (origin) => `${origin.replace("127.0.0.1", "localhost")}/stati
 // Where each page keeps its feedback box: app.js keeps every box's draft in one stored list, under PICK_KEY;
 // feedback.js keeps its one box under its own key.
 const stores = {
-  "/classic": { store: "cockpit.drafts", key: "fb:pick" },
+  "/": { store: "cockpit.drafts", key: "fb:pick" },
   "/usage": { store: "cockpit:feedback:/usage", key: null },
 };
 
 (async () => {
   const { info: cookie } = await startPreview("cockpit-feedback-waits-");
   // Playwright turns the back-forward cache off unless asked.
-  const browser = await chromium.launch({ executablePath: CHROMIUM, ignoreDefaultArgs: ["--disable-back-forward-cache"] });
+  // The full Chromium: Playwright's headless shell has no back-forward cache.
+  const browser = await chromium.launch({ executablePath: CHROMIUM, channel: CHROMIUM ? undefined : "chromium", ignoreDefaultArgs: ["--disable-back-forward-cache"] });
   const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
-  await context.setExtraHTTPHeaders({ cookie: `${cookie.name}=${cookie.value}` });
+  // A cookie, as a browser holds one: a header added by Playwright misses the requests a page sends as it closes.
+  await context.addCookies([{ name: cookie.name, value: cookie.value, domain: new URL(cookie.origin).hostname, path: "/", secure: true, httpOnly: true, sameSite: "Lax" }]);
   const page = await context.newPage();
   const errors = [];
   page.on("pageerror", (err) => errors.push(String(err)));
-  await run(page, cookie.origin, "/classic", ["#goals .goals-box", "#next h1"]);
+  await run(page, cookie.origin, "/", ["#goals .goals-box", "#next h1"]);
   await run(page, cookie.origin, "/usage", ["h1", ".spend-periods button[data-period='7']"]);
   check(errors.length === 0, `no page errors${errors.length ? `: ${errors.join("; ")}` : ""}`);
   await browser.close();
