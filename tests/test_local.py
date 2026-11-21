@@ -651,3 +651,19 @@ def test_server_start_tightens_only_its_private_data_directories(tmp_path, monke
 def test_google_mode_keeps_its_browser_requests_unchanged(world):
     assert world.client.get("/static/local-auth.js").text == ""
     assert world.client.get("/api/state").status_code == 200
+
+
+def test_setup_refuses_another_port_without_an_instance_in_one_line(tmp_path, monkeypatch, capsys):
+    folder = tmp_path / "config"
+    monkeypatch.setattr(config, "CONFIG_DIR", folder)
+    monkeypatch.setattr(config, "SETUP_PATH", folder / "setup.toml")
+    monkeypatch.setattr(config, "LOCAL_LOGIN_PATH", folder / "local-login-token")
+    monkeypatch.setattr(local, "codex_command", lambda: "codex")
+    config.setup.cache_clear()
+    try:
+        repo = str(Path(__file__).resolve().parents[1])
+        assert cli.main(["setup", "--local", "--repo", repo, "--port", "8791"]) == 1
+        assert "port must be 8790 without COCKPIT_INSTANCE" in capsys.readouterr().err
+        assert not config.SETUP_PATH.exists()
+    finally:
+        config.setup.cache_clear()

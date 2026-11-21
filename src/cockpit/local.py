@@ -323,7 +323,7 @@ def main(argv: list[str]) -> int:
                     print(f"Open this one-time address within two minutes:\n{address}")
                     return 0
             print("Opened Cockpit in your browser.")
-    except (ValueError, OSError, subprocess.SubprocessError) as exc:
+    except (ValueError, OSError, subprocess.SubprocessError, config.SetupError) as exc:
         print(f"cockpit: {exc}", file=sys.stderr)
         return 1
     return 0
