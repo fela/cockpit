@@ -215,9 +215,6 @@ class Setup:
     providers: tuple[str, ...] = ("claude",)
     default_provider: str = "claude"
     codex_command: str = "codex"
-    # The Gemini CLI and Grok Build commands (SPEC SESSION-30): an executable name or absolute path, using its own login.
-    gemini_command: str = "gemini"
-    grok_command: str = "grok"
     claude_sockets_dir: str = ""
     # The branch of spec_repo that `cockpit deploy` installs and restarts the service on; "" turns deploy off.
     deploy_branch: str = ""
@@ -268,8 +265,7 @@ def read_setup(path: Path, tables: dict[str, TableReader]) -> Setup:
             "from this file, and paste the people into the question Cockpit asks on its first page"
         )
     optional = {
-        "auth_mode", "providers", "default_provider", "codex_command", "gemini_command", "grok_command",
-        "claude_sockets_dir", "deploy_branch",
+        "auth_mode", "providers", "default_provider", "codex_command", "claude_sockets_dir", "deploy_branch",
         "public_origin", "last_use", "retired_accounts", "offload",
     }
     missing = [key for key in keys if key not in values and key not in optional]
@@ -279,7 +275,7 @@ def read_setup(path: Path, tables: dict[str, TableReader]) -> Setup:
         raise SetupError(f"{path}: {'; '.join(problem for problem in problems if problem)} (docs/setup.example.toml lists every key)")
     part_tables = {name: read(path, values.pop(name, None)) for name, read in tables.items()}
     values = {"auth_mode": "google", "providers": ["claude"], "default_provider": "claude",
-              "codex_command": "codex", "gemini_command": "gemini", "grok_command": "grok", "claude_sockets_dir": "", "deploy_branch": "", "public_origin": "",
+              "codex_command": "codex", "claude_sockets_dir": "", "deploy_branch": "", "public_origin": "",
               "last_use": {}, "retired_accounts": [], "offload": None, **values}
     may_be_empty = {"claude_sockets_dir", "deploy_branch", "public_origin"}
     wrong = [key for key in keys if key not in {"providers", "last_use", "retired_accounts", "offload"}
