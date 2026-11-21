@@ -269,8 +269,8 @@ def _digest_retry(
     conn: sqlite3.Connection, setup: Setup, record: dict[str, Any], launched: dict[str, Any]
 ) -> datetime | None:
     """When Cockpit asks again for a digest whose message failed: RETRY_MINUTES later, while the digest is not
-    stored and the user has not dismissed the message, and only when that comes before the next week's digest."""
-    if launched["state"] != "failed" or launched["dismissed_at"] or _written(conn, WEEKLY, record["day"]):
+    stored, as for a briefing, and only when that comes before the next week's digest."""
+    if launched["state"] != "failed" or _written(conn, WEEKLY, record["day"]):
         return None
     retry = datetime.fromisoformat(launched["created_at"]) + timedelta(minutes=RETRY_MINUTES)
     next_week = datetime.combine(
