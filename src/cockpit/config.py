@@ -341,6 +341,10 @@ def read_setup(path: Path, tables: dict[str, TableReader]) -> Setup:
     port = values["port"]
     if not isinstance(port, int) or isinstance(port, bool) or not 1024 <= port <= 65535:
         raise SetupError(f"{path}: port must be a number from 1024 to 65535, such as {DEFAULT_PORT}")
+    # The unnamed instance keeps the port a single Cockpit always had; a second instance takes another one.
+    if not INSTANCE and port != DEFAULT_PORT:
+        raise SetupError(f"{path}: port must be {DEFAULT_PORT} without COCKPIT_INSTANCE; only a named instance, which"
+                         " runs beside the unnamed one, takes another port")
     if values["auth_mode"] == "local":
         validate_local_origin(values["origin"], port)
     elif not values["origin"].startswith("https://") or values["origin"].endswith("/"):

@@ -7,7 +7,8 @@ use Google OAuth. Provider selection and browser authentication are independent.
 ## Local authentication
 
 `auth_mode = "local"` accepts only `http://127.0.0.1:<port>` or
-`http://localhost:<port>`, where `port` in the setup file defaults to 8790. The
+`http://localhost:<port>`, where `port` in the setup file is 8790, and only a named
+instance (below) may set another. The
 server binds IPv4 loopback on that port and disables proxy-header
 handling. Each request checks the socket peer and exact Host, including its port.
 Browser writes require the configured Origin, including sign-in and sign-out.

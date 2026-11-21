@@ -41,7 +41,16 @@ def test_a_named_instance_has_claude_folders_of_its_own(tmp_path: Path) -> None:
     # Every `claude` a named instance runs names its folder, even on its first account: the probe below.
 
 
-def test_the_setup_names_the_port(tmp_path: Path) -> None:
+def test_the_unnamed_instance_keeps_the_single_cockpits_port(tmp_path: Path) -> None:
+    assert config.read_setup(write_setup(tmp_path, {}), parts.setup_tables()).port == config.DEFAULT_PORT
+    assert config.read_setup(write_setup(tmp_path, {"port": 8790}), parts.setup_tables()).port == 8790
+    for google_or_local in ({"port": 8791}, {"auth_mode": "local", "origin": "http://127.0.0.1:8791", "port": 8791}):
+        with pytest.raises(config.SetupError, match="port must be 8790 without COCKPIT_INSTANCE"):
+            config.read_setup(write_setup(tmp_path, google_or_local), parts.setup_tables())
+
+
+def test_the_setup_names_the_port(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(config, "INSTANCE", "home")
     assert config.read_setup(write_setup(tmp_path, {}), parts.setup_tables()).port == config.DEFAULT_PORT
     local = {"auth_mode": "local", "origin": "http://127.0.0.1:8791", "port": 8791}
     assert config.read_setup(write_setup(tmp_path, local), parts.setup_tables()).port == 8791
@@ -53,6 +62,7 @@ def test_the_setup_names_the_port(tmp_path: Path) -> None:
 
 
 def test_a_google_install_is_reached_on_its_own_port(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(config, "INSTANCE", "home")
     setup = config.read_setup(write_setup(tmp_path, {"port": 8791}), parts.setup_tables())
     monkeypatch.setattr(config, "setup", lambda: setup)
     assert config.api_base() == "http://127.0.0.1:8791"
@@ -65,6 +75,7 @@ def test_local_setup_writes_the_port(tmp_path: Path, monkeypatch: pytest.MonkeyP
     (repo / "docs").mkdir(parents=True)
     (repo / "docs" / "SPEC.md").write_text("spec\n")
     folder = tmp_path / "config"
+    monkeypatch.setattr(config, "INSTANCE", "home")
     monkeypatch.setattr(config, "CONFIG_DIR", folder)
     monkeypatch.setattr(config, "SETUP_PATH", folder / "setup.toml")
     monkeypatch.setattr(config, "LOCAL_LOGIN_PATH", folder / "local-login-token")
