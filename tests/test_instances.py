@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from cockpit import config, parts, permissions, sidechat
+from cockpit import attach, config, parts, permissions, sidechat
 from tests.test_resources import AGENT_SESSION, OTHER_SESSION, FakeProc, Proc, agent_tree, cpu_of, sampler_for, step
 from tests.test_setup import write_setup
 
@@ -171,6 +171,30 @@ def test_every_instances_credentials_stay_closed(tmp_path: Path) -> None:
 
 def test_without_other_instances_the_credential_places_are_mains(tmp_path: Path) -> None:
     assert permissions.secret_places(tmp_path) == permissions.SECRET_PLACES
+
+
+def attached_environment(command: str, tmp_path: Path) -> list[str]:
+    """CLAUDE_CONFIG_DIR and COCKPIT_INSTANCE as `claude` sees them when a tmux shell left from another Cockpit's
+    command runs the attach `command`."""
+    bin_folder = tmp_path / "bin"
+    bin_folder.mkdir(exist_ok=True)
+    (bin_folder / "claude").write_text('#!/bin/sh\necho "${CLAUDE_CONFIG_DIR-unset} ${COCKPIT_INSTANCE-unset}"\n')
+    (bin_folder / "claude").chmod(0o755)
+    stale = {"PATH": f"{bin_folder}:{os.environ['PATH']}", "CLAUDE_CONFIG_DIR": "/stale", "COCKPIT_INSTANCE": "other"}
+    return subprocess.run(["sh", "-c", command], env=stale, capture_output=True, text=True, check=True).stdout.split()
+
+
+def test_an_attached_session_asks_its_own_instance(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    # The session's permission hooks post to the Cockpit COCKPIT_INSTANCE names, so the attach command sets it for
+    # a named instance and unsets it for the unnamed one, whatever the tmux shell kept.
+    personal, work = config.instance_accounts("", tmp_path)
+    assert attached_environment(attach.attach_command(personal, "aaaa111"), tmp_path) == ["unset", "unset"]
+    assert attached_environment(attach.attach_command(work, "aaaa111"), tmp_path) == [str(work.folder), "unset"]
+    monkeypatch.setattr(config, "INSTANCE", "home")
+    for account in config.instance_accounts("home", tmp_path):
+        command = attach.attach_command(account, "aaaa111")
+        assert attached_environment(command, tmp_path) == [str(account.folder), "home"]
+        assert attach._program(command) == "claude"
 
 
 def test_the_sampler_leaves_another_instances_programs_unattributed(tmp_path: Path) -> None:

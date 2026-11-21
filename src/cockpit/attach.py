@@ -4,9 +4,9 @@ The page's iTerm2 link runs the setup file's `attach` command, which runs `cockp
 over SSH when Cockpit runs on another machine. It shows the session in a window of the tmux session the
 user attached to last: the window it opened for that session before, or a new window that starts in the
 checkouts folder and types `claude attach SESSION` into its shell, with CLAUDE_CONFIG_DIR set before it for a
-session on an account other than the default one (SPEC SESSION-17). Each window it opens carries the
-session's id in a window option, so the next press goes back to that window instead of adding one. It
-starts a tmux session only when no tmux server runs.
+session on an account other than the default one (SPEC SESSION-17), and COCKPIT_INSTANCE set for a named
+Cockpit. Each window it opens carries the session's id in a window option, so the next press goes back to
+that window instead of adding one. It starts a tmux session only when no tmux server runs.
 """
 
 from __future__ import annotations
@@ -16,6 +16,7 @@ import shlex
 import subprocess
 from pathlib import Path
 
+from cockpit import config
 from cockpit.config import Account
 
 # The window option that names the session a window was opened for.
@@ -90,12 +91,18 @@ def _program(command: str) -> str:
 
 
 def attach_command(account: Account, session: str) -> str:
-    """What the window's shell runs to attach to `session` on `account`. Claude's default folder unsets
-    CLAUDE_CONFIG_DIR, which the tmux shell may have from a command run there for the other account."""
-    command = f"claude attach {shlex.quote(session)}"
-    if account.claude_default:
-        return f"env -u CLAUDE_CONFIG_DIR {command}"
-    return f"CLAUDE_CONFIG_DIR={shlex.quote(str(account.folder))} {command}"
+    """What the window's shell runs to attach to `session` on `account`. The tmux shell may keep CLAUDE_CONFIG_DIR
+    and COCKPIT_INSTANCE from a command run there for another account or another Cockpit, so the command sets
+    both or unsets them: Claude's default folder unsets CLAUDE_CONFIG_DIR, and the unnamed Cockpit unsets
+    COCKPIT_INSTANCE, which picks the Cockpit whose inbox the session's permission requests go to."""
+    unset = ["CLAUDE_CONFIG_DIR"] if account.claude_default else []
+    settings = [] if account.claude_default else [f"CLAUDE_CONFIG_DIR={account.folder}"]
+    if config.INSTANCE:
+        settings.append(f"COCKPIT_INSTANCE={config.INSTANCE}")
+    else:
+        unset.append("COCKPIT_INSTANCE")
+    unsetting = [word for name in unset for word in ("-u", name)]
+    return shlex.join(["env", *unsetting, *settings, "claude", "attach", session])
 
 
 def attach(account: Account, session: str, name: str, folder: Path) -> None:
