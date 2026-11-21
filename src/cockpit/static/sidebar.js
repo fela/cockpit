@@ -1610,7 +1610,7 @@ function keptOpen(key, el) {
 function callRun(calls) {
   const counts = new Map();
   for (const call of calls) {
-    const [one, many] = CALL_KINDS[call.tool_name] || [call.tool_name, call.tool_name];
+    const [one, many] = Object.hasOwn(CALL_KINDS, call.tool_name) ? CALL_KINDS[call.tool_name] : [call.tool_name, call.tool_name];
     const seen = counts.get(one) || { many, count: 0 };
     seen.count += 1;
     counts.set(one, seen);

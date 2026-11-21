@@ -5039,6 +5039,9 @@ function turnCapacity(state, picks, session) {
   return capacity;
 }
 
+// The agents a session's next turn can move between.
+const HANDOVER_PROVIDERS = ["claude", "codex"];
+
 function turnOptions(key, currentSession, changed) {
   const holder = h("div", { class: "start-options turn-options" });
   const effortLabel = (effort) => effort === "xhigh" ? "Extra high" : effort ? capitalize(effort) : "Default effort";
@@ -5046,7 +5049,9 @@ function turnOptions(key, currentSession, changed) {
     const session = currentSession();
     if (!session || session.standing) { holder.replaceChildren(); return; }
     const picks = turnPicks(key, session);
-    const offered = ui.state.session_options || {};
+    // A turn moves between Claude and Codex only; a Gemini or Grok session keeps its agent and model (SESSION-30).
+    const offered = Object.fromEntries(Object.entries(ui.state.session_options || {})
+      .filter(([provider]) => HANDOVER_PROVIDERS.includes(provider)));
     const choices = offered[picks.provider];
     if (!choices) { holder.replaceChildren(); return; }
     const set = (next, field) => {
@@ -5295,7 +5300,8 @@ function composer(key, { session, context, project, step, handOff, toSession }) 
     const option = select.selectedOptions[0];
     const fresh = select.value.startsWith("new:");
     const source = currentSession();
-    const configurable = Boolean(source && !source.standing);
+    const configurable = Boolean(source && !source.standing
+      && HANDOVER_PROVIDERS.includes(source.settings?.provider || source.provider || "claude"));
     turning.hidden = !configurable;
     box.classList.toggle("with-turn-options", configurable);
     if (!turning.contains(document.activeElement)) turning.draw();
@@ -10179,9 +10185,14 @@ function codexRequestCard(request) {
     const details = Object.fromEntries(Object.entries({
       command: p.command || p.item?.command, cwd: p.cwd, network: p.networkApprovalContext,
       permissions: p.permissions, changes: p.item?.changes, grantRoot: p.grantRoot,
+      paths: p.paths?.length ? p.paths : undefined,
     }).filter(([, value]) => value !== undefined && value !== null));
     // The whole request, clamped like a Claude call's, since Allow approves all of it (pattern 14).
     content.append(clampedText(`codex-call:${request.id}`, JSON.stringify(details, null, 2), null));
+    // A Gemini or Grok edit's diffs, each under its file (SESSION-30).
+    for (const [at, each] of (p.diffs || []).entries()) {
+      content.append(clampedText(`codex-diff:${request.id}:${at}`, `${each.path}\n${each.diff}`, null));
+    }
     // The folder in plain sight too, as a long command can push it out of the clamped request (PERM-26).
     const folder = callFolder(p.cwd);
     if (folder) content.append(folder);
