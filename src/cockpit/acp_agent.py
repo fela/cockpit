@@ -40,8 +40,9 @@ log = logging.getLogger(__name__)
 PROTOCOL_VERSION = 1
 # How long a request other than a prompt may take before Cockpit gives up on it.
 REQUEST_SECONDS = 60
-# The most of a tool call's title kept in the session log.
-TITLE_MAX = 300
+# What the session log says of a call in place of its title, which can hold the command and its secrets (Gemini titles
+# a shell call with its command): the call's ACP status in words.
+STATUS_LABELS = {"pending": "pending", "in_progress": "running", "completed": "done", "failed": "failed"}
 # The most of one diff a permission card shows; a longer one says how much is left out.
 DIFF_MAX = 20000
 # The method a permission request carries on the page: the request card offers Allow once and Deny for it.
@@ -208,10 +209,13 @@ def _tool_name(call: dict[str, Any]) -> str:
 
 
 def _command(call: dict[str, Any]) -> str:
-    """What a tool call does, in its own words: the command it runs, else its input as JSON."""
+    """What a tool call does, in its own words: the command it runs, else its input as JSON. Gemini sends a shell call
+    with no input, kind `execute` and the command as its title (its ShellToolInvocation.getDisplayTitle)."""
     raw = call.get("rawInput")
     if isinstance(raw, dict) and isinstance(raw.get("command"), str):
         return raw["command"]
+    if not raw and call.get("kind") == "execute" and isinstance(call.get("title"), str):
+        return call["title"]
     return json.dumps(raw, ensure_ascii=False) if raw else ""
 
 
@@ -561,9 +565,9 @@ class AcpAgent:
                 kind = "allow_once" if decision == "accept" else "reject_once"
                 chosen = next(each for each in pending["options"] if each.get("kind") == kind)
                 outcome = {"outcome": "selected", "optionId": chosen["optionId"]}
+            # Written under the lock Stop takes, so an answer is either sent before Stop begins or refused.
             self._pending.pop(key)
-            connection = self._pending_on.pop(key)
-        connection.write({"id": pending["request_id"], "result": {"outcome": outcome}})
+            self._pending_on.pop(key).write({"id": pending["request_id"], "result": {"outcome": outcome}})
         self._record(f"{self.provider}.answered", "user", {"request": key, "session_id": pending["params"]["threadId"],
                                                            "decision": decision})
 
@@ -649,7 +653,6 @@ class AcpAgent:
                     or self._loaded.get(session_id) is not connection):
                 return
         kind = update.get("sessionUpdate")
-        home = str(Path.home())
         if kind == "agent_message_chunk":
             content = update.get("content") or {}
             if content.get("type") == "text" and isinstance(content.get("text"), str):
@@ -668,7 +671,7 @@ class AcpAgent:
             call_id = str(update.get("toolCallId") or "")
             row = self._add_part(session_id, {
                 "at": _now(), "kind": "call", "id": call_id, "tool_name": _tool_name(update),
-                "title": str(update.get("title") or "").replace(home, "~")[:TITLE_MAX],
+                "title": STATUS_LABELS.get(update.get("status"), "pending"),
                 "error": update.get("status") == "failed",
             }, call_id)
             with self._lock:
@@ -680,8 +683,8 @@ class AcpAgent:
             if row is None:
                 return
             changes: dict[str, Any] = {}
-            if update.get("title"):
-                changes["title"] = str(update["title"]).replace(home, "~")[:TITLE_MAX]
+            if update.get("status") in STATUS_LABELS:
+                changes["title"] = STATUS_LABELS[update["status"]]
             if update.get("status") in {"failed", "completed"}:
                 changes["error"] = update["status"] == "failed"
             if changes:

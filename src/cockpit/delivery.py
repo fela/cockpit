@@ -1189,10 +1189,10 @@ class Deliverer:
                          options.get("model") or offered["models"][0][0], options.get("effort") or offered["effort"],
                          options.get("speed") or "standard")
                 try:
-                    if provider == "codex":
-                        sid = self.codex.start_for_message(*start)
-                    elif isinstance(self.codex, Agents):
+                    if isinstance(self.codex, Agents):
                         sid = self.codex.start_for_message(*start, provider=provider)
+                    elif provider == "codex":
+                        sid = self.codex.start_for_message(*start)
                     else:
                         raise DeliveryError(f"{name} is not enabled in setup.toml")
                 except CodexError as exc:
@@ -1237,7 +1237,7 @@ class Deliverer:
             acp = conn.execute("SELECT provider FROM acp_sessions WHERE session_id = ?", (message["session_id"],)).fetchone()
         finally:
             conn.close()
-        if is_codex and self.codex is None:
+        if is_codex and (self.codex is None or not self.codex.owns(message["session_id"])):
             raise DeliveryError(
                 "This message goes to a Codex thread, and Codex is not enabled in setup.toml. Cockpit cannot deliver"
                 " it to Claude instead."

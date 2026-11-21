@@ -163,8 +163,8 @@ Gemini approves file edits by itself and asks before anything else; Grok asks be
 tool call. A request either one makes appears as a card on Cockpit, as Codex's do, with the
 command, files and diff the agent sent. Cockpit runs one agent process per model and working
 folder, so a checkout's `.env` reaches only that checkout's sessions. The session view shows
-each session's messages and tool calls by name and title; Cockpit keeps no call input or
-output.
+each session's messages and each tool call's kind and status; Cockpit keeps no call title,
+input or output.
 
 These agents are the server's children. A Cockpit restart ends their running turns and marks
 them failed, and the session's next message loads it again. Cockpit shows no usage meters for

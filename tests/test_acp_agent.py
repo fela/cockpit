@@ -13,8 +13,10 @@ from typing import Any
 
 import pytest
 
-from cockpit import config, db, parts, server
+from cockpit import config, db, parts, server, sweeper
 from cockpit.acp_agent import PERMISSION_METHOD, AcpAgent, AcpError, Agents, agent_args
+from tests.conftest import SESSION_A, make_session
+from tests.test_api import put_item, put_step
 from tests.test_setup import write_setup
 
 FAKE = Path(__file__).parent / "fake_acp.py"
@@ -99,7 +101,7 @@ def test_a_session_streams_its_turn_into_the_log(gemini: AcpAgent, tmp_path: Pat
     assert log["parts"][0]["text"] == "Say hello"  # the control-plane words Cockpit adds stay out
     call = log["parts"][2]
     assert {key: call[key] for key in ("tool_name", "title", "error")} == {
-        "tool_name": "read", "title": "Read README.md", "error": False}
+        "tool_name": "read", "title": "done", "error": False}
     assert "text" not in call and "result" not in call  # a call's input and output stay out of the database
     conn = db.connect(db_path)
     try:
@@ -416,3 +418,94 @@ def test_without_an_acp_provider_nothing_of_them_runs_or_shows(world, monkeypatc
     state = world.client.get("/api/state", headers=world.user()).json()
     assert set(state["session_options"]) <= {"claude", "codex"}
     assert not isinstance(world.deliverer.codex, Agents)
+
+
+def test_a_gemini_shell_call_shows_its_command_and_keeps_it_out_of_the_log(gemini: AcpAgent, tmp_path: Path,
+                                                                            db_path: Path) -> None:
+    sid = start(gemini, tmp_path, "[[SHELL]] run the tests", "auto")
+    wait_until(lambda: gemini.requests())
+    [request] = gemini.requests()
+    assert (request["params"]["command"], request["params"]["availableDecisions"]) == (
+        "make test TOKEN=s3cret", ["accept", "decline", "cancel"])
+    gemini.answer(request["id"], {"decision": "accept"})
+    wait_until(lambda: idle(gemini, sid))
+    [call] = [part for part in gemini.log(sid)["parts"] if part["kind"] == "call"]
+    assert (call["tool_name"], call["title"]) == ("execute", "done")
+    conn = db.connect(db_path)
+    try:
+        stored = " ".join(row["part"] for row in conn.execute("SELECT part FROM acp_log"))
+        events = " ".join(row["data"] for row in conn.execute("SELECT data FROM events"))
+    finally:
+        conn.close()
+    assert "s3cret" not in stored and "s3cret" not in events
+
+
+def test_an_answer_is_written_under_the_lock_stop_takes(gemini: AcpAgent, tmp_path: Path) -> None:
+    sid = start(gemini, tmp_path, "[[ASK]] run the tests", "auto")
+    wait_until(lambda: gemini.requests())
+    [request] = gemini.requests()
+    real = gemini._pending_on[request["id"]]
+    held: list[bool] = []
+
+    class Watched:
+        def write(self, message: dict) -> None:
+            held.append(gemini._lock._is_owned())
+            real.write(message)
+
+    gemini._pending_on[request["id"]] = Watched()
+    gemini.answer(request["id"], {"decision": "accept"})
+    wait_until(lambda: idle(gemini, sid))
+    assert held == [True]
+
+
+def test_the_sweeper_ignores_the_acp_agents_requests_and_answers() -> None:
+    assert {"gemini.requested", "gemini.answered", "grok.requested", "grok.answered"} <= set(sweeper.QUIET_KINDS)
+
+
+def test_a_codex_start_goes_to_codex_while_an_acp_agent_is_on(world, monkeypatch: pytest.MonkeyPatch) -> None:
+    setup = config.setup()
+    monkeypatch.setattr(config, "setup", lambda: dataclasses.replace(setup, providers=("claude", "codex", "gemini")))
+    codex = FakeCodex()
+    world.deliverer.codex = Agents(codex, {"gemini": AcpAgent(world.db_path, "gemini")})
+    world.deliverer.enabled_providers = ("claude", "codex", "gemini")
+    response = world.client.post("/api/messages", json={"text": "Say hello", "target": {
+        "new_cwd": str(world.checkout), "provider": "codex"}}, headers=world.user())
+    assert response.status_code == 200, response.text
+    sent = world.client.get(f"/api/messages/{response.json()['id']}").json()
+    assert (sent["state"], sent["detail"], sent["session_id"]) == ("sent", "started a Codex thread", "t")
+    [args] = codex.started
+    assert args[3].endswith("Say hello")
+
+
+def test_a_codex_thread_is_not_delivered_while_only_an_acp_agent_is_on(world) -> None:
+    conn = db.connect(world.db_path)
+    try:
+        conn.execute("INSERT INTO codex_threads (session_id, name, cwd, updated_at) VALUES (?, 'c', '/tmp', ?)",
+                     (SESSION_A, db.now_iso()))
+    finally:
+        conn.close()
+    world.deliverer.codex = Agents(None, {"gemini": AcpAgent(world.db_path, "gemini")})
+    response = world.client.post("/api/messages", json={"text": "hi", "target": {"session_id": SESSION_A}},
+                                 headers=world.user())
+    sent = world.client.get(f"/api/messages/{response.json()['id']}").json()
+    assert sent["state"] == "failed" and "Codex is not enabled" in sent["detail"]
+    assert world.runner.calls == []
+
+
+def test_the_board_shows_a_step_for_a_gemini_session(world) -> None:
+    conn = db.connect(world.db_path)
+    try:
+        conn.execute("INSERT INTO acp_sessions (session_id, provider, name, cwd, model, state, updated_at)"
+                     " VALUES (?, 'gemini', 'g', '/tmp', 'pro', 'done', ?)", (SESSION_A, db.now_iso()))
+    finally:
+        conn.close()
+    world.cache.sessions = [dataclasses.replace(make_session(SESSION_A, pid=None), provider="gemini")]
+    put_item(world)
+    put_step(world, session_id=SESSION_A)
+    response = world.client.get("/api/state", headers=world.user())
+    assert response.status_code == 200, response.text
+    state = response.json()
+    step = state["queue"][0]
+    assert (step["target"]["provider"], step["cache"]) == ("gemini", None)
+    [row] = [each for each in state["sessions"] if each["session_id"] == SESSION_A]
+    assert (row["model"], row["settings"]["provider"], row["settings"]["model"]) == ("pro", "gemini", "pro")

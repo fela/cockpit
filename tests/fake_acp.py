@@ -7,6 +7,7 @@ words:
 - "[[EDIT]]": the same for a file edit, which names its file and proposes a diff.
 - "[[ALWAYS]]": the same for a command, offering only allow-always and reject-once.
 - "[[VAGUE]]": the same for a call that says nothing of what it does.
+- "[[SHELL]]": the same for a shell command as Gemini sends one: kind `execute`, the command as its title, no input.
 - one holding "[[WAIT]]": nothing until the client cancels the turn.
 - anything else: "Hello from the fake" in two chunks and one finished tool call.
 `session/load` replays one old message before it answers, which the client must not log again.
@@ -54,6 +55,7 @@ CALLS = {
                    [{"optionId": "always", "name": "Always", "kind": "allow_always"},
                     {"optionId": "no", "name": "Reject", "kind": "reject_once"}]),
     "[[VAGUE]]": ({"title": "Do something"}, ONCE),
+    "[[SHELL]]": ({"title": "make test TOKEN=s3cret", "kind": "execute", "content": [], "locations": []}, ONCE),
 }
 
 

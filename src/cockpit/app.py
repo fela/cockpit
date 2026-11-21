@@ -2207,7 +2207,9 @@ def create_app(
         # The model a Claude session's latest own call ran on, which the step menu names.
         models = spend_index.latest_models()
         # What the prompt cache of the session that gets each step's answer holds, and until when.
-        caches = {"claude": spend_index.caches(), "codex": codex_index.caches()}
+        # Cockpit reads no prompt cache for the ACP agents (SPEC SESSION-30).
+        caches = {"claude": spend_index.caches(), "codex": codex_index.caches(),
+                  **{provider: {} for provider in config.ACP_PROVIDERS}}
         for group in ("queue", "ready_next", "snoozed", "with_agents"):
             for step in result[group]:
                 target = step["target"]
@@ -2216,11 +2218,15 @@ def create_app(
         checkpoint("spend")
         codex_settings = {each["session_id"]: dict(each) for each in conn.execute(
             "SELECT session_id, model, effort, speed FROM codex_threads")}
+        acp_models = dict(conn.execute("SELECT session_id, model FROM acp_sessions").fetchall())
         transcript_usages = view.usages
         checkpoint("transcripts")
         for row in result["sessions"]:
             row["spend"] = spent.get(row["session_id"])
-            if row.get("provider") != "codex":
+            if row.get("provider") in config.ACP_PROVIDERS:
+                row["model"] = acp_models.get(row["session_id"])
+                row["settings"] = {"provider": row["provider"], "model": row["model"], "effort": None, "speed": None}
+            elif row.get("provider") != "codex":
                 row["model"] = models.get(row["session_id"])
                 latest = conn.execute(
                     "SELECT new_options FROM messages WHERE session_id = ? AND state = 'sent'"
@@ -2239,7 +2245,7 @@ def create_app(
                 row["model"] = chosen.get("model")
                 row["settings"] = {"provider": "codex", **{key: chosen.get(key) for key in ("model", "effort", "speed")}}
             row["handover"] = handovers.status(conn, row["session_id"])
-            choices = dict(local_capacity.get(row.get("account"), {})) if local_capacity is not None and row.get("provider") != "codex" else dict(capacity)
+            choices = dict(local_capacity.get(row.get("account"), {})) if local_capacity is not None and row.get("provider") not in ("codex", *config.ACP_PROVIDERS) else dict(capacity)
             row["settings"]["capacity"] = model_capacity.for_session(
                 transcript_usages.get(row["session_id"]), row["settings"]["model"], row["settings"]["provider"], choices, now,
             )
