@@ -1757,6 +1757,26 @@ MIGRATIONS: list[str] = [
         at TEXT NOT NULL
     );
     """,
+    # A briefing is the morning briefing ('daily') or the weekly digest ('weekly', SPEC VIEW-37), one of each kind per
+    # day, so a Sunday holds both.
+    """
+    CREATE TABLE new_briefings (
+        id INTEGER PRIMARY KEY,
+        kind TEXT NOT NULL CHECK (kind IN ('daily', 'weekly')),
+        day TEXT NOT NULL,
+        since TEXT NOT NULL,
+        until TEXT NOT NULL,
+        body TEXT NOT NULL,
+        created_by TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE (kind, day)
+    );
+    INSERT INTO new_briefings (id, kind, day, since, until, body, created_by, created_at, updated_at)
+        SELECT id, 'daily', day, since, until, body, created_by, created_at, updated_at FROM briefings;
+    DROP TABLE briefings;
+    ALTER TABLE new_briefings RENAME TO briefings;
+    """,
     # Sessions on the ACP agents, Gemini and Grok (SPEC SESSION-30, acp_agent.py). A message may ask for one, so
     # messages.provider's check takes them too: the check only widens, every stored row still meets it, so the
     # table's SQL is edited in place (SQLite's documented way to loosen a constraint), which keeps its columns,

@@ -133,3 +133,15 @@ def test_a_wrong_retired_account_stops_with_the_key_it_names(tmp_path: Path, val
     path.write_text(path.read_text() + f"retired_accounts = {value}\n")
     with pytest.raises(config.SetupError, match="retired_accounts must list Claude accounts"):
         config.read_setup(path, parts.setup_tables())
+
+
+def test_optional_features_are_off_unless_the_setup_lists_them(tmp_path: Path) -> None:
+    assert config.read_setup(write_setup(tmp_path, {}), parts.setup_tables()).features == ()
+    path = write_setup(tmp_path, {"features": ["reopen"]})
+    assert config.read_setup(path, parts.setup_tables()).features == ("reopen",)
+
+
+@pytest.mark.parametrize("value", [["nobody"], ["reopen", "reopen"], "reopen", [1]])
+def test_a_wrong_features_list_stops_with_the_key_it_names(tmp_path: Path, value: Any) -> None:
+    with pytest.raises(config.SetupError, match="features must list optional features"):
+        config.read_setup(write_setup(tmp_path, {"features": value}), parts.setup_tables())
