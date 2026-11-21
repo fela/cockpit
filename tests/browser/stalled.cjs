@@ -1,4 +1,5 @@
-// Stalled agent work on a synthetic board (SPEC SWEEP-20).
+// Stalled agent work on a synthetic board (SPEC SWEEP-20): a high item's card and search row carry a red Stalled chip
+// and the row a red edge; a normal item's are grey, with no edge. Each runs at desktop and phone width.
 
 "use strict";
 
@@ -70,13 +71,32 @@ async function main() {
         await route.fulfill({ ...full, json: body }).catch(() => {});
       });
 
-      await page.goto(`${info.origin}/classic`);
-      // Busy and Waiting start folded (VIEW-27); the page keeps them open once opened.
-      await page.locator("#work details.group").first().waitFor({ state: "attached" });
-      await page.evaluate(() => { for (const group of document.querySelectorAll("#work details.group")) group.open = true; });
-      const highRow = page.locator(`#work [data-item="${high.id}"]`).first();
-      const normalRow = page.locator(`#work [data-item="${normal.id}"]`).first();
-      await highRow.waitFor();
+      await page.goto(`${info.origin}/`);
+      // A phone opens on the item screen, with the list out of view.
+      await page.locator("#sidebar .side-item").first().waitFor({ state: "attached" });
+      const chipLook = (chip) => chip.evaluate((el) => ({
+        chip: el.textContent, raised: el.classList.contains("raised"), colour: getComputedStyle(el).color,
+        connected: el.isConnected, card: el.closest("article")?.className,
+      }));
+      // Each item's card carries the chip: red on the high item, grey on the normal one.
+      const cardChip = async (item, name) => {
+        await page.evaluate((id) => showInSidebar(id), item.id);
+        const chip = page.locator(`#next article.item-card[data-item="${item.id}"] .chip.stalled`);
+        await chip.waitFor();
+        // The poll can redraw the card between finding the chip and reading it, which reads no colour.
+        const seen = await waitFor(() => chipLook(chip), (now) => now.colour !== "");
+        // The poll redraws the card, so the screenshot takes the column that holds it.
+        await page.locator("#next").screenshot({ path: path.join(work, `stalled-${name}-card-${width}.png`) });
+        return seen;
+      };
+      const highCard = await cardChip(high, "high");
+      const normalCard = await cardChip(normal, "normal");
+      check(`${width} px: the high item's card says it stalled`, /^Stalled \S/.test(highCard.chip), highCard.chip);
+      check(`${width} px: the high item's chip is red`, highCard.raised, JSON.stringify(highCard));
+      check(`${width} px: the normal item's card says it stalled`, /^Stalled \S/.test(normalCard.chip), normalCard.chip);
+      check(`${width} px: the normal item's chip is grey`, !normalCard.raised && normalCard.colour !== highCard.colour, JSON.stringify(normalCard));
+
+      // A search lists the item as a row: the high row has the red edge, the normal row none.
       const look = (row) => row.evaluate((el) => {
         const chip = el.querySelector(".chip.stalled");
         return {
@@ -87,53 +107,22 @@ async function main() {
           colour: chip ? getComputedStyle(chip).color : "",
         };
       });
-      const highLook = await waitFor(() => look(highRow), (now) => now.chip !== "" && /inset/.test(now.edge));
-      const normalLook = await look(normalRow);
+      const foundRow = async (item, words, name) => {
+        await page.evaluate((text) => setFind(text, false, null, true), words);
+        const row = page.locator(`#work .row[data-item="${item.id}"]`).first();
+        await row.waitFor();
+        const seen = await waitFor(() => look(row), (now) => now.chip !== "" && (item !== high || /inset/.test(now.edge)));
+        await page.locator("#work").screenshot({ path: path.join(work, `stalled-${name}-row-${width}.png`) });
+        return seen;
+      };
+      const highLook = await foundRow(high, "reminder picker", "high");
+      const normalLook = await foundRow(normal, "list export", "normal");
       check(`${width} px: the high row says it stalled`, /^Stalled \S/.test(highLook.chip), highLook.chip);
       check(`${width} px: the high row's chip is red`, highLook.raised, JSON.stringify(highLook));
       check(`${width} px: the high row has the red edge`, highLook.stalledRow && /inset/.test(highLook.edge), JSON.stringify(highLook));
       check(`${width} px: the normal row says it stalled`, /^Stalled \S/.test(normalLook.chip), normalLook.chip);
       check(`${width} px: the normal row's chip is grey`, !normalLook.raised && normalLook.colour !== highLook.colour, JSON.stringify(normalLook));
       check(`${width} px: the normal row has no edge`, !normalLook.stalledRow, JSON.stringify(normalLook));
-      await highRow.screenshot({ path: path.join(work, `stalled-high-row-${width}.png`) });
-      await normalRow.screenshot({ path: path.join(work, `stalled-normal-row-${width}.png`) });
-
-      await page.goto(`${info.origin}/classic`);
-      // The plate of the stage that holds the item opens on hover, and on a tap on a phone.
-      const groupOf = (item) => page.locator("#overview .light-group").filter({ has: page.locator(".light-item", { hasText: item.title }) }).first();
-      await groupOf(high).waitFor({ state: "attached" });
-      const entry = (locator) => locator.evaluate((el) => ({
-        stalled: el.classList.contains("stalled"),
-        words: el.querySelector(".light-stalled")?.textContent || "",
-        lamp: getComputedStyle(el.querySelector(".lamp")).backgroundColor,
-      }));
-      const red = await page.evaluate(() => {
-        const probe = document.createElement("span");
-        probe.style.color = "var(--lamp-red)";
-        document.body.append(probe);
-        const colour = getComputedStyle(probe).color;
-        probe.remove();
-        return colour;
-      });
-      const plateLook = async (item) => {
-        const group = groupOf(item);
-        await group.hover();
-        if (width < 641) await group.click();
-        const found = group.locator(".light-item", { hasText: item.title }).first();
-        await found.waitFor();
-        const seen = await entry(found);
-        await page.mouse.move(0, 0);
-        return seen;
-      };
-      const highEntryLook = await plateLook(high);
-      const normalEntryLook = await plateLook(normal);
-      check(`${width} px: the high item's plate lamp is red`, highEntryLook.stalled && highEntryLook.lamp === red, `${JSON.stringify(highEntryLook)}, red is ${red}`);
-      check(`${width} px: the high item's entry says it stalled`, /^stalled \S/.test(highEntryLook.words), highEntryLook.words);
-      check(`${width} px: the normal item's plate lamp is not red`, !normalEntryLook.stalled && normalEntryLook.lamp !== red, JSON.stringify(normalEntryLook));
-      check(`${width} px: the normal item's entry says it stalled`, /^stalled \S/.test(normalEntryLook.words), normalEntryLook.words);
-      await groupOf(high).hover();
-      if (width < 641) await groupOf(high).click();
-      await page.screenshot({ path: path.join(work, `stalled-board-${width}.png`) });
       check(`${width} px: no page errors`, errors.length === 0, errors.join(" | "));
       await page.unrouteAll({ behavior: "ignoreErrors" });
       await context.close();

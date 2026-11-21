@@ -17,6 +17,7 @@ from fastapi.testclient import TestClient
 from cockpit import cli, config, parts
 from cockpit.app import PART_SCRIPTS, PART_STYLES, STATIC_DIR, create_app, with_part_tags
 from cockpit.parts import Command, Context, Factory, Part, Tags
+from cockpit.views import read as read_view
 from tests.conftest import ORIGIN, World
 from tests.test_cli import route_cli_to
 from tests.test_setup import write_setup
@@ -43,13 +44,13 @@ def stand_in(page_tags: dict[str, Tags], fields: dict[str, Any]) -> tuple[Factor
             assert now.tzinfo is not None
             return fields | {"stand_in_for_user": is_user}
 
-        return Part(register=register, page_tags=page_tags, state=state)
+        return Part(register=register, page_tags=page_tags, state=state, first_scripts=())
 
     return factory, handed
 
 
 def client(world: World, factories: list[Factory]) -> TestClient:
-    app = create_app(world.settings, world.deliverer, world.cache, world.spend_index, world.codex_index, factories)
+    app = create_app(world.settings, world.deliverer, world.cache, world.spend_index, world.codex_index, factories, read_view)
     browser = TestClient(app, base_url=ORIGIN)
     browser.cookies = world.client.cookies
     return browser
@@ -61,9 +62,8 @@ TAGS = Tags(styles=("stand-in.css",), scripts=("stand-in.js",))
 def test_with_no_parts_the_page_keeps_neither_marker_nor_tag(world: World) -> None:
     page = with_part_tags((STATIC_DIR / "index.html").read_text(), [])
     assert PART_STYLES not in page and PART_SCRIPTS not in page
-    for path in ("/", "/classic"):
-        sent = client(world, []).get(path, headers=world.user()).text
-        assert "<!-- part" not in sent and "stand-in" not in sent
+    sent = client(world, []).get("/", headers=world.user()).text
+    assert "<!-- part" not in sent and "stand-in" not in sent
     assert client(world, []).get("/api/stand-in", headers=world.user()).status_code == 404
 
 
@@ -174,9 +174,9 @@ def test_a_part_s_route_with_its_own_key_takes_a_post_from_nobody_signed_in(worl
             app.add_api_route("/api/stand-in/report", report, methods=["POST"])
             app.add_api_route("/api/stand-in/other", report, methods=["POST"])
 
-        return Part(register=register, page_tags={}, state=lambda now, is_user: {})
+        return Part(register=register, page_tags={}, state=lambda now, is_user: {}, first_scripts=())
 
-    app = create_app(world.settings, world.deliverer, world.cache, world.spend_index, world.codex_index, [factory])
+    app = create_app(world.settings, world.deliverer, world.cache, world.spend_index, world.codex_index, [factory], read_view)
     nobody = TestClient(app, base_url=ORIGIN, follow_redirects=False)
     assert nobody.post("/api/stand-in/report").json() == {"actor": "stand-in", "me": None, "origin": ORIGIN}
     # The user's cookie counts for nothing there, and the path opens no other route of the part.
@@ -216,8 +216,8 @@ def test_the_base_app_has_only_its_own_state_fields(world: World) -> None:
 
 
 def test_base_install_sends_native_model_names() -> None:
-    assert config.codex_model("gpt-6.1-sol", "ultrafast") == "gpt-6.1-sol"
-    assert config.codex_model("gpt-6-astra", "ultrafast") == "gpt-6-astra"
+    assert config.codex_model("gpt-6.2-sol", "ultrafast") == "gpt-6.2-sol"
+    assert config.codex_model("gpt-6.2-astra", "ultrafast") == "gpt-6.2-astra"
 
 
 def test_a_part_hides_items_until_opened_by_id(world: World, monkeypatch: pytest.MonkeyPatch) -> None:

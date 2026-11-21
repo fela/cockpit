@@ -45,7 +45,7 @@ let browser;
   page.setDefaultTimeout(8000);
   const errors = [];
   page.on("pageerror", (error) => errors.push(error.message));
-  await page.goto(origin + "/classic");
+  await page.goto(origin + "/");
   await page.locator("#next [data-step]").waitFor();
   const failed = [];
   // Each check runs on its own: a failure is printed and the next check still runs.
@@ -132,7 +132,7 @@ let browser;
       localStorage.setItem("cockpit.drafts", JSON.stringify([...drafts]));
       localStorage.setItem("cockpit.draft-targets", "[]");
     }, left);
-    await page.goto(origin + "/classic");
+    await page.goto(origin + "/");
     await page.locator("#next [data-step]").waitFor();
   });
 
@@ -318,7 +318,9 @@ let browser;
         : route.fulfill({ contentType: "application/json", body: JSON.stringify(briefing) });
     });
     await page.goto(origin + "/briefing");
-    for (let at = 0; bodyAsks < 1 && at < 40; at++) await delay(100);
+    // The connection comes back once the failure shows: an `online` event while a request is on its way also ends
+    // that request and sends it again at once (errors.js), which would ask for the text a third time.
+    await page.getByText("Cockpit could not load the briefing").waitFor();
     await page.evaluate(() => window.dispatchEvent(new Event("online")));
     await page.locator("#briefing .briefing-body").filter({ hasText: "Race fixes landed." }).waitFor();
     assert.equal(bodyAsks, 2);

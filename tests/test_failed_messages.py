@@ -1,4 +1,4 @@
-"""Failed messages: the plain sentence on what failed, dismiss and restore, and `cockpit get`'s list (SPEC MSG-5)."""
+"""Failed messages: the plain sentence on what failed, dismiss, and `cockpit get`'s list (SPEC MSG-5)."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import json
 
 import pytest
 
-from cockpit import cli, db, store, sweeper
+from cockpit import cli, config, db, store, sweeper
 from tests.conftest import SESSION_A, World, make_session
 from tests.test_api import agent_client, run_sql
 from tests.test_cli import route_cli_to
@@ -125,7 +125,7 @@ def test_a_new_session_that_may_have_started_says_so() -> None:
     )
 
 
-def test_user_and_agents_dismiss_a_failed_message_and_user_restores_it(world: World) -> None:
+def test_user_and_agents_dismiss_a_failed_message(world: World) -> None:
     launch, note = fail_two(world)
     assert failed_count(world) == 2
     agent = agent_client(world)
@@ -160,18 +160,10 @@ def test_user_and_agents_dismiss_a_failed_message_and_user_restores_it(world: Wo
     assert again.status_code == 409 and "already dismissed by agent:sweep" in again.json()["detail"]
     assert dismiss(999, "gone").status_code == 404
     retried = world.client.post(f"/api/messages/{launch['id']}/retry", headers=world.user())
-    assert retried.status_code == 409 and "Sam restores it before a retry" in retried.json()["detail"]
-
-    assert agent.post(f"/api/messages/{launch['id']}/restore", headers=world.agent()).status_code == 403
-    restored = world.client.post(f"/api/messages/{launch['id']}/restore", headers=world.user())
-    assert restored.status_code == 200
-    assert [restored.json()[key] for key in ("dismissed_at", "dismissed_by", "dismiss_reason")] == [None, None, None]
-    assert world.client.post(f"/api/messages/{launch['id']}/restore", headers=world.user()).status_code == 409
-    assert world.client.post("/api/messages/999/restore", headers=world.user()).status_code == 404
-    assert failed_count(world) == 1
+    assert retried.status_code == 409 and "a dismissed message is not retried" in retried.json()["detail"]
 
     # Only a failed message can be dismissed.
-    run_sql(world, "UPDATE messages SET state = 'sent' WHERE id = ?", (launch["id"],))
+    run_sql(world, "UPDATE messages SET state = 'sent', dismissed_at = NULL WHERE id = ?", (launch["id"],))
     sent = dismiss(launch["id"], "fine")
     assert sent.status_code == 409
     assert (
@@ -182,7 +174,7 @@ def test_user_and_agents_dismiss_a_failed_message_and_user_restores_it(world: Wo
     conn = db.connect(world.db_path)
     try:
         events = [(row["kind"], row["actor"], row["item_id"], json.loads(row["data"])) for row in conn.execute(
-            "SELECT * FROM events WHERE kind IN ('message.dismissed', 'message.restored') ORDER BY id"
+            "SELECT * FROM events WHERE kind = 'message.dismissed' ORDER BY id"
         )]
     finally:
         conn.close()
@@ -190,9 +182,44 @@ def test_user_and_agents_dismiss_a_failed_message_and_user_restores_it(world: Wo
         ("message.dismissed", "agent:sweep", None,
          {"message_id": launch["id"], "reason": "the item has a working session since 10:00"}),
         ("message.dismissed", "user", None, {"message_id": note["id"], "reason": None}),
-        ("message.restored", "user", None, {"message_id": launch["id"]}),
     ]
-    assert {"message.dismissed", "message.restored"} <= set(sweeper.QUIET_KINDS)
+    assert "message.dismissed" in sweeper.QUIET_KINDS
+
+
+@pytest.mark.parametrize("author", ["user", "agent:app-pr"])
+def test_recovery_retries_the_unchanged_original_and_records_the_agent(world: World, monkeypatch, author) -> None:
+    conn = db.connect(world.db_path)
+    try:
+        target = {"session_id": SESSION_A}
+        if author == "user":
+            target.update(provider="claude", model=config.MAIN_MODEL, effort="high")
+        message = store.create_message(conn, author, "Keep these exact instructions", target, world.checkout.parent)
+        conn.execute("UPDATE messages SET state = 'failed', detail = 'temporary failure' WHERE id = ?", (message["id"],))
+        original = store.get_message(conn, message["id"])
+    finally:
+        conn.close()
+    deliveries = []
+    monkeypatch.setattr(world.deliverer, "send", deliveries.append)
+    agent = agent_client(world)
+    retried = agent.post(f"/api/messages/{message['id']}/retry", headers=world.agent("sweep"))
+    assert retried.status_code == 200, retried.text
+    assert retried.json()["state"] == "queued"
+    for key in ("id", "author", "text", "session_id", "provider", "new_options", "as_prompt", "created_at"):
+        assert retried.json()[key] == original[key]
+    assert retried.json()["reopened"] is False
+    assert deliveries == [message["id"]]
+    duplicate = agent.post(f"/api/messages/{message['id']}/retry", headers=world.agent("sweep"))
+    assert duplicate.status_code == 409
+    assert deliveries == [message["id"]]
+    conn = db.connect(world.db_path)
+    try:
+        events = conn.execute("SELECT actor, data FROM events WHERE kind = 'message.retried'").fetchall()
+    finally:
+        conn.close()
+    assert [(row["actor"], json.loads(row["data"])) for row in events] == [
+        ("agent:sweep", {"message_id": message["id"]}),
+    ]
+    assert "message.retried" in sweeper.QUIET_KINDS
 
 
 def test_a_dismissed_failure_leaves_the_state_once_30_newer_messages_came(world: World) -> None:
@@ -252,7 +279,7 @@ def test_cockpit_get_lists_failed_messages_for_the_sweeper_to_dismiss_or_retry(
 
     text = cli.summary(world.client.get("/api/state").json())
     assert "dismiss it: `cockpit message dismiss ID --reason TEXT --as NAME`" in cli.FAILED_HEAD
-    assert "Retry your own with `cockpit message retry ID --as NAME`" in cli.FAILED_HEAD
+    assert "retry the unchanged original with `cockpit message retry ID --as NAME`, whoever sent it" in cli.FAILED_HEAD
     lines = text.splitlines()
     head = lines.index(cli.FAILED_HEAD.splitlines()[-1])
     assert lines[head + 1: head + 5] == [
@@ -277,10 +304,10 @@ def test_cockpit_get_lists_failed_messages_for_the_sweeper_to_dismiss_or_retry(
     assert cli.main(["message", "dismiss", str(launch["id"]), "--reason", "again", "--as", "sweep"]) == 1
     assert "HTTP 409" in capsys.readouterr().err
 
-    # A retry goes out again and waits for the outcome; an agent retries only its own.
+    # A dismissed message stays dismissed; any agent may retry a remaining failure.
     assert cli.main(["message", "retry", str(launch["id"]), "--as", "sweep"]) == 1
-    assert "HTTP 403" in capsys.readouterr().err
-    assert cli.main(["message", "retry", str(note["id"]), "--as", "app-pr"]) == 1
+    assert "HTTP 409" in capsys.readouterr().err
+    assert cli.main(["message", "retry", str(note["id"]), "--as", "sweep"]) == 1
     assert capsys.readouterr().err == f"cockpit: message {note['id']} failed: No Claude session {SESSION_A} on this machine\n"
     world.client.post(f"/api/messages/{note['id']}/dismiss", json={"reason": None}, headers=world.user())
     assert cli.FAILED_HEAD not in cli.summary(world.client.get("/api/state").json())

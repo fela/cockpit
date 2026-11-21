@@ -8,7 +8,7 @@ const work = workFolder("cockpit-busy-reasons-");
 const blocked = "33333333-3333-4333-8333-333333333333";
 fs.writeFileSync(path.join(work, "sessions.json"), JSON.stringify([{
  id:blocked.slice(0,8), session_id:blocked, name:"Blocked test", state:"blocked", pid:103,
- status:"idle", tempo:"blocked", job_state:"blocked", in_flight:[], cwd:work,
+ status:"busy", tempo:"blocked", job_state:"blocked", in_flight:["local_bash"], cwd:work,
  detail:"API Error 429: rate_limit_error", needs:"rate limited", intent:"",
  updated_at:new Date().toISOString(), links:[], effort:"high", version:"test", account:"personal", provider:"claude"
 }]));
@@ -24,6 +24,13 @@ const pause=ms=>new Promise(r=>setTimeout(r,ms));
   for(const [key,title,sid] of [["working","Prepare weekly reminders","22222222-2222-4222-8222-222222222222"],["blocked","Build list exports",blocked]]){
    const r=await fetch(`${info.origin}/api/items`,{method:"PUT",headers,body:JSON.stringify({key:`note:${key}`,title,stage:"building",sessions:[sid]})}); assert(r.ok,await r.text());
   }
+  const addedResponse=await fetch(`${info.origin}/api/items/add`, {method:"POST",
+   headers:{cookie,"content-type":"application/json",origin:info.origin}, body:JSON.stringify({text:"Inspect stopped agent",part:null,pinned:false})});
+  assert(addedResponse.ok,await addedResponse.clone().text());
+  const added=await addedResponse.json();
+  const stoppedResponse=await fetch(`${info.origin}/api/items`,{method:"PUT",headers,
+   body:JSON.stringify({key:added.key,sessions:["11111111-1111-4111-8111-111111111111"]})});
+  assert(stoppedResponse.ok,await stoppedResponse.text());
   browser=await chromium.launch({executablePath:process.env.BROWSER_EXECUTABLE});
   for(const width of [1280,390]){
    const context=await browser.newContext({viewport:{width,height:900},colorScheme:"light",extraHTTPHeaders:{cookie}});
@@ -35,6 +42,9 @@ const pause=ms=>new Promise(r=>setTimeout(r,ms));
    await page.locator("#sidebar .sidebar-activity",{hasText:"Working now"}).first().waitFor();
    await page.locator("#sidebar .sidebar-group.waiting .sidebar-activity",{hasText:"Claude rate limit"}).waitFor();
    assert.equal(await page.locator("#sidebar .sidebar-group.busy .sidebar-activity",{hasText:"Claude rate limit"}).count(),0);
+   await page.locator(`#sidebar .sidebar-group.waiting li[data-item="${added.id}"]`).waitFor({state:"attached"});
+   assert.equal(await page.locator(`#sidebar .sidebar-group.busy li[data-item="${added.id}"]`).count(),0,
+    "A just-added task whose agent stopped must leave Busy");
    assert.deepEqual(errors,[]);assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),"page overflows");
    await page.screenshot({path:path.join(work,`busy-reasons-${width}.png`)});await context.close();
   }

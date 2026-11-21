@@ -239,3 +239,40 @@ def test_a_venv_linked_outside_the_copy_runs_here_and_says_so(
     assert offload.run(".venv/bin/python -m pytest", worktree, {"PATH": "/usr/bin"}) == 0
     assert sent == ["there wt", "here wt"]
     assert f"{worktree / '.venv'} links to {other / '.venv'}" in capsys.readouterr().err
+
+
+
+def _fake_rsync(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, codes: list[int], error: str) -> Path:
+    """Put an rsync on PATH that exits with each of `codes` in turn and logs one line per run."""
+    bin_dir, runs = tmp_path / "bin", tmp_path / "runs"
+    bin_dir.mkdir()
+    cases = " ".join(f"{index}) exit {code};;" for index, code in enumerate(codes))
+    (bin_dir / "rsync").write_text(
+        f"#!/bin/sh\necho run >> {runs}\necho '{error}' >&2\ncase $(($(wc -l < {runs}) - 1)) in {cases} esac\n"
+    )
+    (bin_dir / "rsync").chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_dir}:/usr/bin:/bin")
+    return runs
+
+
+def test_a_copy_there_that_saw_files_vanish_runs_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    vanished = 'file has vanished: "/repo/.git/objects/maintenance.lock"'
+    runs = _fake_rsync(tmp_path, monkeypatch, [24, 0], vanished)
+    offload._push(offload.Plan(host="box", roots=(tmp_path,), ran_in=(tmp_path,), extras=(), mains=(tmp_path,)))
+    assert len(runs.read_text().splitlines()) == 2
+    assert f"Copying again, as files vanished during the copy: {vanished}" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("codes", "retry_vanished", "runs_made"),
+    [([24, 24, 24, 0], True, 3), ([23, 0], True, 1), ([24, 0], False, 1)],
+)
+def test_rsync_fails_on_other_errors_on_vanishing_on_the_way_back_and_when_files_keep_vanishing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, codes: list[int], retry_vanished: bool, runs_made: int
+) -> None:
+    runs = _fake_rsync(tmp_path, monkeypatch, codes, "rsync error")
+    with pytest.raises(offload.OffloadError, match=f"failed \\({codes[runs_made - 1]}\\): rsync error"):
+        offload._rsync("a/", "box:a/", retry_vanished=retry_vanished)
+    assert len(runs.read_text().splitlines()) == runs_made

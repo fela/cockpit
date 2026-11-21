@@ -1,8 +1,9 @@
 // A step the user opened or started answering keeps its place. On a synthetic database, with the seeded steps
-// snoozed, puts four steps, each on a normal item of its own, presses Next up without starting its timer, and types
-// in a queue row's reply box. Then urgent steps scored 95 arrive, each on an urgent item of its own: Next up and the
-// row keep their places on the page and on the server, and Next up shows Resorted, whose press shows the urgent step
-// first. Then an opened row shows Resorted while urgent steps wait in Ready next, and its press takes one to Next up.
+// snoozed, puts four steps, each on a normal item of its own and the first long, presses Next up without starting
+// its timer, opens the second step's row in the list on the left from the keyboard and types in its reply box.
+// Then urgent steps scored 95 arrive, each on an urgent item of its own: both steps keep their places on the page
+// and on the server, and Next up shows Resorted, whose press shows the urgent step first. Then the first step's
+// card, opened from its row, shows Resorted while urgent steps wait in Ready next, and its press takes one to Next up.
 // Saves screenshots of Next up with Resorted (desktop light and dark, phone) to the work folder.
 //
 // Starts serve_preview.py (this checkout's Cockpit on a synthetic database; README.md says what it needs) and drives
@@ -51,11 +52,16 @@ async function main() {
     // One normal item per step: an item shows one card at a time (SPEC NEXT-55).
     const asks = [["Batch job order", "Change the batch job order?"], ["Export fix", "Merge the export fix?"],
       ["Export result", "Read the export result"], ["Reply to Alex", "Reply to Alex?"]];
+    // The first step is long once its details are open, so the page scrolls past its card's top for the Resorted
+    // checks below.
+    const paragraph = "The nightly run and the export share one queue, so the order decides which finishes first. ";
+    const long = { details: [1, 2, 3].map((n) => ({ title: `Run ${n} of the batch job`, body: paragraph.repeat(20) })) };
     const steps = [];
     for (const [n, [title, ask]] of asks.entries()) {
       const key = `note:held-step-${stamp}-${n}`;
       await call(AGENT, "PUT", "/api/items", { key, title, stage: "building", sessions: [SESSION_B] });
-      steps.push((await call(AGENT, "POST", "/api/steps", { item_key: key, need: `n${n}`, ask, session_id: SESSION_B, score: 60 - 10 * n })).step);
+      steps.push((await call(AGENT, "POST", "/api/steps", { item_key: key, need: `n${n}`, ask, ...(n === 0 ? long : {}),
+        session_id: SESSION_B, score: 60 - 10 * n })).step);
     }
     const queued = async () => (await call(user, "GET", "/api/state")).queue.map((step) => step.id);
 
@@ -66,18 +72,19 @@ async function main() {
     page.setDefaultTimeout(5000);
     const errors = [];
     page.on("pageerror", (error) => errors.push(error.message));
-    await page.goto(`${info.origin}/classic`);
+    await page.goto(`${info.origin}/`);
     await page.locator(`#next [data-step="${steps[0].id}"]`).waitFor();
 
     // Opening: a press on Next up's ask, with no timer.
     await page.locator("#next .ask").click();
     const timer = await page.evaluate(() => Boolean(ui.state.timer));
     check("pressing Next up starts no timer", !timer, "a timer runs");
-    // Opening the second step's row from the keyboard (J to it, O to open) holds it too; moving the highlight alone does not.
+    // Opening the second step's row in the list on the left from the keyboard (J to it, O to open) holds it too;
+    // moving the highlight alone does not.
     let highlighted = false;
-    for (let n = 0; n < 6 && !highlighted; n++) {
+    for (let n = 0; n < 30 && !highlighted; n++) {
       await page.keyboard.press("j");
-      highlighted = await page.evaluate((id) => Boolean(document.querySelector(`#queue .row[data-step="${id}"].keyboard-current`)), steps[1].id);
+      highlighted = await page.evaluate((id) => Boolean(document.querySelector(`#sidebar li.side-item[data-step="${id}"].keyboard-current`)), steps[1].id);
     }
     const heldByMove = await page.evaluate((id) => ui.placed.has(id), steps[1].id);
     await page.keyboard.press("o");
@@ -85,8 +92,8 @@ async function main() {
     const heldByOpen = await page.evaluate((id) => ui.placed.has(id), steps[1].id);
     check("J moves the highlight without holding; O opens the row and holds it", highlighted && !heldByMove && heldByOpen,
       `highlighted ${highlighted}, held by the move ${heldByMove}, by the open ${heldByOpen}`);
-    // Answering: typing in the second step's reply box.
-    const box = page.locator(`#queue textarea[data-key="msg:step:${steps[1].id}"]`);
+    // Answering: typing in the reply box of the second step's card, which O showed.
+    const box = page.locator(`#next .next-card[data-step="${steps[1].id}"] textarea[data-key="msg:step:${steps[1].id}"]`);
     await box.waitFor();
     await box.fill("Looks right; one question first");
     await sleep(500);
@@ -106,9 +113,8 @@ async function main() {
     check("the pressed and the answered step keep their places on the server", queue.includes(steps[0].id) && queue.includes(steps[1].id), queue.join(","));
     check("the steps the user did not touch gave way", !queue.includes(steps[2].id) && !queue.includes(steps[3].id), queue.join(","));
 
-    // A poll leaves the queue alone while the user types in it; back on Next up, it redraws, once a poll
-    // brought all four urgent steps.
-    await page.locator("#next .ask").click();
+    // Back on Next up, the page redraws once a poll brought all four urgent steps.
+    await page.evaluate(() => selectItem(null));
     await page.waitForFunction((ids) => ids.every((id) => [...ui.state.queue, ...ui.state.ready_next].some((s) => s.id === id)),
       urgent.map((step) => step.id), { timeout: 20e3 });
     const resorted = "#next > .resorted-pin > .reorder.resorted";
@@ -122,7 +128,7 @@ async function main() {
     check("its tooltip names the stronger step and its score", tip.includes("Reminder dates missing") && tip.includes("score 95"),
       `${tip} | ${await page.evaluate(() => JSON.stringify({ first: ui.state.queue[0].item, ids: ui.state.queue.map((s) => s.id) }))}`);
     const order = await page.evaluate(() => ui.order);
-    check("the answered row keeps its place under Next up", order[1] === steps[1].id, order.join(","));
+    check("the answered step keeps its place under Next up", order[1] === steps[1].id, order.join(","));
     const look = shown ? await page.locator(resorted).evaluate((el) => [getComputedStyle(el).color,
       getComputedStyle(document.querySelector("#next .info-mark") || document.body).color]) : ["", ""];
     check("Resorted is orange, unlike the grey marks beside it", look[0] !== "" && look[0] !== look[1], look.join(" vs "));
@@ -136,6 +142,7 @@ async function main() {
     if (shown) {
       await page.screenshot({ path: path.join(work, "resorted-top.png") });
       await page.setViewportSize({ width: 1280, height: 420 });
+      for (const fold of await page.locator("#next .next-card .details details.detail > summary").all()) await fold.click();
       const kept = await page.evaluate(async (sel) => {
         const card = document.querySelector("#next .next-card");
         const header = document.querySelector(".top").getBoundingClientRect().bottom;
@@ -173,7 +180,7 @@ async function main() {
       const wide = await page.evaluate(() => {
         const next = document.querySelector("#next");
         const card = next.querySelector(".next-card").getBoundingClientRect();
-        const over = [...next.querySelectorAll(".step-context *")].filter((el) => el.getBoundingClientRect().right > Math.min(card.right, window.innerWidth) + 1)
+        const over = [...next.querySelectorAll(":is(.step-context, .destination-heading) *")].filter((el) => el.getBoundingClientRect().right > Math.min(card.right, window.innerWidth) + 1)
           .map((el) => `${el.tagName.toLowerCase()}.${[...el.classList].join(".")} ${Math.round(el.getBoundingClientRect().right)}/${Math.round(card.right)}/${window.innerWidth}`);
         return { page: document.documentElement.scrollWidth - window.innerWidth, over: over.slice(0, 8) };
       });
@@ -197,11 +204,13 @@ async function main() {
       check("the pressed step stays in the queue after Resorted", after.includes(steps[0].id), after.join(","));
 
       // The first opened step still holds its place, and an urgent step waits in Ready next. Opening that
-      // step's row shows Resorted on it, and its press takes the waiting urgent step to Next up.
-      await page.locator(`#queue .row[data-step="${steps[0].id}"] .row-title`).click();
-      const rowKey = `#queue .row[data-step="${steps[0].id}"] .reorder.resorted`;
+      // step's row in the list on the left shows its card with Resorted, and its press takes the waiting urgent
+      // step to Next up.
+      await page.locator(`#sidebar li.side-item[data-step="${steps[0].id}"] .side-row`).click();
+      await page.locator(`#next .next-card[data-step="${steps[0].id}"]`).waitFor();
+      const rowKey = resorted;
       const rowShown = await page.waitForSelector(rowKey, { timeout: 15e3 }).then(() => true, () => false);
-      check("with urgent work waiting in Ready next, the opened row shows Resorted", rowShown,
+      check("with urgent work waiting in Ready next, the opened step's card shows Resorted", rowShown,
         await page.evaluate(() => `order ${ui.order.join(",")}; ready ${ui.state.ready_next.map((s) => s.id).join(",")}; placed ${[...ui.placed].join(";")}`));
       if (rowShown) {
         await page.locator(rowKey).click({ noWaitAfter: true, timeout: 15e3 });

@@ -1613,12 +1613,156 @@ MIGRATIONS: list[str] = [
         checked_at TEXT NOT NULL
     );
     """,
-    # The weekly digest (SPEC VIEW-36) is stored with the morning briefings, of kind 'weekly': one of each kind
-    # per day, so Sunday holds both.
+    # Cockpit's messages asking a session to make a call again that auto mode's checker gave no verdict on (SPEC
+    # PERM-32, checker.py): each names the refused calls it covers, with each call's refusal count when it was queued.
+    # A refusal's `no_verdict_since`: when the checker's refusals of the call began, while its latest refusal is one.
+    """
+    ALTER TABLE permission_requests ADD COLUMN no_verdict_since TEXT;
+    UPDATE permission_requests SET no_verdict_since = created_at WHERE reason = 'Classifier unavailable';
+    CREATE TABLE checker_tries (
+        request_id INTEGER NOT NULL REFERENCES permission_requests(id),
+        message_id INTEGER NOT NULL REFERENCES messages(id),
+        count INTEGER NOT NULL,
+        PRIMARY KEY (request_id, message_id)
+    );
+    """,
+    # Empty: it keeps the numbering of the databases where this migration created a part's tables, which the parts now
+    # create themselves (parts.create_tables).
+    "SELECT 1",
+    # The existing Codex worker attaches a thread to its message before sending its first prompt. Keep the
+    # ownership transfer in that transaction, including for workers that survive a web-server deployment.
+    """
+    CREATE TABLE session_handovers (
+        source_session_id TEXT PRIMARY KEY,
+        target_session_id TEXT,
+        message_id INTEGER NOT NULL UNIQUE REFERENCES messages(id),
+        created_at TEXT NOT NULL
+    );
+    CREATE TABLE session_handover_items (
+        source_session_id TEXT NOT NULL REFERENCES session_handovers(source_session_id),
+        item_id INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+        PRIMARY KEY (source_session_id, item_id)
+    );
+    CREATE TRIGGER handover_thread_attached AFTER UPDATE OF session_id ON messages
+    WHEN OLD.session_id IS NULL AND NEW.session_id IS NOT NULL
+      AND EXISTS (SELECT 1 FROM session_handovers WHERE message_id = NEW.id AND target_session_id IS NULL)
+    BEGIN
+        DELETE FROM session_handover_items WHERE source_session_id =
+            (SELECT source_session_id FROM session_handovers WHERE message_id = NEW.id)
+          AND item_id IN (SELECT i.id FROM items i WHERE i.archived = 1 OR i.stage = 'done' OR (
+              COALESCE(json_extract(i.sessions, '$[0]'), '') != session_handover_items.source_session_id
+              AND NOT EXISTS (SELECT 1 FROM steps s WHERE s.item_id = i.id AND s.status = 'open'
+                  AND s.withdrawn_at IS NULL AND s.session_id = session_handover_items.source_session_id)));
+        SELECT RAISE(ABORT, 'The tasks no longer have unfinished work owned by this Claude session; no Codex prompt was sent')
+        WHERE NOT EXISTS (SELECT 1 FROM session_handover_items WHERE source_session_id =
+            (SELECT source_session_id FROM session_handovers WHERE message_id = NEW.id));
+        SELECT RAISE(ABORT, 'The task where handover was requested closed or changed owner; retry from an open task')
+        WHERE NOT EXISTS (SELECT 1 FROM session_handover_items WHERE item_id = NEW.item_id AND source_session_id =
+            (SELECT source_session_id FROM session_handovers WHERE message_id = NEW.id));
+        UPDATE session_handovers SET target_session_id = NEW.session_id WHERE message_id = NEW.id;
+        UPDATE items SET
+            sessions = json_insert(json_set(sessions, '$[0]', NEW.session_id), '$[#]',
+                (SELECT source_session_id FROM session_handovers WHERE message_id = NEW.id)),
+            updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), updated_by = 'user'
+        WHERE id IN (SELECT item_id FROM session_handover_items WHERE source_session_id =
+            (SELECT source_session_id FROM session_handovers WHERE message_id = NEW.id))
+          AND json_extract(sessions, '$[0]') = (SELECT source_session_id FROM session_handovers WHERE message_id = NEW.id);
+        UPDATE items SET sessions = json_insert(sessions, '$[#]', NEW.session_id)
+        WHERE id IN (SELECT item_id FROM session_handover_items WHERE source_session_id =
+            (SELECT source_session_id FROM session_handovers WHERE message_id = NEW.id))
+          AND NOT EXISTS (SELECT 1 FROM json_each(items.sessions) WHERE value = NEW.session_id);
+        UPDATE items SET waiting_on = (
+            SELECT json_group_array(json(CASE
+                WHEN json_extract(value, '$.kind') = 'agent' AND json_extract(value, '$.who') =
+                    (SELECT source_session_id FROM session_handovers WHERE message_id = NEW.id)
+                THEN json_set(value, '$.who', NEW.session_id) ELSE value END)) FROM json_each(items.waiting_on)
+        ) WHERE id IN (SELECT item_id FROM session_handover_items WHERE source_session_id =
+            (SELECT source_session_id FROM session_handovers WHERE message_id = NEW.id));
+        UPDATE messages SET session_id = NEW.session_id
+        WHERE session_id = (SELECT source_session_id FROM session_handovers WHERE message_id = NEW.id)
+          AND ((state IN ('queued', 'failed') AND (item_id IS NULL OR item_id IN (
+              SELECT item_id FROM session_handover_items WHERE source_session_id =
+                  (SELECT source_session_id FROM session_handovers WHERE message_id = NEW.id)))) OR id IN (
+              SELECT handoff_message_id FROM steps WHERE status = 'open' AND withdrawn_at IS NULL
+              AND item_id IN (SELECT item_id FROM session_handover_items WHERE source_session_id =
+                  (SELECT source_session_id FROM session_handovers WHERE message_id = NEW.id))));
+        UPDATE steps SET session_id = NEW.session_id
+        WHERE status = 'open' AND withdrawn_at IS NULL
+          AND session_id = (SELECT source_session_id FROM session_handovers WHERE message_id = NEW.id)
+          AND item_id IN (SELECT item_id FROM session_handover_items WHERE source_session_id =
+              (SELECT source_session_id FROM session_handovers WHERE message_id = NEW.id));
+    END;
+    """,
+    # Keep the user's draft separate from the generated transfer instructions. Old Codex workers still attach
+    # their thread through the existing messages.session_id trigger before sending the composed prompt.
+    """
+    ALTER TABLE messages ADD COLUMN handover_context TEXT;
+    """,
+    # Automatic quota resumes are revalidated before delivery. User messages and account moves remain explicit
+    # requests. Tag pending retries from older servers too; an account-move continuation uses the same opening.
+    """
+    ALTER TABLE messages ADD COLUMN quota_recovery_stop TEXT;
+    UPDATE messages SET quota_recovery_stop = created_at WHERE author = 'cockpit' AND state IN ('queued', 'sending')
+        AND (text LIKE 'Claude''s model cooldown retry:%'
+          OR (text LIKE 'Claude''s usage works again:%' AND text NOT LIKE '% moved you to the % account%'));
+    CREATE TABLE item_agent_history (
+        item_id INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+        session_id TEXT NOT NULL,
+        PRIMARY KEY (session_id, item_id)
+    );
+    INSERT OR IGNORE INTO item_agent_history SELECT i.id, s.value FROM items i, json_each(i.sessions) s;
+    CREATE TRIGGER retain_item_agents AFTER UPDATE OF sessions, waiting_on ON items BEGIN
+        INSERT OR IGNORE INTO item_agent_history SELECT OLD.id, value FROM json_each(OLD.sessions);
+        INSERT OR IGNORE INTO item_agent_history
+            SELECT OLD.id, json_extract(value, '$.who') FROM json_each(OLD.waiting_on)
+            WHERE json_extract(value, '$.kind') = 'agent';
+    END;
+    """,
+    # Status reads look up user activity and session messages repeatedly. Metadata indexes keep attachment
+    # listings on their small fields, without walking the table records that also hold page and image content.
+    """
+    CREATE INDEX events_item_actor_kind_at ON events(item_id, actor, kind, at);
+    CREATE INDEX messages_author_created ON messages(author, created_at, item_id, step_id);
+    CREATE INDEX messages_session_state_id ON messages(session_id, state, id);
+    CREATE INDEX item_pages_metadata ON item_pages(
+        item_id, id, title, size, created_at, updated_at, revision, added_by, public_token, access
+    );
+    CREATE INDEX item_images_metadata ON item_images(item_id, id, content_type, size, created_at, added_by);
+    """,
+    # Finding a session's first launch reads only its launch messages, apart from later prompts and resumes.
+    """
+    CREATE INDEX messages_session_start ON messages(session_id, id) WHERE new_cwd IS NOT NULL;
+    """,
+    # The main page groups agent activity by session and item on every poll. Keep that read on its
+    # timestamps, apart from the message bodies, with the grouping already in index order.
+    """
+    CREATE INDEX messages_agent_activity ON messages(session_id, item_id, created_at) WHERE author LIKE 'agent:%';
+    """,
+    # The page's state reads each session's last sent message, the sweep's start and finish events, and the
+    # messages waiting or failed; these indexes cover those reads.
+    """
+    CREATE INDEX messages_sent_session ON messages(session_id, state, item_id, sent_at, id);
+    CREATE INDEX events_kind_at ON events(kind, at);
+    CREATE INDEX messages_state ON messages(state, dismissed_at, capacity_since, waits_since);
+    """,
+    # Sol and Astra run on their 6.2 versions; a resumed Codex thread runs on the model saved here.
+    """
+    UPDATE codex_threads SET model = 'gpt-6.2-sol' WHERE model = 'gpt-6.1-sol';
+    UPDATE codex_threads SET model = 'gpt-6.2-astra' WHERE model = 'gpt-6-astra';
+    """,
+    """
+    CREATE TABLE timer_page_presses (
+        page TEXT PRIMARY KEY,
+        sequence INTEGER NOT NULL,
+        at TEXT NOT NULL
+    );
+    """,
+    # A briefing is the morning briefing ('daily') or the weekly digest ('weekly', SPEC VIEW-37), one of each kind per
+    # day, so a Sunday holds both.
     """
     CREATE TABLE new_briefings (
         id INTEGER PRIMARY KEY,
-        kind TEXT NOT NULL DEFAULT 'daily' CHECK (kind IN ('daily', 'weekly')),
+        kind TEXT NOT NULL CHECK (kind IN ('daily', 'weekly')),
         day TEXT NOT NULL,
         since TEXT NOT NULL,
         until TEXT NOT NULL,

@@ -39,6 +39,7 @@
   :root:not(.center-frame) body:not(.pages-overlay-mode, .briefing-overlay-mode) .brand-menu > .menu-list > :is(a, button):not(.phone-only),
   :root:not(.center-frame) body:not(.pages-overlay-mode, .briefing-overlay-mode) .brand-menu > .menu-list > form > button { display: flex; align-items: center; min-height: 32px; padding: 4px 16px 4px 18px; border-radius: 0; background: none; color: var(--text); }
   /* The preference has no icon; its name starts where the other rows' names do. */
+  :root:not(.center-frame) body:not(.pages-overlay-mode, .briefing-overlay-mode) .brand-menu > .menu-list > button.vim-setting { padding-left: 42px; }
   :root:not(.center-frame) body:not(.pages-overlay-mode, .briefing-overlay-mode) .brand-menu > .menu-list :is(a, button):hover { background: var(--hover); }
   :root:not(.center-frame) body:not(.pages-overlay-mode, .briefing-overlay-mode) .brand-menu > .menu-list :is(a, button):focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
   :root:not(.center-frame) body:not(.pages-overlay-mode, .briefing-overlay-mode) .brand-menu > .menu-list > a[aria-current="page"] { background: var(--picked-bg); color: var(--picked-text); }

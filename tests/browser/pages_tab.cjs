@@ -265,7 +265,7 @@ async function main() {
       !ownRail.open && ownRail.x === 0 && ownRail.width === 280 && ownRail.current === "/pages" && ownRail.mainX >= 280, JSON.stringify(ownRail));
     const menuLinks = await pagesOwn.locator(".brand-menu .menu-list > a").evaluateAll((links) => links.filter((link) => link.checkVisibility()).map((link) => link.getAttribute("href")));
     check("/pages lists every page in its rail at desktop width",
-      ["/", "/classic#sessions", "/briefing", "/pages", "/usage", "/spec", "/skills"].every((href) => menuLinks.includes(href)), menuLinks.join(" "));
+      ["/", "/briefing", "/pages", "/usage", "/spec", "/skills"].every((href) => menuLinks.includes(href)), menuLinks.join(" "));
     // The rail's logo is no control: it takes no focus, so no key opens the menu, while its links take focus and the
     // mark still shows.
     const keys = await pagesOwn.evaluate(() => {

@@ -120,7 +120,7 @@ async function scenario(browser, info, work, homes, width, scheme) {
   // The file goes without the page: a red warning.
   fs.rmSync(path.join(firstHome, "auth.json"));
   await until(async () => (await state(".codex")).problem === "signed_out" && await page.evaluate(() => allWarnings(ui.state).find((one) => one.key === "codex-sign-in:.codex")?.tone === "fail"), "a lost sign-in file raises a red warning");
-  await page.evaluate(() => { if (SIDEBAR) openWarning("codex-sign-in:.codex"); });
+  await page.evaluate(() => openWarning("codex-sign-in:.codex"));
   await card(".codex").waitFor({ timeout: 10e3 });
   check((await card(".codex").textContent()).includes(`(${FIRST}) is signed out`), `${at}: the warning names the account it held`);
   await shot("signed-out");
@@ -135,7 +135,7 @@ async function scenario(browser, info, work, homes, width, scheme) {
   await card(".codex-2").locator(".codex-code").waitFor({ timeout: 30e3 });
   fs.writeFileSync(path.join(secondHome, "finish"), "fail");
   await until(async () => (await state(".codex-2")).problem === "signed_out", "a code that runs out leaves the folder signed out");
-  await page.evaluate(() => { if (SIDEBAR) openWarning("codex-sign-in:.codex-2"); });
+  await page.evaluate(() => openWarning("codex-sign-in:.codex-2"));
   await card(".codex-2").waitFor({ timeout: 10e3 });
   check((await card(".codex-2").textContent()).includes("timed out"), `${at}: the warning has Codex's words`);
   check(!(await card(".codex-2").textContent()).includes(CODE), `${at}: the words hold no code`);
@@ -146,7 +146,7 @@ async function scenario(browser, info, work, homes, width, scheme) {
   await card(".codex-2").locator(".codex-code").waitFor({ timeout: 30e3 });
   fs.writeFileSync(path.join(secondHome, "finish"), OTHER);
   await until(async () => (await state(".codex-2")).problem === "other_account", "another account in the folder is a problem");
-  await page.evaluate(() => { if (SIDEBAR) openWarning("codex-sign-in:.codex-2"); });
+  await page.evaluate(() => openWarning("codex-sign-in:.codex-2"));
   await card(".codex-2").waitFor({ timeout: 10e3 });
   words = await card(".codex-2").textContent();
   check(words.includes(OTHER) && words.includes(SECOND), `${at}: the warning shows the account before and after`);

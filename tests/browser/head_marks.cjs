@@ -1,13 +1,13 @@
 // A step's head. A plain to-do carries no tag of its own (SPEC CONTROL-16);
 // one added with Fire and forget keeps its tag (CONTROL-24). Cockpit's own work
 // shows the Cockpit key alone at the end of the title (UI-43), and the priority sits in the step's menu (CONTROL-7).
-// Checks, on the main page at 1280, 390 and 320 px and on /classic at 1280 and 390 px:
+// Checks at 1280, 390 and 320 px:
 // - a plain to-do the user added shows no "To-do" chip on its step, and no "To-do" chip shows anywhere;
 // - a Fire and forget to-do's step shows its "Fire and forget" chip;
 // - a Cockpit step's head has the key right after the title, without the word, and no priority icon;
-// - with a long title, the key follows its last word wherever it wraps; marks sit above a heading or level with a row's first line;
-// - the menu's Priority opens the four levels, the current one checked, and choosing one sets the item's priority
-//   (on the main page and the phone);
+// - with a long title, the key follows its last word wherever it wraps; marks end a heading's first line or sit level
+//   with a row's first line (VIEW-29);
+// - the menu's Priority opens the four levels, the current one checked, and choosing one sets the item's priority;
 // - the page has no page errors.
 // Saves a screenshot per width in the work dir.
 //
@@ -38,7 +38,7 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 function longTitleGeometry(el, breakLayout) {
   const heading = el.querySelector(".task-heading");
   const title = el.querySelector(".task-heading-text, .step-context > .title-line > .item-title");
-  const marks = el.querySelector(".step-context > .context-marks");
+  const marks = el.querySelector(".destination-heading > .context-marks, .step-context > .context-marks");
   if (!title || !marks) return null;
   const range = document.createRange();
   range.selectNodeContents(title);
@@ -60,7 +60,10 @@ function longTitleGeometry(el, breakLayout) {
     const first = Math.min(...rects.map((rect) => rect.top));
     const last = rects.at(-1);
     const hits = (a, b) => a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom;
-    const above = Boolean(heading) || getComputedStyle(marks).order !== "0";
+    const above = !heading && getComputedStyle(marks).order !== "0";
+    // A heading's first line: from its top, one line height down.
+    const headTop = heading ? heading.getBoundingClientRect().top : 0;
+    const lineHeight = heading ? parseFloat(getComputedStyle(heading).lineHeight) : 0;
     return {
       headed: Boolean(heading),
       lines: new Set(rects.map((rect) => Math.round(rect.top))).size,
@@ -70,11 +73,13 @@ function longTitleGeometry(el, breakLayout) {
       controls: controls.length,
       menu: Boolean(marks.querySelector(".step-menu > summary")?.checkVisibility()),
       updated: Boolean(marks.querySelector(".updated-mark")?.checkVisibility()),
-      // Headed cards and separate control rows place the whole strip above the title.
-      marksPlaced: above
-        ? strip.bottom <= (heading ? heading.getBoundingClientRect().top : first) + 1
-          && controls.every((box) => box.bottom <= (heading ? heading.getBoundingClientRect().top : first) + 1)
-        : strip.top - first >= -8 && strip.top - first <= 12,
+      // Headed cards end the heading's first line with the whole strip; separate control rows place it above the
+      // title; otherwise it sits level with the row's first line.
+      marksPlaced: heading
+        ? strip.top >= headTop - 1 && strip.bottom <= headTop + lineHeight + 1
+        : above
+          ? strip.bottom <= first + 1 && controls.every((box) => box.bottom <= first + 1)
+          : strip.top - first >= -8 && strip.top - first <= 12,
       overlaps: controls.filter((box) => rects.some((rect) => hits(box, rect))).length,
       gap: Math.round(key.left - last.right),
     };
@@ -121,7 +126,7 @@ async function main() {
     const tool = (await agent("POST", "/api/steps", {
       item_key: toolKey, need: `look-${run}`, ask: "Keep the tighter spacing?", score: 90, session_id: SESSION_B, body: "Say yes or no.",
     })).step.id;
-    // The long title wraps on a phone, ending in the key with the controls above its heading.
+    // The long title wraps on a phone, ending in the key with the controls at the end of its heading's first line.
     const longKey = `note:step-head-long-${run}`;
     const longItem = await agent("PUT", "/api/items", { key: longKey, title: "Review screenshot alignment improvements", project: "cockpit", priority: "normal" });
     const long = (await agent("POST", "/api/steps", {
@@ -129,39 +134,38 @@ async function main() {
     })).step.id;
 
     browser = await chromium.launch({ executablePath: CHROMIUM });
-    for (const [pagePath, width] of [["/", 1280], ["/", 390], ["/", 320], ["/classic", 1280], ["/classic", 390]]) {
-      const at = `${pagePath} at ${width} px`;
+    for (const width of [1280, 390, 320]) {
+      const at = `${width} px`;
       const context = await browser.newContext({ viewport: { width, height: 900 } });
       await context.setExtraHTTPHeaders({ cookie: `${info.name}=${info.value}` });
       const page = await context.newPage();
       const errors = [];
       page.on("pageerror", (error) => errors.push(error.message));
-      await page.goto(`${info.origin}${pagePath}`);
+      await page.goto(`${info.origin}/`);
       await page.waitForSelector(`[data-step="${plain.step}"]`, { state: "attached", timeout: 30e3 });
       await sleep(1500);
-      // The main page opens a task by its row in the sidebar, which a phone folds away: the test picks it as the row
-      // does. /classic opens a step by a click on its row.
-      const open = async (step, item) => {
-        if (pagePath === "/") await page.evaluate((id) => selectItem(id), item);
-        else await page.locator(`[data-step="${step}"]`).first().click({ position: { x: 40, y: 12 } });
+      // The page opens a task by its row in the sidebar, which a phone folds away: the test picks it as the row does.
+      const open = async (item) => {
+        await page.evaluate((id) => selectItem(id), item);
         await sleep(800);
       };
       const chips = (selector) => page.$$eval(`${selector} .chip-words`, (nodes) => nodes.map((node) => node.textContent.trim()));
       // Next up, the one open card, holds each step in turn.
       for (const [step, item, want, label] of [[plain.step, plain.item, false, "plain to-do"], [fire.step, fire.item, true, "Fire and forget"]]) {
-        await open(step, item);
+        await open(item);
         const words = await chips(`[data-step="${step}"]`);
         check(`${at}: ${label} step ${want ? "keeps its tag" : "shows no To-do tag"}`,
           want ? words.includes("Fire and forget") : !words.includes("To-do"), words.join(", ") || "no tags");
-        await page.screenshot({ path: path.join(work, `head-marks-${pagePath === "/" ? "main" : "classic"}-${width}-${step}.png`) });
+        await page.screenshot({ path: path.join(work, `head-marks-${width}-${step}.png`) });
       }
       // Cockpit's own work: the key alone after the title, and no priority icon in the head.
-      await open(tool, toolItem.id);
-      const head = page.locator(`[data-step="${tool}"] .step-context:visible`).first();
+      await open(toolItem.id);
+      // The step's marks, which end its heading's line and hold its ⋯ menu.
+      const head = page.locator(`#next [data-step="${tool}"] .context-marks:visible`).first();
       await head.waitFor({ state: "visible", timeout: 10e3 });
       await sleep(300);
-      // The title is Next up's heading, or the head's line on a row; either way it ends in the key.
-      const card = page.locator(`:is(.next-card, .step-row)[data-step="${tool}"]:visible`).first();
+      // The title is Next up's heading, ending in the key.
+      const card = page.locator(`#next .next-card[data-step="${tool}"]`);
       const shape = await settled(card, (el) => {
         const tag = el.querySelector(".task-heading > .chip.cockpit, .step-context > .title-line > .chip.cockpit");
         if (!tag || !tag.previousElementSibling.getClientRects().length) return null;
@@ -184,8 +188,8 @@ async function main() {
         shape.after && shape.wordless && shape.seen && shape.gap >= 0 && shape.gap <= 12, JSON.stringify(shape));
       check(`${at}: the key is named Cockpit for screen readers`, shape.named === "Cockpit", JSON.stringify(shape));
       check(`${at}: no priority icon in the head`, shape.prio === 0, `${shape.prio} found`);
-      if (!(width === 1280 && pagePath === "/classic")) {
-        const level = pagePath === "/" ? "high" : "low";
+      {
+        const level = "high";
         await head.locator(".step-menu > summary").click();
         await head.locator(".step-menu .menu-opens[data-priority]").click();
         const levels = await head.locator(".step-menu [role=menuitemradio]").evaluateAll((nodes) => nodes
@@ -193,7 +197,7 @@ async function main() {
           .map((node) => `${node.textContent.trim()}:${node.getAttribute("aria-checked")}`));
         check(`${at}: Priority opens four levels, the current checked`,
           levels.length === 4 && levels.filter((line) => line.endsWith(":true")).length === 1, levels.join(", "));
-        await page.screenshot({ path: path.join(work, `head-marks-${pagePath === "/" ? "main" : "classic"}-${width}-menu.png`) });
+        await page.screenshot({ path: path.join(work, `head-marks-${width}-menu.png`) });
         await head.locator(".step-menu [role=menuitemradio]", { hasText: level[0].toUpperCase() + level.slice(1) }).click();
         let stored = null;
         for (let tries = 0; tries < 20 && stored !== level; tries++) {
@@ -202,12 +206,12 @@ async function main() {
         }
         check(`${at}: choosing ${level} sets the item's priority`, stored === level, `stored ${stored}`);
       }
-      // A long title ends in the key, with controls above a heading or level with a row's first line.
-      await open(long, longItem.id);
+      // A long title ends in the key, with controls ending a heading's first line or level with a row's first line.
+      await open(longItem.id);
       await sleep(300);
       // The updated status exercises the strip alongside its menu on headed cards.
       await page.evaluate((id) => { ui.seenText.set(id, "Earlier wording"); render(false); }, long);
-      const longCard = page.locator(`:is(.next-card, .step-row)[data-step="${long}"]:visible`).first();
+      const longCard = page.locator(`#next .next-card[data-step="${long}"]`);
       const shapeBefore = await settled(longCard, longTitleGeometry);
       if (shapeBefore.headed) {
         const broken = await longCard.evaluate(longTitleGeometry, true);
@@ -215,11 +219,11 @@ async function main() {
           broken.overlaps > 0 && !longTitleFits(broken), JSON.stringify(broken));
       }
       const lines = await settled(longCard, longTitleGeometry);
-      check(`${at}: a long title ends in the key, with controls above its heading or level with its row's first line`,
+      check(`${at}: a long title ends in the key, with controls ending its heading's first line or level with its row's first line`,
         longTitleFits(lines), JSON.stringify(lines));
       const anywhere = await page.$$eval(".chip-words", (nodes) => nodes.filter((node) => node.textContent.trim() === "To-do").length);
       check(`${at}: no To-do tag anywhere on the page`, anywhere === 0, `${anywhere} found`);
-      await page.screenshot({ path: path.join(work, `head-marks-${pagePath === "/" ? "main" : "classic"}-${width}.png`), fullPage: false });
+      await page.screenshot({ path: path.join(work, `head-marks-${width}.png`), fullPage: false });
       check(`${at}: no page errors`, errors.length === 0, errors.join(" | "));
       await context.close();
     }

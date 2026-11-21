@@ -141,6 +141,15 @@ async function main() {
       if (shifted) { moved.push(`${frame.t} ms: ${JSON.stringify(shifted)} was ${JSON.stringify(before.get(shifted.key))}`); break; }
     }
     check(`nothing on the next card moves in the ${STILL_MS / 1000} s after it shows`, moved.length === 0, moved.join("; "));
+    await page.locator(`#next img.figure-image[src="/item-images/${image.id}"]:not(.motion-ghost *)`).first().click();
+    check("the prefetched image still opens full size", await page.locator("#lightbox").isVisible(), "the lightbox stayed closed");
+    await page.keyboard.press("Escape");
+    const keptLeavingImage = await page.evaluate((itemId) => {
+      const leaving = document.querySelector("#next > [data-step]:not(.motion-ghost)");
+      selectItem(itemId);
+      return Boolean(leaving.querySelector("img.figure-image"));
+    }, first.id);
+    check("the outgoing card keeps its image while it fades", keptLeavingImage, "the image left the outgoing card");
     check("no page errors", errors.length === 0, errors.join("; "));
   } finally {
     if (browser) await browser.close();

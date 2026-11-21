@@ -1,6 +1,6 @@
-// Stopped sweeps and feedback mode: on a synthetic database
-// with the state saying sweeps stopped, the Cockpit page's rail says so above its readouts, with Restart sweeps, and /classic shows Restart sweeps as an icon in its top bar, with no banner; a press restarts the sweeps. In feedback mode a
-// click picks a banner's words, the button, and an element no pickable part holds.
+// Stopped sweeps and feedback mode: on a synthetic database with the state saying sweeps stopped, the Cockpit page's
+// rail says so above its readouts, with Restart sweeps, and no warning says so; a press restarts the sweeps. In
+// feedback mode a click picks a warning's words, the button, and an element no pickable part holds.
 //
 // Starts serve_preview.py (this checkout's Cockpit on a synthetic database; README.md says what
 // it needs) and drives a headless Chromium. Prints one line per check and exits 1 when one failed.
@@ -62,11 +62,6 @@ async function main() {
     await page.goto(`${info.origin}/`);
     // The first state takes a few seconds on the synthetic database.
     await page.locator(".sidebar-groups").waitFor({ timeout: 30000 });
-    const rail = await page.evaluate(() => ["update", "sweep-status"].map((id) => {
-      const el = document.getElementById(id);
-      return { id, inRail: Boolean(el.closest(".rail")), shown: Boolean(el.getClientRects().length) };
-    }));
-    check("on the Cockpit page the rail shows no Update or sweep menu", rail.every((one) => !one.inRail && !one.shown), JSON.stringify(rail));
     const notice = page.locator("#sweeps-paused");
     await notice.waitFor({ timeout: 30000 });
     const noticePlace = await notice.evaluate((el) => {
@@ -82,15 +77,20 @@ async function main() {
     check("the notice leaves once sweeps run", await waitFor(() => notice.isVisible(), (value) => value === false), "still shown");
     paused = true;
 
-    check("no banner says sweeps stopped", await page.locator(".warn-card", { hasText: "Sweeps stopped" }).count() === 0, "a banner remains");
+    check("no warning says sweeps stopped", await page.locator(".warn-card, .warn-row, .warn-step", { hasText: "Sweeps stopped" }).count() === 0,
+      "a warning remains");
 
-    await page.goto(`${info.origin}/classic`);
+    // Paused again: a reload brings the notice back, and the server's warning opens on the card.
+    await page.reload();
     const button = page.locator("#resume-sweeps");
     await button.waitFor({ timeout: 30000 });
-    const place = await button.evaluate((el) => ({ words: el.innerText.trim(), icon: Boolean(el.querySelector("svg.icon-play")) }));
-    check("on /classic it says Restart sweeps, with a play icon", place.icon, JSON.stringify(place));
+    check("with sweeps paused again the rail's notice shows Restart again", await notice.isVisible(), "not shown");
+    const warning = "warning:A warning the server sends";
+    await page.locator(`#sidebar li.warn-row[data-warning="${warning}"] .side-row`).click();
+    const warningWords = page.locator(`#next .warn-step[data-warning="${warning}"] .ask-text`);
+    await warningWords.waitFor();
 
-    // Feedback mode: the warning banner's words, the button, and an element outside every pickable part.
+    // Feedback mode: the warning's words, the button, and an element outside every pickable part.
     await page.evaluate(() => startPicking("feedback"));
     await page.waitForFunction(() => document.body.classList.contains("picking"));
     const chosen = () => page.evaluate(() => {
@@ -98,8 +98,8 @@ async function main() {
       return el && (el.id || [...el.classList].filter((name) => !name.startsWith("pick-")).join(" ") || el.tagName.toLowerCase());
     });
     // Its words, at its left: the feedback bar floats over the middle of the page's top.
-    await page.locator(".warn-title", { hasText: "A warning the server sends" }).click({ position: { x: 24, y: 12 } });
-    check("a click on a warning's words picks its line", await waitFor(chosen, (value) => value === "warn-title"), await chosen());
+    await warningWords.click({ position: { x: 24, y: 12 } });
+    check("a click on a warning's words picks its line", await waitFor(chosen, (value) => value === "ask"), await chosen());
     await page.keyboard.press("Escape");
     await page.evaluate(() => startPicking("feedback"));
     await page.waitForFunction(() => document.body.classList.contains("picking"));
@@ -111,7 +111,7 @@ async function main() {
     await page.evaluate(() => {
       const section = document.createElement("section");
       section.className = "loose-section";
-      Object.assign(section.style, { position: "fixed", left: "820px", top: "360px", padding: "24px", zIndex: 5 });
+      Object.assign(section.style, { position: "fixed", left: "820px", top: "360px", padding: "24px", zIndex: 1000 });
       const box = document.createElement("div");
       box.className = "loose-box";
       // Through the style object: the page's content policy drops style attributes.
@@ -143,18 +143,6 @@ async function main() {
     await button.click();
     check("pressing it restarts the sweeps", await waitFor(() => resumed, (count) => count === 1), `${resumed} presses reached the server`);
     check("the button goes once sweeps run", await waitFor(() => button.isHidden(), Boolean), "still shown");
-
-    paused = true;
-    await page.reload();
-    await button.waitFor({ timeout: 30000 });
-    const top = await button.evaluate((el) => ({ parent: el.parentElement.className, after: el.nextElementSibling?.className }));
-    check("on /classic it sits in the top bar before Feedback and Update", top.parent === "top-right" && top.after === "key-tray", JSON.stringify(top));
-    const icon = await button.evaluate((el) => ({
-      width: el.getBoundingClientRect().width, label: getComputedStyle(el.querySelector(".label")).display,
-      tip: el.dataset.tip || el.title, right: document.querySelector(".key-tray").getBoundingClientRect().right,
-    }));
-    check("there it is an icon with its words in its tooltip, and the top bar's keys stay on screen",
-      icon.width <= 32 && icon.label === "none" && icon.tip.startsWith("Restart sweeps") && icon.right <= 1280, JSON.stringify(icon));
     check("no page errors", errors.length === 0, errors.join(" | "));
   } finally {
     // A state request still on its way when the page closes would end the run with its own error.

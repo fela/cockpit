@@ -55,14 +55,14 @@ async function main() {
           adds.push({ sent: JSON.parse(request.postData()), got: await response.json().catch(() => null) });
         }
       });
-      await page.goto(`${info.origin}/classic`, { timeout: 30000 });
+      await page.goto(`${info.origin}/`, { timeout: 30000 });
       await page.locator(".layout > .primary").waitFor({ timeout: 30000 });
       const area = page.locator('#add-box textarea[data-key="add:new"]');
       const button = page.locator("#add-box .add-priority > summary");
       const list = page.locator("#add-box .add-priority .menu-list");
       const wide = () => page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
 
-      await page.locator("#add").click();
+      await page.locator(width <= 1000 ? ".phone-add" : ".sidebar-add").click();
       await area.waitFor();
       check(`${width} px: the Priority button shows Normal with nothing picked`,
         (await button.getAttribute("aria-label")) === "Priority: Normal priority" && (await button.innerText()).trim() === "Normal",
@@ -108,7 +108,7 @@ async function main() {
         first && first.sent.priority === "high" && first.got && first.got.priority === "high" && first.got.user_fields.includes("priority"),
         JSON.stringify(first && { sent: first.sent.priority, got: first.got && first.got.priority, fields: first.got && first.got.user_fields }));
 
-      await page.locator("#add").click();
+      await page.locator(width <= 1000 ? ".phone-add" : ".sidebar-add").click();
       await area.waitFor();
       check(`${width} px: the next Add starts at Normal`, (await button.innerText()).trim() === "Normal", await button.innerText());
       const urgent = `Urgent: the export fails ${width}`;

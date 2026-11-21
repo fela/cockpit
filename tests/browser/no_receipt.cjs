@@ -65,7 +65,10 @@ async function main() {
       page.setDefaultTimeout(20000);
       const errors = [];
       page.on("pageerror", (error) => errors.push(error.message));
-      await page.goto(`${info.origin}/classic`, { timeout: 90000 });
+      await page.goto(`${info.origin}/`, { timeout: 90000 });
+      // Picks the step's item in the list at the left, so the card shows the step; a phone shows the card's screen.
+      await page.locator(`#sidebar li[data-item="${answer.step.item_id}"]`).waitFor({ state: "attached", timeout: 90000 });
+      await page.evaluate((itemId) => showInSidebar(itemId), answer.step.item_id);
       const card = page.locator(`#next article[data-step="${id}"]`).first();
       await card.waitFor({ timeout: 90000 });
       // A message sent from the step, delivered: nothing under the box.

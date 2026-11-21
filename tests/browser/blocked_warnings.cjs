@@ -1,11 +1,10 @@
 // Run with node tests/browser/blocked_warnings.cjs (PLAYWRIGHT_MODULE and BROWSER_EXECUTABLE override the host's).
-// Uses the keyboard fixture's isolated database; never touches live work or real agents.  PERM-25: on the page with
-// the rail, at 1280 px and 390 px, - no Blocked and waiting panel shows above Next up; - each dialog is a red,
-// pulsing row in Inbox (the picked one in the picked colours), named by its heading, as the account's warning is; -
-// with nothing picked, Next up shows the newest dialog's full card, with Run; - on a step, the change-order arrows
-// turn red and their small card names the next dialog; pressing them opens it; - a row opens its dialog; Run answers
-// it, its row goes, and Next up goes on to the next dialog; - nothing is wider than the window, and the page logs no
-// error. The classic page keeps its Blocked and waiting panel.
+// Uses the keyboard fixture's isolated database; never touches live work or real agents.  PERM-25: at 1280 px and
+// 390 px, - each dialog is a red, pulsing row in Inbox (the picked one in the picked colours), named by its heading, as
+// the account's warning is; - with nothing picked, Next up shows the newest dialog's full card, with Run; - on a step,
+// the change-order arrows turn red and their small card names the next dialog; pressing them opens it; - a row opens
+// its dialog; Run answers it, its row goes, and Next up goes on to the next dialog; - a dialog asked for just before a
+// load shows on Next up; - nothing is wider than the window, and the page logs no error.
 "use strict";
 
 const assert = require("node:assert/strict");
@@ -70,7 +69,6 @@ let browser;
     await page.evaluate(() => { ui.placed.clear(); selectItem(null); });
     await delay(400);
 
-    assert.equal(await page.locator("#blocked > *").count(), 0, `${width}: the Blocked and waiting panel still shows`);
     if (phone) await page.evaluate(() => setPhoneScreen(true, false));
     const rows = await page.evaluate(() => [...document.querySelectorAll("#sidebar .sidebar-group.queue li.warn-row")].map((row) => ({
       request: Number(row.dataset.request), words: row.textContent.trim(), picked: row.classList.contains("sel"), pulse: row.querySelector(".side-row").getAnimations().map((one) => one.animationName).join(","),
@@ -139,10 +137,8 @@ let browser;
     assert.equal(settled.ok, true, await settled.clone().text());
     await page.locator(`#next > .blocked-card.settled[data-request="${newer}"]`).waitFor({ timeout: 20000 });
 
-    // The classic page keeps the panel.
+    // A dialog asked for just before a load shows on Next up once the page is up.
     const third = await ask(`ls "$CLAUDE_JOB_DIR/tmp" # ${width}`, "List the job folder");
-    await page.goto(origin + "/classic");
-    await page.locator(`#blocked .blocked-card[data-request="${third}"]`).waitFor();
     await page.goto(origin + "/");
     const thirdCard = page.locator(`#next > .blocked-card[data-request="${third}"]`);
     await thirdCard.waitFor();

@@ -74,8 +74,10 @@ async function main() {
     check("the card shows the Early look tag", (await tag.textContent()).includes("Early look"), await tag.textContent());
 
     const ordinary = [];
+    // One task shows one card at a time, so each ordinary step is on its own task.
     for (let n = 0; n < 4; n += 1) {
-      ordinary.push((await call(AGENT, "POST", "/api/steps", { item_key: key, need: `decide:${n}`, ask: `Include list ${n} in the export?`, session_id: SESSION_B, score: 10 })).step.id);
+      await call(AGENT, "PUT", "/api/items", { key: `${key}-list-${n}`, title: `Export list ${n}`, stage: "building", sessions: [SESSION_B] });
+      ordinary.push((await call(AGENT, "POST", "/api/steps", { item_key: `${key}-list-${n}`, need: "decide", ask: `Include list ${n} in the export?`, session_id: SESSION_B, score: 10 })).step.id);
     }
     state = await call(headers, "GET", "/api/state");
     const queued = state.queue.map((step) => step.id);

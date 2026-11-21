@@ -1,12 +1,12 @@
 "use strict";
 
-// Cards that leave the page within a minute of showing (SPEC PERM-24). A card in Blocked and waiting, or a
-// step, can show and go again before the user can read it. After each drawing, this reads which cards the page shows:
-// each request, waiting session and Codex question in Blocked and waiting, and each step of the user's queue (Next up
-// and the queue's rows, or the sidebar's queue group). A card is in view from when it is drawn while the page is in
-// view and not folded away, or from when the page comes into view or its group opens; one that goes within a minute
-// goes to Cockpit, which adds what took it away. Left out here: a card in Blocked and waiting the user pressed or
-// typed in, and any card that went within a few seconds of a press elsewhere on the page ("Show fewer", folding a
+// Cards that leave the page within a minute of showing (SPEC PERM-24). A blocked card, or a step, can show and go
+// again before the user can read it. After each drawing, this reads which cards the page shows: each request, waiting
+// session and Codex question (a red row in Inbox, and the card on Next up when it is the one opened), and each step of
+// the user's queue (Next up and the sidebar's queue group). A card is in view from when it is drawn while the page is
+// in view and not folded away, or from when the page comes into view or its group opens; one that goes within a minute
+// goes to Cockpit, which adds what took it away. Left out here: a blocked card the user pressed or typed in, and any
+// card that went within a few seconds of a press elsewhere on the page ("Show fewer", folding a
 // group, picking another item, switching a phone's screen), since the user took it away; and a step the user's press
 // took out of the queue (Send, Done, Snooze, Task done and the like, `ui.tookAway`), which may leave before Cockpit has
 // heard of the press: a report sent then would find the step still queued and say only that the page stopped
@@ -16,8 +16,8 @@
   const BRIEF_MS = 60e3;
   // A card gone this soon after a press went by that press.
   const PRESS_MS = 3e3;
-  // On the page with the rail they are red rows in Inbox (BLOCKED_ROWS), and the one opened is the card on Next up.
-  const BLOCKED = ":is(#blocked, #next) :is([data-request], .waiting-card[data-session], [data-codex])";
+  // Blocked cards are red rows in Inbox (BLOCKED_ROWS), and the one opened is the card on Next up.
+  const BLOCKED = "#next :is([data-request], .waiting-card[data-session], [data-codex])";
   const BLOCKED_ROWS = "#sidebar li.warn-row:is([data-request], [data-session], [data-codex])";
   // Cards in view, by key ("step:10"): which card it is, what it said, when it came into view (performance.now()),
   // and whether the user pressed in it since.
@@ -41,7 +41,7 @@
       const key = blockedKey(el);
       add(key, el, key.slice(0, key.indexOf(":")), key.slice(key.indexOf(":") + 1));
     }
-    for (const el of document.querySelectorAll("#next [data-step], #queue > .list [data-step]")) add(`step:${el.dataset.step}`, el, "step", el.dataset.step);
+    for (const el of document.querySelectorAll("#next [data-step]")) add(`step:${el.dataset.step}`, el, "step", el.dataset.step);
     // A side-list row is one item's: when the item has two queued steps, the row shows either, so the row is the
     // card, noted as the step it showed last.
     for (const el of document.querySelectorAll("#sidebar .sidebar-group.queue li[data-step]")) add(`row:${el.dataset.item}`, el, "step", el.dataset.step);

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
@@ -51,6 +52,21 @@ def write_transcript(tmp_path: Path, entries: list[dict]) -> None:
     project = tmp_path / "-home-x"
     project.mkdir(exist_ok=True)
     (project / f"{SESSION}.jsonl").write_text("\n".join(json.dumps(entry) for entry in entries) + "\n")
+
+
+def test_last_effort_is_the_effort_of_the_last_main_call(tmp_path, monkeypatch):
+    """A session started without `--effort` runs at the effort its settings give the model; Claude Code records
+    that effort on each of its calls, and the picker beside Send shows the last one."""
+    monkeypatch.setattr(sessions, "PROJECTS_DIR", tmp_path)
+    first = assistant("first", text("one")) | {"effort": "high", "perTurnEffort": "high"}
+    last = assistant("last", text("two")) | {"effort": "xhigh", "perTurnEffort": "xhigh"}
+    side = assistant("side", text("three")) | {"effort": "low", "isSidechain": True}
+    write_transcript(tmp_path, [first, last, side, {"type": "user", "message": {"content": "next"}}])
+    assert sessions.last_effort(SESSION) == "xhigh"
+    write_transcript(tmp_path, [first, assistant("older", text("x")) | {"effort": None, "perTurnEffort": "medium"}])
+    assert sessions.last_effort(SESSION) == "medium"
+    write_transcript(tmp_path, [{"type": "user", "message": {"content": "hello"}}])
+    assert sessions.last_effort(SESSION) == ""
 
 
 def limit_error(stamp: str) -> dict:
@@ -137,6 +153,60 @@ def test_a_transcript_is_read_again_only_once_it_changed_or_its_read_failed(tmp_
     assert len(reads) == 3
 
 
+def test_listing_usage_searches_once_and_keeps_transcripts_current(tmp_path, monkeypatch):
+    monkeypatch.setattr(sessions, "PROJECTS_DIR", tmp_path)
+    write_transcript(tmp_path, [limit_error("2026-01-06T10:00:00.500Z")])
+    glob = Path.glob
+    searches = []
+
+    def counted(path, pattern):
+        searches.append((path, pattern))
+        return glob(path, pattern)
+
+    monkeypatch.setattr(Path, "glob", counted)
+    ids = [SESSION, SESSION_A, SESSION_B]
+    first = sessions.transcript_usages(ids)
+    assert len(searches) == 1
+    assert first[SESSION].stop is not None
+    assert first[SESSION_A] == sessions.Usage(stop=None, answer=None, model="", effort="")
+    # A new transcript and an updated one are visible on the very next poll.
+    entry = assistant("new", text("new session"))
+    entry["message"]["model"] = "claude-opus-5-5"
+    (tmp_path / "-home-x" / f"{SESSION_A}.jsonl").write_text(json.dumps(entry))
+    write_transcript(tmp_path, [assistant("answered", text("Continuing."))])
+    second = sessions.transcript_usages(ids)
+    assert second[SESSION].stop is None
+    assert second[SESSION_A].model == "claude-opus-5-5"
+    assert sessions.last_message(SESSION_A) == "new session"
+
+
+def test_listing_usage_uses_the_newest_copy_and_retries_failed_reads(tmp_path, monkeypatch):
+    monkeypatch.setattr(sessions, "PROJECTS_DIR", tmp_path)
+    write_transcript(tmp_path, [limit_error("2026-01-06T10:00:00.500Z")])
+    older = tmp_path / "-home-x" / f"{SESSION}.jsonl"
+    os.utime(older, (1, 1))
+    newer = tmp_path / "-home-y" / f"{SESSION}.jsonl"
+    newer.parent.mkdir()
+    entry = assistant("answered", text("Continuing."))
+    entry["message"]["model"] = "claude-opus-5-5"
+    newer.write_text(json.dumps(entry))
+    read = sessions._read_tail
+    failures = [True, False]
+
+    def flaky(path, size):
+        assert path == newer
+        return None if failures.pop(0) else read(path, size)
+
+    monkeypatch.setattr(sessions, "_read_tail", flaky)
+    assert sessions.transcript_usages([SESSION])[SESSION].model == ""
+    assert sessions.transcript_usages([SESSION])[SESSION].model == "claude-opus-5-5"
+    # A cached parse still checks the file's size and modification time each time.
+    assert sessions.transcript_usages([SESSION])[SESSION].model == "claude-opus-5-5"
+    monkeypatch.setattr(sessions, "_read_tail", read)
+    newer.unlink()
+    assert sessions.transcript_usages([SESSION])[SESSION].stop is not None
+
+
 def ended(message_id: str, *blocks: dict, stop_reason: str = "end_turn") -> dict:
     entry = assistant(message_id, *blocks)
     entry["message"]["stop_reason"] = stop_reason
@@ -183,6 +253,108 @@ def test_a_session_lists_the_background_work_its_job_file_names(claude_accounts:
     assert session.in_flight == ["local_bash", "local_agent"] and session.runs_subagent
     (tmp_path / "33333333" / "state.json").write_text(json.dumps({"state": "done", "tempo": "idle"}))
     assert sessions._session(personal, row, []).in_flight == []
+
+
+def local_command() -> dict:
+    return {
+        "type": "user", "userType": "external", "entrypoint": "cli", "sessionKind": "bg",
+        "timestamp": "2026-01-06T10:00:01.000Z",
+        "message": {"role": "user", "content": "<local-command-stdout>Set effort level to high</local-command-stdout>"},
+    }
+
+
+def command_boot(personal: Account, **changes) -> tuple[dict, dict, Path]:
+    job = {
+        "state": "working", "tempo": "blocked", "detail": "stuck on a startup dialog",
+        "needs": "open this session to continue setup", "intent": "/effort high", **changes,
+    }
+    path = personal.jobs / "33333333" / "state.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(job))
+    row = {
+        "id": "33333333", "sessionId": SESSION, "pid": 7, "status": "idle", "state": "blocked",
+        "startedAt": int(datetime.fromisoformat("2026-01-06T10:00:00+00:00").timestamp() * 1000),
+    }
+    return row, job, path
+
+
+@pytest.mark.parametrize("changes", [{}, {"detail": "starting…", "tempo": "active", "needs": None}])
+def test_completed_local_command_clears_only_cockpits_view_of_startup(
+    claude_accounts: tuple[Account, Account], tmp_path: Path, monkeypatch, changes: dict
+) -> None:
+    monkeypatch.setattr(sessions, "PROJECTS_DIR", tmp_path)
+    row, job, path = command_boot(claude_accounts[0], **changes)
+    write_transcript(tmp_path, [local_command(), {"type": "file-history-snapshot"}])
+    session = sessions._session(claude_accounts[0], row, [])
+    assert (session.state, session.job_state, session.tempo, session.detail, session.needs) == (
+        "done", "done", "idle", "", "",
+    )
+    assert session.turn_over and not session.waits_on_dialog and not session.working_now
+    assert json.loads(path.read_text()) == job
+    assert row["state"] == "blocked"
+
+
+@pytest.mark.parametrize("changes", [
+    {"needs": "approve Entering worktree"},
+    {"detail": "stuck on a startup dialog (trust)"},
+    {"needsOverlay": "open this session to continue setup"},
+    {"needsAsk": {"text": "Continue?"}},
+    {"block": {"questions": ["Continue?"]}},
+    {"intent": "do the work"},
+    {"queuedPrompt": "do the work"},
+    {"replayOwed": True},
+    {"inFlight": {"tasks": 1, "queued": 0, "kinds": []}},
+    {"inFlight": {"tasks": 0, "queued": 1, "kinds": []}},
+    {"inFlight": {"tasks": 0, "queued": 0, "kinds": ["session_cron"]}},
+])
+def test_startup_normalization_preserves_dialogs_and_background_work(
+    claude_accounts: tuple[Account, Account], tmp_path: Path, monkeypatch, changes: dict
+) -> None:
+    monkeypatch.setattr(sessions, "PROJECTS_DIR", tmp_path)
+    row, _, _ = command_boot(claude_accounts[0], **changes)
+    write_transcript(tmp_path, [local_command()])
+    assert sessions._session(claude_accounts[0], row, []).waits_on_dialog
+
+
+@pytest.mark.parametrize("after", [
+    {"type": "user", "message": {"role": "user", "content": "do the work"}},
+    assistant("m1", CALL),
+    {"type": "attachment", "attachment": {"type": "queued_command", "commandMode": "prompt", "prompt": "work"}},
+])
+def test_a_new_turn_prevents_command_only_startup_normalization(
+    claude_accounts: tuple[Account, Account], tmp_path: Path, monkeypatch, after: dict
+) -> None:
+    monkeypatch.setattr(sessions, "PROJECTS_DIR", tmp_path)
+    row, _, _ = command_boot(claude_accounts[0])
+    write_transcript(tmp_path, [local_command(), after])
+    assert sessions._session(claude_accounts[0], row, []).waits_on_dialog
+
+
+@pytest.mark.parametrize("changes", [{"startedAt": None}, {"startedAt": 1767693602000}, {"status": "busy"}, {"pid": None}])
+def test_readiness_requires_a_completion_from_the_current_idle_process(
+    claude_accounts: tuple[Account, Account], tmp_path: Path, monkeypatch, changes: dict
+) -> None:
+    monkeypatch.setattr(sessions, "PROJECTS_DIR", tmp_path)
+    row, _, _ = command_boot(claude_accounts[0])
+    write_transcript(tmp_path, [local_command()])
+    session = sessions._session(claude_accounts[0], row | changes, [])
+    assert (session.job_state, session.tempo) == ("working", "blocked")
+
+
+@pytest.mark.parametrize("entries", [
+    [],
+    [local_command() | {"timestamp": "invalid"}],
+    [local_command() | {"timestamp": "2026-01-06T10:00:01"}],
+    [local_command() | {"userType": "internal"}],
+    [local_command() | {"isMeta": True}],
+])
+def test_startup_without_current_local_command_evidence_stays_blocked(
+    claude_accounts: tuple[Account, Account], tmp_path: Path, monkeypatch, entries: list[dict]
+) -> None:
+    monkeypatch.setattr(sessions, "PROJECTS_DIR", tmp_path)
+    row, _, _ = command_boot(claude_accounts[0])
+    write_transcript(tmp_path, entries)
+    assert sessions._session(claude_accounts[0], row, []).waits_on_dialog
 
 
 def test_a_session_s_effort_is_the_one_its_options_say(claude_accounts: tuple[Account, Account]) -> None:
@@ -472,3 +644,40 @@ def test_a_plain_rate_limit_is_retried_like_a_cooldown_with_no_parse_error(tmp_p
     success["message"]["model"] = "claude-opus-5-5"
     write_transcript(tmp_path, [first, success, rate_limit_error("2026-11-12T10:00:00Z")])
     assert sessions.limit_stop(SESSION).cooldown_stops == 1
+
+
+def test_one_listing_of_transcripts_answers_until_it_is_old(tmp_path, monkeypatch):
+    """Every poll looks up the transcripts of hundreds of sessions; one listing of the folder answers them."""
+    monkeypatch.setattr(sessions, "PROJECTS_DIR", tmp_path)
+    monkeypatch.setattr(sessions, "TRANSCRIPTS_SECONDS", 3600)
+    write_transcript(tmp_path, [assistant("m1", text("first")) | {"message": {"role": "assistant",
+                                "stop_reason": "end_turn", "content": [text("first")]}}])
+    first = tmp_path / "-home-x" / f"{SESSION}.jsonl"
+    assert sessions.transcript_paths(SESSION) == [first]
+    assert sessions.transcript_paths(SESSION_A) == []
+    # The session resumes in another folder, and a new session starts.
+    resumed = tmp_path / "-home-y" / f"{SESSION}.jsonl"
+    resumed.parent.mkdir()
+    resumed.write_text(json.dumps({"type": "user", "message": {"role": "user", "content": "go on"}}) + "\n")
+    (tmp_path / "-home-x" / f"{SESSION_A}.jsonl").write_text(json.dumps(assistant("m3", text("new"))) + "\n")
+    assert sessions.transcript_paths(SESSION) == [first]
+    assert sessions.last_message(SESSION_A) == ""
+    # Delivery stops a session whose turn ended, so that answer comes from a new listing.
+    assert sessions.turn_ended(SESSION) is False
+    assert sorted(sessions.transcript_paths(SESSION)) == sorted([first, resumed])
+    assert sessions.last_message(SESSION_A) == "new"
+
+
+def test_a_transcript_removed_since_the_listing_is_looked_for_again(tmp_path, monkeypatch):
+    monkeypatch.setattr(sessions, "PROJECTS_DIR", tmp_path)
+    monkeypatch.setattr(sessions, "TRANSCRIPTS_SECONDS", 3600)
+    write_transcript(tmp_path, [assistant("m1", text("before the move"))])
+    assert sessions.last_message(SESSION) == "before the move"
+    moved = tmp_path / "-home-y" / f"{SESSION}.jsonl"
+    moved.parent.mkdir()
+    (tmp_path / "-home-x" / f"{SESSION}.jsonl").rename(moved)
+    assert sessions.last_message(SESSION) == "before the move"
+    assert sessions.transcript_paths(SESSION) == [moved]
+    moved.unlink()
+    assert sessions.last_message(SESSION) == ""
+    assert sessions.error_stop(SESSION) is None

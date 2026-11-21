@@ -589,7 +589,7 @@ def test_a_limit_stop_wakes_when_its_own_account_has_room(
     later = now.timestamp() - 60
     # A session on the work account got an answer after the stop: that says nothing about the personal account.
     monkeypatch.setattr(limits, "transcript_usage", lambda session_id: Usage(
-        stop=None, answer=(now, True) if session_id == answering else None, model="claude-fable-5-2"))
+        stop=None, answer=(now, True) if session_id == answering else None, model="claude-fable-5-2", effort=""))
     readings = {
         # Personal is still spent.
         "personal": {"rate_limits": {"five_hour": {"used_percentage": 100, "resets_at": now.timestamp() + HOUR}},

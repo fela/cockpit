@@ -1,15 +1,9 @@
-// The step bar's fill: how much of the user's time on the item is behind them (SPEC NEXT-35). Puts a size and progress
-// on a step in the queue, then checks, at desktop and phone width:
-// - before enough estimates are checked, the fill and its words show the session's estimate as given;
-// - once /api/state carries a correction, the fill takes its gap off, and the words name the session's estimate;
-// - a correction that would go below 0 stops at 0;
-// - Your time on Board explains the check and the correction in words.
-// Saves a screenshot of the bar per width in the work dir.
+// Your time's progress estimates (SPEC NEXT-35): at desktop and phone width, Your time explains in words how the
+// sessions' estimates of the user's time compare with their timer. Saves a screenshot of the section per width in
+// the work dir.
 //
 // Starts serve_preview.py (this checkout's Cockpit on a synthetic database; README.md says what it needs) and
-// drives a headless Chromium. The correction is added to the page's state responses in the browser, so the check does
-// not depend on how many finished items the synthetic database holds. Prints one line per check and exits 1 when one
-// failed.
+// drives a headless Chromium. Prints one line per check and exits 1 when one failed.
 //
 // Usage, from the checkout: node tests/browser/progress_bar.cjs
 
@@ -18,7 +12,7 @@
 const { spawn } = require("node:child_process");
 const fs = require("node:fs");
 const path = require("node:path");
-const { workFolder, screenshotRedrawn, fullState } = require("./work.cjs");
+const { workFolder, screenshotRedrawn } = require("./work.cjs");
 
 // Browser dependencies can be selected through the environment (README.md).
 const PLAYWRIGHT = process.env.PLAYWRIGHT_MODULE || "playwright";
@@ -40,62 +34,26 @@ async function main() {
   };
   try {
     const info = await harnessUp(work, server);
-    const headers = { cookie: `${info.name}=${info.value}`, origin: info.origin, "content-type": "application/json" };
-    const state = await fetch(`${info.origin}/api/state`, { headers }).then((response) => response.json());
-    // The bar shows on queue rows; Next up's card, the first step, has none.
-    const step = state.queue[1];
-    if (!step) throw new Error("the fixture database has fewer than two steps in the queue");
-    const put = await fetch(`${info.origin}/api/steps`, { method: "POST", headers,
-      body: JSON.stringify({ item_id: step.item_id, need: step.need, size: "medium", progress: 60 }) });
-    check("the step takes a size and progress", put.ok, `HTTP ${put.status}: ${await put.text()}`);
-
     browser = await chromium.launch({ executablePath: CHROMIUM });
     for (const width of [1280, 390]) {
-      for (const [name, correction, fill, words] of [
-        ["as given", null, 60, "Your part: medium, 60% behind you"],
-        ["corrected", { items: 4, estimates: 10, median_gap: 25, median_off: 30 }, 35,
-          "Your part: medium, 35% behind you"],
-        ["corrected, stopping at 0", { items: 3, estimates: 10, median_gap: 80, median_off: 80 }, 0,
-          "Your part: medium, 0% behind you"],
-      ]) {
-        const context = await browser.newContext({ viewport: { width, height: 900 }, colorScheme: "dark" });
-        await context.setExtraHTTPHeaders({ cookie: headers.cookie });
-        const page = await context.newPage();
-        page.setDefaultTimeout(5000);
+      const context = await browser.newContext({ viewport: { width, height: 900 }, colorScheme: "dark" });
+      await context.setExtraHTTPHeaders({ cookie: `${info.name}=${info.value}` });
+      const page = await context.newPage();
+      page.setDefaultTimeout(5000);
       page.setDefaultNavigationTimeout(60000);
-        const errors = [];
-        page.on("pageerror", (error) => errors.push(error.message));
-        await page.route("**/api/state*", async (route) => {
-          const full = await fullState(route);
-          const body = await full.response.json();
-          body.progress_correction = correction;
-          await route.fulfill({ ...full, json: body });
-        });
-        await page.goto(`${info.origin}/classic`);
-        const bar = page.locator(`[data-step="${step.id}"] a.size-bar:visible`).first();
-        await bar.waitFor();
-        // A poll may redraw the bar while it is measured; the measure is taken again until the bar is drawn.
-        const seen = await waitFor(() => bar.evaluate((el) => ({
-          // The page moves a title into its own tooltip (data-tip) once it is drawn.
-          title: el.getAttribute("title") || el.dataset.tip || "",
-          fill: Math.round(el.querySelector(".size-fill").getBoundingClientRect().width / el.querySelector(".size-track").getBoundingClientRect().width * 100),
-        })), (now) => Number.isFinite(now.fill));
-        check(`${width} px, ${name}: the fill is ${fill} %`, Math.abs(seen.fill - fill) <= 2, seen.fill);
-        check(`${width} px, ${name}: the words say so`, seen.title.split("\n")[0] === words, seen.title);
-        if (name === "corrected") {
-          const shot = path.join(work, `progress-bar-${width}.png`);
-          await screenshotRedrawn(page.locator(`[data-step="${step.id}"]`).first(), { path: shot });
-          console.error(`  screenshot ${shot}`);
-          await bar.click();
-          const note = await waitFor(() => page.evaluate(() => document.querySelector("#estimates .note")?.textContent || ""),
-            (text) => text.length > 0);
-          check(`${width} px: Your time explains the check against your timer`, /your timer time on the task/.test(note), note);
-        }
-        check(`${width} px, ${name}: no page errors`, errors.length === 0, errors.join(" | "));
-        // The state route may still be fetching; it lets go before the context closes.
-        await page.unrouteAll({ behavior: "ignoreErrors" });
-        await context.close();
-      }
+      const errors = [];
+      page.on("pageerror", (error) => errors.push(error.message));
+      await page.goto(`${info.origin}/#time`);
+      const estimates = page.locator("#estimates");
+      await estimates.waitFor({ timeout: 30000 });
+      const note = await waitFor(() => page.evaluate(() => document.querySelector("#estimates .note")?.textContent || ""),
+        (text) => text.length > 0);
+      check(`${width} px: Your time explains the check against your timer`, /your timer time on the task/.test(note), note);
+      const shot = path.join(work, `progress-estimates-${width}.png`);
+      await screenshotRedrawn(estimates, { path: shot });
+      console.error(`  screenshot ${shot}`);
+      check(`${width} px: no page errors`, errors.length === 0, errors.join(" | "));
+      await context.close();
     }
   } finally {
     if (browser) await browser.close();

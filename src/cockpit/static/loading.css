@@ -64,8 +64,8 @@
 
 /* The open step's shape, as Next up draws it: the item's name, the question in two large lines, the line under it,
    the history set in from the left, the text, and the reply box at the bottom. The text keeps to the step's measure;
-   the reply box spans the column, as the real one does. The classic page frames it as a card; the sidebar page draws
-   the step on the page itself (sidebar.css), so its ghost has no frame either. */
+   the reply box spans the column, as the real one does. The page draws the step on the page itself (sidebar.css),
+   so its ghost has no frame either. */
 .ghost-card {
   padding: 28px 36px 24px;
   border-radius: var(--radius-lg);
@@ -160,7 +160,3 @@ iframe.frame-arrived { animation: load-fade-in 220ms ease-out both; }
   .load-line.on > span, .load-line.done > span { transform: scaleX(1); transition: none; }
 }
 
-/* The list of items is on the sidebar page only; the classic page leaves its ghost out too. */
-body:not([data-layout="sidebar"]) #sidebar { display: none; }
-/* Until the first drawing, the side boxes have nothing to frame. */
-.layout:has(#next > [data-ghost]) .side:not(:has(.panel:not(:empty))) { display: none; }

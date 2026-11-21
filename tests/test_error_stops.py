@@ -355,3 +355,31 @@ def test_an_error_entry_without_a_time_zone_is_no_error_stop(transcripts: Path) 
     entry = api_error(NOW) | {"timestamp": NOW.strftime("%Y-%m-%dT%H:%M:%S")}
     transcript(transcripts, SESSION_A, entry)
     assert sessions.error_stop(SESSION_A) is None
+
+
+def test_an_unchanged_transcript_is_not_read_again(transcripts: Path, monkeypatch) -> None:
+    """Every poll asks every session for its error stop; a transcript that has not changed keeps its answer."""
+    transcript(transcripts, SESSION_A, ok(NOW - timedelta(minutes=3)), api_error(NOW - timedelta(minutes=2)))
+    read_tail = sessions._read_tail
+    reads = []
+
+    def counted(path: Path, size: int) -> list[Any] | None:
+        reads.append(path)
+        return read_tail(path, size)
+
+    monkeypatch.setattr(sessions, "_read_tail", counted)
+    first = sessions.error_stop(SESSION_A)
+    assert first is not None and len(reads) == 1
+    assert sessions.error_stop(SESSION_A) == first and len(reads) == 1
+    append(transcripts, SESSION_A, prompt(NOW - timedelta(minutes=1)), ok(NOW))
+    assert sessions.error_stop(SESSION_A) is None
+    assert len(reads) == 2
+
+
+def test_a_transcript_that_could_not_be_read_is_read_again(transcripts: Path, monkeypatch) -> None:
+    transcript(transcripts, SESSION_A, api_error(NOW))
+    read_tail = sessions._read_tail
+    monkeypatch.setattr(sessions, "_read_tail", lambda path, size: None)
+    assert sessions.error_stop(SESSION_A) is None
+    monkeypatch.setattr(sessions, "_read_tail", read_tail)
+    assert sessions.error_stop(SESSION_A) is not None

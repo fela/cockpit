@@ -1,8 +1,8 @@
 // The Usage page's choice of account for new sessions (SPEC SESSION-17), at 1280 and 390 px: the row under the Claude
 // meters says where new sessions start; pressing "2 h" for work makes it say work is the user's choice until a time,
-// and the hover card in the header says the same; "Back to the usual order" clears it. Nothing is wider than the
-// window, and the header's usage card has no line explaining the bars.
-// The header's hover card makes the same choice: the card stays open while the pointer moves from the
+// and the hover card of the usage bars at the foot of the left column says the same; "Back to the usual order" clears it. Nothing is wider than the
+// window, and the bars' card has no line explaining the bars.
+// The bars' hover card makes the same choice: the card stays open while the pointer moves from the
 // usage bars onto it, "30 min" for personal there makes personal the choice and shows pressed in another colour,
 // "2 h" changes it, pressing the chosen "2 h" again undoes it, the chosen length carries a bar for how
 // much of it has passed, and the card closes once the pointer leaves it.
@@ -76,18 +76,18 @@ async function main() {
       check(`${width} px: nothing wider than the window`,
         await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth) <= 0, "overflow");
       if (width === 1280) {
-        await page.goto(`${info.origin}/classic`);
+        await page.goto(`${info.origin}/`);
         await closeAway(page);
         await page.locator(".usage.caps").hover();
         const card = await page.locator(".tip.tip-card").textContent({ timeout: 30e3 }).catch(() => "");
-        check("the header's card names the choice", /New sessions start here, your choice until \d\d:\d\d/.test(card), card);
-        check("the header's card has no line explaining the bars", !/Bars fill/.test(card), card);
+        check("the bars' card names the choice", /New sessions start here, your choice until \d\d:\d\d/.test(card), card);
+        check("the bars' card has no line explaining the bars", !/Bars fill/.test(card), card);
         await chooseInCard(page, check, work);
         await chooseByKeyboard(page, check);
         await page.goto(`${info.origin}/usage`);
         await page.waitForSelector(".prefer", { timeout: COUNTED_MS });
       }
-      // The header's card already went back to the usual order at 1280 px.
+      // The bars' card already went back to the usual order at 1280 px.
       if (await page.getByRole("button", { name: "Back to the usual order" }).count()) {
         await page.getByRole("button", { name: "Back to the usual order" }).click();
       }
@@ -130,7 +130,7 @@ async function main() {
   process.exitCode = failed.length ? 1 : 0;
 }
 
-// The choice made on the header's hover card: the pointer moves from the bars onto the card in small steps, as a hand
+// The choice made on the bars' hover card: the pointer moves from the bars onto the card in small steps, as a hand
 // does, crossing the gap between them; the card is filled again as the choice lands.
 async function chooseInCard(page, check, work) {
   const card = page.locator(".tip.tip-card");
@@ -212,15 +212,18 @@ async function chooseByKeyboard(page, check) {
   check("Escape on the bars closes the card", !(await card.isVisible()), "still open");
 }
 
-// The header's card in a short window, in the dark scheme: the card ends inside the window, and scrolling it to the
+// The bars' card in a short window, in the dark scheme: the card ends inside the window, and scrolling it to the
 // work account's "1 day" keeps it open so the button can be pressed.
 async function shortWindow(browser, info, check, work, pageErrors) {
   const context = await browser.newContext({ viewport: { width: 390, height: 320 }, colorScheme: "dark" });
   await context.setExtraHTTPHeaders({ cookie: `${info.name}=${info.value}` });
   const page = await context.newPage();
   page.on("pageerror", (error) => pageErrors.push(error.message));
-  await page.goto(`${info.origin}/classic`);
+  await page.goto(`${info.origin}/`);
   await closeAway(page);
+  // A phone's item screen hides the list, whose foot holds the bars: Your items goes to it.
+  const back = page.locator(".phone-back");
+  if (await back.isVisible()) await back.click();
   await page.locator(".usage.caps").hover();
   const card = page.locator(".tip.tip-card");
   await card.waitFor({ state: "visible", timeout: 30e3 });
@@ -242,7 +245,7 @@ async function shortWindow(browser, info, check, work, pageErrors) {
 }
 
 // The fixture may hold a timer running while the user was away: its dialog asks once per stretch
-// away and covers the header; closing it leaves it closed for that stretch. A timer that ran on without activity
+// away and covers the page; closing it leaves it closed for that stretch. A timer that ran on without activity
 // brings the "No activity" dialog, which comes back until answered: Return answers it on the fixture.
 async function closeAway(page) {
   await page.waitForSelector("#usage .usage", { state: "attached", timeout: COUNTED_MS });

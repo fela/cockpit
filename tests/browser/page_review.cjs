@@ -62,7 +62,7 @@ let browser;
     return { item, step, report };
   };
   const main = async (page) => {
-    await page.goto(origin + "/classic");
+    await page.goto(origin + "/");
     await page.waitForFunction(() => typeof ui !== "undefined" && ui.state);
   };
   const pagesView = async (page, data) => {
@@ -219,9 +219,9 @@ let browser;
     });
     await page.evaluate(({ report, step }) => {
       const body = { name: "choice", chosen: "first", label: "", step_id: step.id };
-      CockpitChoices.save(report.id, body, () => {});
-      CockpitChoices.save(report.id, { ...body, chosen: "middle" }, () => {});
-      CockpitChoices.save(report.id, { ...body, chosen: "latest" }, () => {});
+      CockpitChoices.save(report.id, body, () => {}, false);
+      CockpitChoices.save(report.id, { ...body, chosen: "middle" }, () => {}, false);
+      CockpitChoices.save(report.id, { ...body, chosen: "latest" }, () => {}, false);
     }, data);
     try {
       await until(() => values.length === 1);

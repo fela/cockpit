@@ -282,10 +282,9 @@ Press Cmd+K (Ctrl+K on Windows/Linux) to search work, sessions and actions. Pres
 `?` for the shortcut guide. J/K select rows, Enter opens one, and Cmd+Enter sends
 the current reply. Single-key shortcuts pause in text fields.
 
-The Settings page (in the Cockpit menu) offers Vim editing for session prompts and
-replies, using the bundled CodeMirror editor. `i` enters Insert mode, Esc returns to
-Normal mode, and Tab leaves the editor. The preference is saved per browser. The
-same page sets when the morning briefing and weekly digest come, and the time zone.
+The Cockpit menu offers Vim editing for session prompts and replies, using the
+bundled CodeMirror editor. `i` enters Insert mode, Esc returns to Normal mode, and
+Tab leaves the editor. The preference is saved per browser.
 
 ## Development and tests
 

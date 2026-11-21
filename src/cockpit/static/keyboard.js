@@ -5,28 +5,25 @@
 (() => {
   const mac = /Mac|iPhone|iPad/.test(navigator.platform);
   const modifier = mac ? "⌘" : "Ctrl";
-  // Where keys belong to the control: text being written, and a list's grip, whose arrows move its row.
-  const editing = "input, textarea, select, [contenteditable]:not([contenteditable='false']), [role='textbox'], .inbox-grip";
-  // Each place with its page's icon, as the rail shows it.
+  // Where keys belong to the control: text being written, a list's grip, whose arrows move its row, and a part that
+  // says it reads the arrows itself, such as a graph.
+  const editing = "input, textarea, select, [contenteditable]:not([contenteditable='false']), [role='textbox'], .inbox-grip, [data-arrow-keys]";
+  // Each place with its page's icon, as the rail shows it. A part's pages follow Pages: its first script
+  // (Part.first_scripts) lists them in `cockpitPartPages`, each with its path, title, G key, search words and icon.
   const destinations = [
     ["home", "Cockpit", "/", "h", "home next up inbox", "step"],
-    ["sessions", "Sessions", "/classic#sessions", "s", "all work board projects items agents conversations in progress done", "terminal"],
-    ["messages", "Messages", "/classic#board/messages", "m", "replies delivery", "mail"],
     ["priorities", "Priorities", "/#home/goals", "p", "goals", "target"],
     ["briefing", "Briefing", "/briefing", "r", "morning team", "log"],
     ["pages", "Pages", "/pages", "a", "html reports charts plans shared", "chart"],
+    ...(window.cockpitPartPages || []).map((page) => [page.path, page.title, page.path, page.key, page.words, page.mark]),
     ["usage", "Usage", "/usage", "u", "tokens costs limits", "meter"],
     ["server", "Server", "/server", "v", "processor cpu memory load machine host tasks resources", "box"],
     ["spec", "Spec", "/spec", "d", "documentation requirements", "doc"],
     ["skills", "Skills", "/skills", "k", "instructions", "bolt"],
-    ["settings", "Settings", "/settings", "t", "preferences options schedule briefing digest time zone vim", "tune"],
   ];
   const SHOW_KEY = "cockpit.showSection";
-  // The Cockpit page with the list of items at its left (VIEW-26), and the page from before it that still holds the
-  // list of sessions.
-  const COCKPIT_PAGES = new Set(["/", "/classic"]);
-  // The routes into the list of work, which only /classic has.
-  const WORK_ROUTES = new Set(["sessions", "messages", "failed", "work"]);
+  // The Cockpit page, with the list of items at its left (VIEW-26).
+  const COCKPIT_PAGE = "/";
   let bridge = {};
   let cachedState = null;
   let cachedAt = 0;
@@ -62,18 +59,18 @@
     }
     return null;
   };
-  // With the sidebar the main column always shows the picked row's task, so it takes no mark of being picked:
+  // The main column always shows the picked row's task, so it takes no mark of being picked:
   // J/K and a click move through the rows, never onto the card, a conversation or their column.
-  const shownCard = (node) => document.body.dataset.layout === "sidebar" && node.matches("#next, #next > .next-card, #session-view, #session-view > .session-card, #settings-view, #settings-view > .settings-card");
-  // R replies on the highlighted row; with the sidebar and nothing highlighted, on the task the card shows.
+  const shownCard = (node) => node.matches("#next, #next > .next-card, #session-view, #session-view > .session-card, #settings-view, #settings-view > .settings-card");
+  // R replies on the highlighted row; with nothing highlighted, on the task the card shows.
   const replyTarget = () => {
-    if (current() || document.body.dataset.layout !== "sidebar") return current();
+    if (current()) return current();
     const card = document.querySelector("#next > .next-card");
     return visible(card) ? card : null;
   };
   const candidates = () => {
     const rows = [...document.querySelectorAll(
-      "#sidebar .sidebar-list > li[data-item], #sidebar .sidebar-list > li[data-warning], #next [data-step], #queue .row[data-step], #work .row[data-item], #work .row[data-session], "
+      "#sidebar .sidebar-list > li[data-item], #sidebar .sidebar-list > li[data-warning], #next [data-step], #work .row[data-item], #work .row[data-session], "
       + "#doc [data-block], #briefing section[id], #days a[href], #pages-list a[data-page]",
     )].filter((node) => visible(node) && !node.closest(".motion-ghost, .left") && !shownCard(node));
     return rows.length ? rows : [...document.querySelectorAll("main section[id], main article[id]")]
@@ -107,8 +104,7 @@
     if (!rows.length) return;
     const at = rows.findIndex((node) => identity(node) === selected);
     // With no row selected, J starts at the first row on screen and K at the last, so the page stays where the
-    // user is: lower on the page in the list of work, J starts there (VIEW-3). A header held as a rail at the
-    // left (page-rail.css) covers none of the window's top.
+    // user is. A header held as a rail at the left (page-rail.css) covers none of the window's top.
     const header = document.querySelector("header");
     const top = header && getComputedStyle(header).position !== "fixed" ? header.getBoundingClientRect().bottom : 0;
     const onScreen = (node) => { const box = node.getBoundingClientRect(); return box.bottom > top && box.top < window.innerHeight; };
@@ -140,17 +136,13 @@
     routeHandled = "";
     // Going to a section shows it, also one the user folded; a route a load restores keeps the fold. From
     // another page the ask waits in this tab's storage for the Cockpit page to load.
-    const section = COCKPIT_PAGES.has(target.pathname) ? target.hash.match(/^#(?:board|home)\/(\w+)$/) : null;
+    const section = target.pathname === COCKPIT_PAGE ? target.hash.match(/^#(?:board|home)\/(\w+)$/) : null;
     if (target.pathname === location.pathname && target.search === location.search) {
       if (section) bridge.showSection?.(section[1]);
       const changing = target.hash !== location.hash;
       if (changing) location.hash = target.hash;
       else followRoute();
-      // Sessions is the list of work lower on the page (VIEW-3): G S scrolls down to it, and on /classic views.js
-      // shows and focuses it at once rather than at the hashchange, which can come after the keys typed since.
-      if (target.hash === "#sessions") {
-        if (!(changing && window.showWorkList?.())) document.getElementById("work")?.scrollIntoView({ block: "start" });
-      } else if (!target.hash) window.scrollTo(0, 0);
+      if (!target.hash) window.scrollTo(0, 0);
     } else {
       if (section) try { sessionStorage.setItem(SHOW_KEY, section[1]); } catch { /* blocked storage: it shows as left */ }
       if (window.CockpitCenter?.openHelper(target.href)) return;
@@ -169,31 +161,32 @@
     }
   }
 
+  function leaveAddress() {
+    history.replaceState(history.state, "", `${location.pathname}${location.search}`);
+    routeHandled = location.href;
+  }
+
   function followRoute() {
-    if (!COCKPIT_PAGES.has(location.pathname) || routeHandled === location.href) return;
-    const match = location.hash.match(/^#(?:board|home)\/(sessions|messages|failed|goals|work|patterns|time|permissions|item\/\d+|session\/[0-9a-f-]+)$/);
+    if (location.pathname !== COCKPIT_PAGE || routeHandled === location.href) return;
+    const match = location.hash.match(/^#(?:board|home)\/(goals|item\/\d+|session\/[0-9a-f-]+)$/);
     if (!match) return;
     const route = match[1];
-    // The page with the list of items at its left (VIEW-26) has no list of work: its routes go on to /classic.
-    if (WORK_ROUTES.has(route) && document.body.dataset.layout === "sidebar") {
-      location.replace(`/classic${location.hash}`);
-      return;
-    }
+    // A task or session route is followed once and then leaves the address, as #item/N does: a reload, such as
+    // Reload after a deploy, then shows the queue's card or the user's own pick, not the task the link once named.
     if (route.startsWith("item/")) {
       if (!bridge.state?.() || !bridge.openItem) return;
-      routeHandled = location.href;
+      leaveAddress();
       bridge.openItem(Number(route.slice(5)));
     } else if (route.startsWith("session/")) {
       if (!bridge.state?.() || !bridge.openSession) return;
-      routeHandled = location.href;
+      leaveAddress();
       queueMicrotask(() => bridge.openSession(route.slice(8)));
     } else {
       if (!bridge.state?.()) return;
       routeHandled = location.href;
-      // Messages is the list of work sorted by Your latest message, so it always sorts the list.
-      if (takeShowAsk() === route || route === "messages" || route === "failed") bridge.showSection?.(route);
-      // A task lets the page finish this hashchange before the scroll. Sessions is the list of work (VIEW-3).
-      setTimeout(() => document.getElementById(route === "sessions" || route === "messages" ? "work" : route)?.scrollIntoView({ block: "start" }));
+      if (takeShowAsk() === route) bridge.showSection?.(route);
+      // A task lets the page finish this hashchange before the scroll.
+      setTimeout(() => document.getElementById(route)?.scrollIntoView({ block: "start" }));
     }
   }
 
@@ -451,7 +444,8 @@
   }
 
   function otherModal() {
-    return [...document.querySelectorAll("dialog[open], [role='dialog']:not([hidden])")].some((node) => node !== dialog);
+    return window.shownOfflineNote?.()
+      || [...document.querySelectorAll("dialog[open], [role='dialog']:not([hidden])")].some((node) => node !== dialog);
   }
 
   function open() {

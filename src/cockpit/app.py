@@ -56,20 +56,25 @@ from cockpit import (
     activity,
     auth,
     briefing,
+    checker,
     codex,
     codex_login,
     commands,
     config,
+    connector_gateway,
     connector_signin,
     control_uses,
     db,
     delivery,
     emergency,
     flashes,
+    gateway_store,
+    handovers,
     history,
     inbox_settings,
     logins,
     machine,
+    model_capacity,
     page_errors,
     patterns,
     permissions,
@@ -77,6 +82,7 @@ from cockpit import (
     rank,
     render,
     request_stats,
+    resets,
     resources,
     schedules,
     secret_files,
@@ -93,12 +99,13 @@ from cockpit import (
     timesheet,
     top_cards,
     usage,
+    views,
     zones,
 )
 from cockpit import parts as installed_parts
-from cockpit import settings as user_settings
 from cockpit.codex_agent import CodexError, ProviderSessions
 from cockpit.config import Account, user_name
+from cockpit.connector_gateway import Gateway as ConnectorGateway
 from cockpit.parts import Context, Factory, Part, Tags
 from cockpit.sessions import (
     Session,
@@ -140,7 +147,7 @@ def activity_install_line(origin: str, code: str) -> str:
     """The line the user pastes in Terminal on the Mac. Its code works once, for a short while, so the shell's history
     keeps nothing that still works."""
     return f"curl -fsSL {origin}{ACTIVITY_INSTALL_PATH} | bash -s -- {code}"
-PUBLIC_PATHS = frozenset({"/healthz", MANIFEST_PATH, auth.SIGN_IN_PATH, auth.CALLBACK_PATH, ACTIVITY_INSTALL_PATH})
+PUBLIC_PATHS = frozenset({"/healthz", MANIFEST_PATH, "/offline-worker.js", auth.SIGN_IN_PATH, auth.CALLBACK_PATH, ACTIVITY_INSTALL_PATH})
 # A public page's link (SPEC API-5): exactly the shape `secrets.token_urlsafe(32)` makes, so nothing else is served
 # on the public host.
 PUBLIC_PAGE_PATH = re.compile(r"/p/[A-Za-z0-9_-]{43}")
@@ -978,6 +985,10 @@ class ForkIn(Body):
     text: Text
 
 
+class HandoverIn(Body):
+    item_id: StrictInt
+
+
 class ClaudeCode(Body):
     code: Annotated[str, StringConstraints(strip_whitespace=True, pattern=r"^\S+$", max_length=512)]
 
@@ -1140,27 +1151,15 @@ class InProgressIn(Body):
 
 
 class BriefingIn(Body):
-    # The day Cockpit's request named (YYYY-MM-DD); briefing.put refuses an earlier one.
+    # The day Cockpit's request named (YYYY-MM-DD); briefing.put and put_digest refuse an earlier one.
     day: str
     # Markdown; briefing.put names the limit when it is too long.
     body: str
-    # "weekly" for the weekly digest (SPEC VIEW-36).
-    kind: Literal["daily", "weekly"] = "daily"
 
 
 class ZoneIn(Body):
     # An IANA zone name, such as Asia/Jakarta: the one the browser reports, or the one the user picked.
     zone: str
-
-
-class SettingsIn(Body):
-    # The Settings page's schedule (SPEC CONTROL-33): hours 0 to 23 in the user's time zone, the digest's day 0
-    # (Monday) to 6 (Sunday) or null for no digest; user_settings.put_schedule checks them. A left-out field
-    # keeps its value.
-    nullable: ClassVar[frozenset[str]] = frozenset({"digest_day"})
-    briefing_hour: int | None = None
-    digest_day: int | None = None
-    digest_hour: int | None = None
 
 
 class TeamIn(Body):
@@ -1379,6 +1378,7 @@ def create_app(
     spend_index: spend.SpendIndex,
     codex_index: codex.CodexIndex,
     parts: list[Factory],
+    read_view: views.Reader,
 ) -> FastAPI:
     if settings.auth_mode == "local":
         config.validate_local_origin(settings.origin)
@@ -1395,12 +1395,18 @@ def create_app(
         lost = sidechat.mark_interrupted(setup)
         if lost:
             log.error("%d side chat question(s) lost their answer to a restart and are now marked failed", lost)
+        unread = store.interrupt_snooze_reads(setup, datetime.now(UTC))
+        if unread:
+            log.error("%d typed snooze time(s) lost their reading to a restart; their steps or warnings woke", unread)
     finally:
         setup.close()
 
+    connectors = ConnectorGateway(gateway_store.Store(settings.db_path.parent / "connectors"))
+
     @contextlib.asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncGenerator[None]:
-        yield
+        async with connectors.manager.run():
+            yield
         # Stopping, such as for a deploy's restart: the deliveries under way finish first (SPEC MSG-5). Here, since
         # uvicorn raises the stop signal again once it has stopped, so nothing after `uvicorn.run` runs.
         cut = await asyncio.to_thread(deliverer.drain, delivery.DRAIN_SECONDS)
@@ -1409,6 +1415,7 @@ def create_app(
 
     app = FastAPI(title="Cockpit", docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
     app.state.db_path = settings.db_path
+    app.state.connector_gateway = connectors
     app.state.requests = request_stats.Recorder()
     # When this process started, and began to stop (server.StopNoting), so a page error from the restart is told apart.
     app.state.started_at = datetime.now(UTC)
@@ -1427,8 +1434,12 @@ def create_app(
     session_cookie = auth.LOCAL_SESSION_COOKIE if local else auth.SESSION_COOKIE
     cookie_attributes = auth.LOCAL_COOKIE_ATTRIBUTES if local else auth.COOKIE_ATTRIBUTES
     sign_in_path = auth.LOCAL_SIGN_IN_PATH if local else auth.SIGN_IN_PATH
+    # This partitions saved browser data; it is an opaque identifier and grants no access to any endpoint.
+    offline_user = hmac.new(key, f"offline-owner\0{auth.canonical_email(settings.email)}\0{settings.db_path.resolve()}".encode(), hashlib.sha256).hexdigest()
 
     def caller(request: Request) -> str | None:
+        if request.headers.get("authorization", "").startswith("Bearer cgw_"):
+            return None
         if auth.bearer_matches(request.headers.get("authorization"), settings.token):
             return "agent"
         value = request.cookies.get(session_cookie)
@@ -1453,7 +1464,7 @@ def create_app(
         request.state.arrived = datetime.now(UTC)
         # What the router matches, decoded, so the gate and the router can't read a path differently.
         path = request.scope["path"]
-        if local and (
+        if local and path != connector_gateway.MCP_PATH and (
             request.url.netloc != settings.origin.removeprefix("http://")
             or request.client is None or request.client.host not in {"127.0.0.1", "::1"}
         ):
@@ -1476,6 +1487,24 @@ def create_app(
                 response = PlainTextResponse("Not found", status_code=404, headers={"Cache-Control": "no-store"})
             for header, value in SECURITY_HEADERS.items():
                 response.headers.setdefault(header, value)
+            return response
+        if path == connector_gateway.MCP_PATH:
+            request.state.me = None
+            request.state.actor = None
+            if (request.client is None or request.client.host not in connector_gateway.LOOPBACK
+                    or request.headers.get("host") not in connector_gateway.HOSTS
+                    or len(request.headers.getlist("host")) != 1
+                    or any(name == "forwarded" or name.startswith("x-forwarded-") for name in request.headers)
+                    or request.headers.get("origin") is not None):
+                return _error(403, "connector gateway accepts direct loopback tunnel requests only")
+            if len(request.headers.getlist("authorization")) != 1:
+                return _error(401, "a connector client token is required")
+            client = connectors.store.authenticate(request.headers.get("authorization"))
+            if client is None:
+                return _error(401, "a connector client token is required")
+            request.state.gateway_client = client
+            response = await call_next(request)
+            response.headers.setdefault("Cache-Control", "no-store")
             return response
         # The Mac sends its minutes with its own key, which the route checks; no cookie or other token counts there,
         # so it needs no Origin either (SPEC TRACK-9). A part's route with a key of its own is the same.
@@ -1522,6 +1551,9 @@ def create_app(
         elif path.startswith("/static/"):
             # Only this process's name is kept: a page from before a restart asks with its old tag.
             response.headers["Cache-Control"] = STATIC_KEPT if request.query_params.get("v") == static_tag else "no-cache"
+        if me == "user" and (path == "/" or path.startswith("/api/")):
+            response.headers["X-Cockpit-Offline-User"] = offline_user
+            response.headers["X-Cockpit-Offline-Until"] = request.cookies[session_cookie].split(".")[-2]
         return response
 
     def route_template(request: Request) -> str | None:
@@ -1627,6 +1659,13 @@ def create_app(
         log.error("database error: %s", exc)
         return _error(503, f"database busy or failing: {exc}")
 
+    @app.exception_handler(views.ReadTimeout)
+    async def page_read_timeout(_: Request, exc: views.ReadTimeout) -> JSONResponse:
+        log.error("page state read timed out: %s", exc)
+        response = _error(503, str(exc))
+        response.headers["Retry-After"] = "1"
+        return response
+
     @app.exception_handler(sessions.LookupFailed)
     async def lookup_failed(_: Request, exc: sessions.LookupFailed) -> JSONResponse:
         # list_sessions logged the listing's failure, as an error unless it timed out.
@@ -1636,6 +1675,11 @@ def create_app(
     def user_only(request: Request) -> None:
         if request.state.me != "user":
             raise store.Forbidden(f"only {user_name()}, signed in on the page, can do this")
+
+    # This exact route has an independent credential role above.
+    from starlette.routing import Route
+
+    app.router.routes.append(Route(connector_gateway.MCP_PATH, endpoint=connectors, methods=["GET", "POST", "DELETE"]))
 
     def session_only(request: Request) -> None:
         if request.state.me != "agent":
@@ -1759,20 +1803,45 @@ def create_app(
     # Page
 
     # Each page says which Cockpit sent it. Its Reload (UI-13) compares against this, not against the first answer it
-    # happens to get, which may already come from a newer Cockpit.
+    # happens to get, which may already come from a newer Cockpit. The parts' first scripts (Part.first_scripts) follow,
+    # ahead of the page's own.
     def with_version(page: str) -> str:
-        return page.replace("<head>", f'<head>\n  <meta name="cockpit-version" content="{version}">', 1)
+        first = "".join(f'\n  <script src="/static/{path}?v={static_tag}"></script>'
+                        for part in built for path in part.first_scripts)
+        return page.replace("<head>", f'<head>\n  <meta name="cockpit-version" content="{version}">{first}', 1)
+
+    def scoped_page(request: Request, response: HTMLResponse) -> HTMLResponse:
+        """Give authenticated helper pages the same opaque outbox partition as the board."""
+        if request.state.me != "user":
+            return response
+        expires = request.cookies[session_cookie].split(".")[-2]
+        marks = f' data-offline-user="{offline_user}" data-offline-until="{expires}" data-offline-helper="1"'
+        page = response.body.decode("utf-8")
+        # Only the leading document root is markup here; a figure's script/comment may contain literal HTML.
+        prefix = re.match(r"\A\s*(?:(?:<!doctype[^>]*>|<!--.*?-->)\s*)*", page, re.IGNORECASE | re.DOTALL)
+        assert prefix is not None
+        rest = page[prefix.end():]
+        if re.match(r"<html\b", rest, re.IGNORECASE):
+            rest = re.sub(r"\A<html\b", lambda match: match[0] + marks, rest, count=1, flags=re.IGNORECASE)
+        else:
+            rest = f"<html{marks}>" + rest
+        page = page[:prefix.end()] + rest
+        response.body = page.encode("utf-8")
+        response.headers["Content-Length"] = str(len(response.body))
+        return response
 
     # Built for each request rather than sent as a file: a file's ETag could answer 304 and keep an old version.
     def plain_page(name: str) -> HTMLResponse:
         return HTMLResponse(with_version((STATIC_DIR / name).read_text()), headers={"Cache-Control": "no-cache"})
 
-    # The helper pages also open in the layers over Cockpit's main page, so Cockpit's own pages may frame them.
+    # The helper pages also open in the layers over Cockpit's main page, so Cockpit's own pages may frame them. The pages
+    # that take part tags and the parts' own pages (under static/private/) name their files with the static tag.
     def framed_page(name: str) -> HTMLResponse:
         text = (STATIC_DIR / name).read_text()
         if name in PART_PAGES:
             tags = [part.page_tags[name] for part in built if name in part.page_tags]
             text = with_part_tags(text, tags)
+        if name in PART_PAGES or name.startswith("private/"):
             text = STATIC_REFERENCE.sub(rf'\1?v={static_tag}"', text)
         return HTMLResponse(with_version(text), headers={
             "Cache-Control": "no-cache", "Content-Security-Policy": FRAMED_BY_COCKPIT,
@@ -1782,12 +1851,20 @@ def create_app(
     context = Context(
         user_only=user_only,
         framed_page=framed_page,
+        scoped_page=scoped_page,
         session_cache=session_cache,
         claude_settings=settings.claude_settings,
         db_path=settings.db_path,
         unrecorded_paths=unrecorded_paths,
         own_key_posts=own_key_posts,
         origin=settings.origin,
+        spend_index=spend_index,
+        codex_index=codex_index,
+        spec_repo=settings.spec_repo,
+        checkouts_dir=settings.checkouts_dir,
+        providers=(settings.default_provider,
+                   *(provider for provider in settings.providers if provider != settings.default_provider)),
+        deliver=lambda message_id: deliverer.start(f"send-{message_id}", deliverer.send, message_id),
     )
     built: list[Part] = [factory(context) for factory in parts]
     for part in built:
@@ -1796,14 +1873,19 @@ def create_app(
             raise ValueError(f"a part has tags for pages that take none: {', '.join(unknown)}")
     index_tags = [part.page_tags["index.html"] for part in built if "index.html" in part.page_tags]
 
-    def cockpit_page(layout: str) -> HTMLResponse:
+    def cockpit_page(request: Request) -> HTMLResponse:
         # CodeMirror creates its own styles. A fresh style-only nonce permits
         # those without allowing inline scripts or arbitrary inline styles.
         nonce = secrets.token_urlsafe(24)
         page = with_part_tags((STATIC_DIR / "index.html").read_text(), index_tags)
         page = with_version(STATIC_REFERENCE.sub(rf'\1?v={static_tag}"', page))
+        if request.state.me == "user":
+            cookie = request.cookies[session_cookie]
+            expires = cookie.split(".")[-2]
+            page = page.replace('<html lang="en">', f'<html lang="en" data-offline-user="{offline_user}" data-offline-until="{expires}">', 1)
         options = installed_parts.page_options()
-        marks = f'data-layout="{layout}"'
+        # The page's styles key on this mark (sidebar.css).
+        marks = 'data-layout="sidebar"'
         if options:
             for name, value in options.marks.items():
                 marks += f" {name}" if value is None else f' {name}="{html.escape(value, quote=True)}"'
@@ -1813,20 +1895,30 @@ def create_app(
         policy = SECURITY_HEADERS["Content-Security-Policy"] + f"; style-src 'self' 'nonce-{nonce}'"
         if options and options.frame_origins:
             policy += "; frame-src 'self' " + " ".join(options.frame_origins)
-        return HTMLResponse(page, headers={"Cache-Control": "no-cache", "Content-Security-Policy": policy})
+        headers = {"Cache-Control": "no-cache", "Content-Security-Policy": policy}
+        if request.state.me == "user":
+            headers["X-Cockpit-Offline-Until"] = expires
+        return HTMLResponse(page, headers=headers)
 
-    # The Cockpit page with the list of items at its left (SPEC VIEW-26). The page from before it stays at /classic
-    # while the list grows to hold what only that page has, such as the list of sessions.
+    # The Cockpit page, with the list of items at its left (SPEC VIEW-26).
     @app.get("/")
-    def index() -> HTMLResponse:
-        return cockpit_page("sidebar")
+    def index(request: Request) -> HTMLResponse:
+        return cockpit_page(request)
 
-    @app.get("/classic")
-    def classic_page() -> HTMLResponse:
-        return cockpit_page("classic")
+    @app.get("/offline-worker.js")
+    def offline_worker() -> FileResponse:
+        return FileResponse(STATIC_DIR / "offline-worker.js", media_type="text/javascript", headers={
+            "Cache-Control": "no-store", "Service-Worker-Allowed": "/",
+        })
 
-    # Where the sidebar page was tried; old links keep working.
+    @app.get("/api/offline/session", dependencies=[Depends(user_only)])
+    def offline_session(request: Request) -> dict[str, Any]:
+        return {"user": offline_user, "until": int(request.cookies[session_cookie].split(".")[-2])}
+
+    # Old addresses of the Cockpit page: where the sidebar page was tried, and the page from before it; old links keep
+    # working.
     @app.get("/next")
+    @app.get("/classic")
     def next_page() -> RedirectResponse:
         return RedirectResponse("/", status_code=308)
 
@@ -1836,32 +1928,28 @@ def create_app(
     @app.get("/skills")
     @app.get("/skills/{name}")
     @app.get("/writing")
-    def spec_page() -> HTMLResponse:
-        return framed_page("spec.html")
-
-    @app.get("/settings")
-    def settings_page() -> HTMLResponse:
-        return framed_page("settings.html")
+    def spec_page(request: Request) -> HTMLResponse:
+        return scoped_page(request, framed_page("spec.html"))
 
     @app.get("/briefing")
-    def briefing_page() -> HTMLResponse:
-        return framed_page("briefing.html")
+    def briefing_page(request: Request) -> HTMLResponse:
+        return scoped_page(request, framed_page("briefing.html"))
 
     @app.get("/usage")
-    def usage_page() -> HTMLResponse:
-        return framed_page("usage.html")
+    def usage_page(request: Request) -> HTMLResponse:
+        return scoped_page(request, framed_page("usage.html"))
 
     @app.get("/server")
-    def server_page() -> HTMLResponse:
-        return framed_page("server.html")
+    def server_page(request: Request) -> HTMLResponse:
+        return scoped_page(request, framed_page("server.html"))
 
     # The Pages view also opens in the layer over Cockpit's main page (SPEC NEXT-47, `&overlay=1`), so Cockpit's own
     # pages may frame it. It names its files with the main page's tag, so the layer takes them from the browser's
     # cache, which already has most of them from the main page, and asks Cockpit only for the page itself.
     @app.get("/pages")
-    def pages_page() -> HTMLResponse:
+    def pages_page(request: Request) -> HTMLResponse:
         page = with_version(STATIC_REFERENCE.sub(rf'\1?v={static_tag}"', (STATIC_DIR / "pages.html").read_text()))
-        return HTMLResponse(page, headers={"Cache-Control": "no-cache", "Content-Security-Policy": FRAMED_BY_COCKPIT})
+        return scoped_page(request, HTMLResponse(page, headers={"Cache-Control": "no-cache", "Content-Security-Policy": FRAMED_BY_COCKPIT}))
 
     # The emergency session (SPEC SESSION-21): a page and three calls that use no database, so they keep working
     # while the rest of the page is broken.
@@ -1951,7 +2039,12 @@ def create_app(
         """The open requests by the list the page shows each in."""
         return {
             "permission_requests": [
-                card for card in cards if not card["held"] and not card["moved_past"] and not card["settled"]
+                card for card in cards
+                if not card["held"] and not card["moved_past"] and not card["settled"] and not card["no_verdict"]
+            ],
+            # Auto mode's checker gave no verdict, and the tries Cockpit sent did not get past it: one card (PERM-32).
+            "checker_refusals": [
+                card for card in cards if card["no_verdict"] and not card["held"] and not card["moved_past"]
             ],
             "settled_requests": [card for card in cards if card["settled"]],
             "moved_past": [card for card in cards if not card["held"] and card["moved_past"]],
@@ -2003,6 +2096,10 @@ def create_app(
             "waiting_sessions": dialog_waiters(conn, now, dialogs, waiting, blocked["permission_requests"]),
         }
 
+    @app.get("/api/timer")
+    def timer_check(conn: Conn) -> dict[str, Any]:
+        return store.timer_check(conn)
+
     # The pages other than the main one ask only this, to say when a newer Cockpit is running (SPEC UI-13).
     @app.get("/api/version")
     def running_version() -> dict[str, str]:
@@ -2012,15 +2109,27 @@ def create_app(
 
     @app.get("/api/state")
     def state(request: Request, conn: Conn) -> Response:
+        began = previous = time.perf_counter()
+        timings = []
+
+        def checkpoint(name: str) -> None:
+            nonlocal previous
+            current = time.perf_counter()
+            timings.append((name, round((current - previous) * 1000)))
+            previous = current
+
         now = datetime.now(UTC)
         # A tab in the background asks with ?background=1: it keeps its cards current, but the user is not looking.
         if request.state.me == "user" and "background" not in request.query_params:
             sweeper.user_seen(conn, now)
         listing = session_cache.snapshot(wait=False)
+        checkpoint("listing")
         sessions = listing.sessions
         dialogs = store.open_dialogs(sessions)
         warnings = listing.warnings + schedules.warnings(conn)
-        result = store.page_state(conn, request.state.me, sessions, warnings, settings.checkouts_dir, opened_items(request))
+        view = read_view(settings.db_path, request.state.me, sessions, warnings, settings.checkouts_dir, opened_items(request))
+        result = view.state
+        checkpoint("page")
         result |= blocked_lists(conn, now, dialogs)
         result["account_problems"] = [
             {"text": problem.text, "detail": problem.detail} for problem in listing.account_problems
@@ -2036,9 +2145,29 @@ def create_app(
         result["home"] = str(Path.home())
         # What a new session may start with (SPEC SESSION-22): each enabled provider's models and efforts, its
         # defaults, and the Claude accounts to pick from.
+        capacity = installed_parts.model_capacity(conn, now)
+        local_capacity = None
+        if capacity is None:
+            local_accounts = accounts.in_use(settings.claude_accounts, [])
+            readings = accounts.readings(local_accounts, settings.claude_rate_limits) if not accounts.on_api_server(settings.claude_settings) else {}
+            named = {account.name: {each["model"]: each["reported"] for each in resets.model_limits_of(accounts.email(account))
+                                    if each["reported"] is not None} for account in local_accounts}
+            local_capacity = {
+                account.name: {model:
+                    model_capacity.account(model_capacity.model_windows(
+                        model, [each | {"captured_at": (readings.get(account.name) or {}).get("captured_at")}
+                                for each in (readings.get(account.name) or {}).get("rate_limits", {}).values()
+                                if each is not None],
+                        named.get(account.name, {}),
+                    ), now) for model, _label in config.SESSION_OPTIONS["claude"]["models"]}
+                for account in local_accounts
+            }
+            capacity = {model: model_capacity.combine([each[model] for each in local_capacity.values()])
+                        for model, _label in config.SESSION_OPTIONS["claude"]["models"]}
         result["session_options"] = {
             provider: {
-                "models": [{"name": name, "label": label, "speeds": config.session_speeds(provider, name)}
+                "models": [{"name": name, "label": label, "speeds": config.session_speeds(provider, name),
+                            "capacity": capacity.get(name, model_capacity.unknown())}
                            for name, label in config.SESSION_OPTIONS[provider]["models"]],
                 "efforts": config.SESSION_OPTIONS[provider]["efforts"],
                 "effort": config.SESSION_OPTIONS[provider]["effort"],
@@ -2051,7 +2180,8 @@ def create_app(
         result["codex_requests"] = deliverer.codex.requests() if deliverer.codex is not None else []
         # Blocked counts Claude permission requests only: the header names them as calls auto mode blocked.
         # Codex approvals and questions show under Blocked from codex_requests.
-        result["counts"]["blocked"] = len(result["permission_requests"])
+        # The calls auto mode's checker gave no verdict on share one card (SPEC PERM-32).
+        result["counts"]["blocked"] = len(result["permission_requests"]) + bool(result["checker_refusals"])
         shown = set(dialog_waiters(
             conn, now, dialogs, [session["session_id"] for session in result["waiting_sessions"]],
             result["permission_requests"],
@@ -2072,14 +2202,57 @@ def create_app(
             "codex": codex_index.weeks(now),
             "machine": machine.read() | {"tasks_now": resources.now_tasks(conn)},
         }
+        checkpoint("usage")
         spent = spend_index.per_session(now)
+        # The model a Claude session's latest own call ran on, which the step menu names.
+        models = spend_index.latest_models()
+        # What the prompt cache of the session that gets each step's answer holds, and until when.
+        caches = {"claude": spend_index.caches(), "codex": codex_index.caches()}
+        for group in ("queue", "ready_next", "snoozed", "with_agents"):
+            for step in result[group]:
+                target = step["target"]
+                cache = caches[target["provider"]].get(target["session_id"]) if target else None
+                step["cache"] = None if cache is None else spend.cache_at(cache, now)
+        checkpoint("spend")
+        codex_settings = {each["session_id"]: dict(each) for each in conn.execute(
+            "SELECT session_id, model, effort, speed FROM codex_threads")}
+        transcript_usages = view.usages
+        checkpoint("transcripts")
         for row in result["sessions"]:
             row["spend"] = spent.get(row["session_id"])
+            if row.get("provider") != "codex":
+                row["model"] = models.get(row["session_id"])
+                latest = conn.execute(
+                    "SELECT new_options FROM messages WHERE session_id = ? AND state = 'sent'"
+                    " AND new_options IS NOT NULL ORDER BY id DESC LIMIT 1", (row["session_id"],),
+                ).fetchone()
+                chosen = json.loads(latest[0]) if latest else {}
+                observed = transcript_usages[row["session_id"]]
+                current_model = row["model"] or observed.model or None
+                # The effort the session was started or last set to; for a session started without `--effort`,
+                # the effort of its last call, which Claude Code records from the model's default in its settings.
+                current_effort = row.get("effort") or observed.effort or chosen.get("effort") or None
+                row["settings"] = {"provider": "claude", "model": chosen.get("model") or current_model,
+                                   "effort": current_effort, "speed": None}
+            else:
+                chosen = codex_settings.get(row["session_id"], {})
+                row["model"] = chosen.get("model")
+                row["settings"] = {"provider": "codex", **{key: chosen.get(key) for key in ("model", "effort", "speed")}}
+            row["handover"] = handovers.status(conn, row["session_id"])
+            choices = dict(local_capacity.get(row.get("account"), {})) if local_capacity is not None and row.get("provider") != "codex" else dict(capacity)
+            row["settings"]["capacity"] = model_capacity.for_session(
+                transcript_usages.get(row["session_id"]), row["settings"]["model"], row["settings"]["provider"], choices, now,
+            )
+            if row["settings"]["model"] is not None:
+                choices[row["settings"]["model"]] = row["settings"]["capacity"]
+            row["settings"]["model_capacity"] = choices
+        checkpoint("session-settings")
         names = store.shown_session_names(conn, sessions)
         result["wrong_models"] = [
             row | {"name": names.get(row["session_id"]) or row["title"] or row["first_prompt"]}
-            for row in store.not_dismissed(conn, spend_index.wrong_models(now, store.started_models(conn)))
+            for row in store.not_dismissed(conn, spend_index.wrong_models(now, store.chosen_models(conn)))
         ]
+        checkpoint("model-warnings")
         result["snoozed_warnings"] = store.snoozed_warnings(conn, now)
         result["snooze_reads"] = store.snooze_reads(conn, now)
         result["handed_warnings"] = store.handed_warnings(conn)
@@ -2089,7 +2262,7 @@ def create_app(
             entry | {"waiting": entry["account"] in waiting} for entry in accounts.sign_ins(settings.claude_accounts, now)
         ] if "claude" in settings.providers else []
         result["codex_sign_ins"] = codex_login.status(conn, codex_index, codex_sign_in, request.state.me == "user")
-        result["briefing"] = briefing.status(conn)
+        result["briefing"] = briefing.status(conn, config.setup())
         result["team"] = briefing.team(conn)
         result["side_chats"] = sidechat.recent(conn, now)
         try:
@@ -2106,9 +2279,16 @@ def create_app(
                 raise ValueError(f"a part's state fields are already in the state: {', '.join(taken)}")
             result |= fields
         since = request.headers.get("x-cockpit-since")
+        checkpoint("extras")
         if since or request.headers.get("x-cockpit-sync") == "1":
-            return state_versions.response(result, since, request.state.me)
-        return JSONResponse(result)
+            response = state_versions.response(result, since, request.state.me)
+        else:
+            response = JSONResponse(result)
+        checkpoint("encode")
+        elapsed = round((time.perf_counter() - began) * 1000)
+        if elapsed >= 500:
+            log.warning("slow state build: %s ms; phases %s", elapsed, timings)
+        return response
 
     @app.get("/api/items")
     def get_item(conn: Conn, key: Annotated[str, Query(min_length=1)]) -> dict[str, Any]:
@@ -2125,6 +2305,12 @@ def create_app(
         store.check_agent_title(fields, request.state.actor)
         store.check_agent_waiting(fields, request.state.actor)
         stored = conn.execute("SELECT id, key, title FROM items WHERE key = ?", (fields["key"],)).fetchone()
+        # A run's item lets its session close it without a finish step (SPEC CONTROL-33), so only the scheduler
+        # makes one; an item made here under a run's future key would become that run's.
+        if stored is None and fields["key"].startswith(store.SCHEDULE_RUN_KEY):
+            raise store.NotFound(
+                f"no item with key {fields['key']}; only a scheduled prompt makes a {store.SCHEDULE_RUN_KEY} item",
+            )
         store.refuse_long_stored_title(stored, fields, request.state.actor)
         return store.upsert_item(conn, fields, request.state.actor)
 
@@ -2398,13 +2584,13 @@ def create_app(
 
     # `comments=1`: the page takes comments (SPEC NEXT-38).
     @app.get("/pages/{page_id}/figure")
-    def show_item_figure(page_id: int, conn: Conn, comments: bool = False) -> HTMLResponse:
+    def show_item_figure(page_id: int, request: Request, conn: Conn, comments: bool = False) -> HTMLResponse:
         page = store.item_page(conn, page_id)
-        return HTMLResponse(
+        return scoped_page(request, HTMLResponse(
             (with_pick_guard(page["html"]) if comments else page["html"])
             + FIGURE_SIZE_SCRIPT + FIGURE_LINK_SCRIPT + PAGE_CHOICES_SCRIPT + (PAGE_FRAME_SCRIPT if comments else ""),
             headers={"Content-Security-Policy": FIGURE_CSP, "Cache-Control": "no-cache"},
-        )
+        ))
 
     # Choices on a page (SPEC NEXT-48): the page sets its controls to them, and a session reads them.
     @app.get("/api/item-pages/{page_id}/choices")
@@ -2909,6 +3095,14 @@ def create_app(
     def dismiss_permission(request_id: int, conn: Conn) -> dict[str, Any]:
         return permissions.close(conn, settings.checkouts_dir, request_id, "dismissed", None)[0]
 
+    # Try again on the card for calls auto mode's checker gave no verdict on: each session tries its calls again.
+    @app.post("/api/permissions/checker/retry", dependencies=[Depends(user_only)])
+    def retry_checker_refusals(background: BackgroundTasks, conn: Conn) -> dict[str, Any]:
+        message_ids = checker.retry_now(conn, datetime.now(UTC), settings.checkouts_dir)
+        for message_id in message_ids:
+            background.add_task(deliverer.send, message_id)
+        return {"messages": message_ids}
+
     @app.post("/api/permissions/requests/{request_id}/settle")
     def settle_permission(request_id: int, body: PermissionSettle, conn: Conn) -> dict[str, Any]:
         return permissions.settle(conn, request_id, body.state)
@@ -2997,18 +3191,8 @@ def create_app(
         background.add_task(deliverer.send, message_id)
         return message
 
-    # A message that waits for its session's turn to end goes now: the session stops and resumes with it (SPEC MSG-3).
-    # One that waits for a place among the working sessions goes past the limit, and no session stops (SPEC SESSION-23).
-    @app.post("/api/messages/{message_id}/send-now", dependencies=[Depends(user_only)])
-    def send_now(message_id: int, background: BackgroundTasks, conn: Conn) -> dict[str, Any]:
-        message = store.send_now_message(conn, message_id)
-        background.add_task(
-            deliverer.restart if message["capacity_since"] is None else deliverer.send_past_limit, message_id
-        )
-        return message
-
     # The page's notice with Take back after a hand-off is gone (SPEC MSG-8): the message stops waiting for Take
-    # back and goes. A message that no longer waited for it (taken back, released or sent now) stays as it is.
+    # back and goes. A message that no longer waited for it (taken back or released) stays as it is.
     @app.post("/api/messages/{message_id}/release", dependencies=[Depends(user_only)])
     def release(message_id: int, background: BackgroundTasks, conn: Conn) -> dict[str, Any]:
         if store.release_message(conn, message_id):
@@ -3043,9 +3227,13 @@ def create_app(
     def dismiss_message(message_id: int, body: MessageDismiss, request: Request, conn: Conn) -> dict[str, Any]:
         return store.dismiss_message(conn, message_id, body.reason, request.state.actor)
 
-    @app.post("/api/messages/{message_id}/restore", dependencies=[Depends(user_only)])
-    def restore_message(message_id: int, conn: Conn) -> dict[str, Any]:
-        return store.restore_message(conn, message_id)
+    @app.post("/api/sessions/{session_id}/handover", dependencies=[Depends(user_only)])
+    def handover_session(session_id: SessionId, body: HandoverIn) -> Any:
+        result = deliverer.handover(session_id, body.item_id)
+        session_cache.invalidate()
+        if result["state"] == "failed":
+            return JSONResponse(status_code=502, content=result | {"error": result["detail"]})
+        return result
 
     # A dialog in a session's terminal that Cockpit cannot answer (SPEC PERM-8): the session stops and resumes,
     # and the call it makes again comes to Cockpit as a permission request.
@@ -3176,7 +3364,7 @@ def create_app(
     @app.post("/api/wrong-models/dismiss", dependencies=[Depends(user_only)])
     def dismiss_wrong_model(body: WrongModelDismissal, conn: Conn) -> dict[str, Any]:
         now = datetime.now(UTC)
-        rows = spend_index.wrong_models(now, store.started_models(conn))
+        rows = spend_index.wrong_models(now, store.chosen_models(conn))
         store.dismiss_wrong_model(conn, body.session_id, body.model, rows, now)
         return {"ok": True}
 
@@ -3186,7 +3374,7 @@ def create_app(
     @app.post("/api/wrong-models/investigate", dependencies=[Depends(user_only)])
     def investigate_wrong_model(body: WrongModelInvestigation, background: BackgroundTasks, conn: Conn) -> dict[str, Any]:
         now = datetime.now(UTC)
-        rows = spend_index.wrong_models(now, store.started_models(conn))
+        rows = spend_index.wrong_models(now, store.chosen_models(conn))
         if rows is None:
             raise store.Invalid("Cockpit is still counting the sessions' calls after a restart; try again in a minute")
         row = next((row for row in rows if row["session_id"] == body.session_id and row["model"] == body.model), None)
@@ -3282,7 +3470,7 @@ def create_app(
 
     @app.get("/api/briefings")
     def briefings(conn: Conn) -> dict[str, Any]:
-        return briefing.listing(conn)
+        return briefing.listing(conn, config.setup(), datetime.now(UTC))
 
     @app.get("/api/briefings/{briefing_id}")
     def get_briefing(briefing_id: int, conn: Conn) -> dict[str, Any]:
@@ -3290,7 +3478,12 @@ def create_app(
 
     @app.post("/api/briefings")
     def put_briefing(body: BriefingIn, request: Request, conn: Conn) -> dict[str, Any]:
-        return briefing.put(conn, request.state.actor, body.day, body.body, body.kind)
+        return briefing.put(conn, request.state.actor, body.day, body.body)
+
+    # The weekly digest (SPEC VIEW-37), when the setup turns it on; it is read like a briefing.
+    @app.post("/api/digests")
+    def put_digest(body: BriefingIn, request: Request, conn: Conn) -> dict[str, Any]:
+        return briefing.put_digest(conn, config.setup(), request.state.actor, body.day, body.body)
 
     # The user's time zone (SPEC CONTROL-32): each page reports its browser's zone and learns whether to ask about
     # switching; the user switches, keeps the zone, or picks one in the menu.
@@ -3309,19 +3502,6 @@ def create_app(
     @app.put("/api/timezone", dependencies=[Depends(user_only)])
     def put_zone(body: ZoneIn, conn: Conn) -> dict[str, Any]:
         return zones.put(conn, config.SETUP_PATH, body.zone, datetime.now(UTC))
-
-    # What the user sets on the Settings page (SPEC CONTROL-33): the schedule of the briefing and the weekly digest,
-    # with the time zone and team for the page to show.
-    @app.get("/api/settings", dependencies=[Depends(user_only)])
-    def get_settings(conn: Conn) -> dict[str, Any]:
-        return {
-            "schedule": user_settings.schedule(conn), "defaults": user_settings.DEFAULTS,
-            "zone": config.setup().timezone.key, "team": briefing.team(conn),
-        }
-
-    @app.put("/api/settings", dependencies=[Depends(user_only)])
-    def put_settings(body: SettingsIn, conn: Conn) -> dict[str, Any]:
-        return {"schedule": user_settings.put_schedule(conn, body.model_dump(exclude_unset=True))}
 
     # The people the briefing follows: the page asks the user, and an agent may set them on the user's word.
     @app.put("/api/team")
@@ -3409,17 +3589,6 @@ def create_app(
     def sweep_request(body: SweepRequest, request: Request, conn: Conn) -> dict[str, str]:
         sweeper.request(conn, request.state.actor, body.reason)
         return {"reason": body.reason}
-
-    @app.post("/api/sweeps/run", dependencies=[Depends(user_only)])
-    def sweep_run(background: BackgroundTasks, conn: Conn) -> dict[str, Any]:
-        """Send the sweeper session a full sweep, unless a sweep or check is under way."""
-        sweeper.resume(conn, "pressed Full sweep now")
-        # Whether the sweeper's session still exists on its model decides between resuming it and starting a new one.
-        known = {session.session_id for session in session_cache.snapshot(wait=True).sessions}
-        exists = sweeper.resumable(conn, known.__contains__, spend_index.latest_model)
-        message = sweeper.launch(conn, "user", settings.sweep_prompt, settings.sweep_cwd, exists, "sweep", [])
-        background.add_task(deliverer.send, message["id"])
-        return message
 
     @app.post("/api/update", dependencies=[Depends(user_only)])
     def update(background: BackgroundTasks, conn: Conn) -> dict[str, Any]:
@@ -3588,8 +3757,9 @@ def create_app(
     @app.get("/api/spend")
     def get_spend(conn: Conn, period: Annotated[str, Query(pattern=r"^(week|[0-9]{1,2})$")]) -> dict[str, Any]:
         now = datetime.now(UTC)
-        # Keep the page's last completed reading across restarts while both indexes rebuild.
-        cache_key = f"spend-report-v1:{period}" if period in ("week", "1", "7", "30") else None
+        # Keep the page's last completed reading across restarts while both indexes rebuild. The key's version changes
+        # whenever the report's shape changes, so the page never gets a saved report it cannot draw.
+        cache_key = f"spend-report-v2:{period}" if period in ("week", "1", "7", "30") else None
         refreshing = spend_index.ready_at is None or codex_index.ready_at is None
         if refreshing and cache_key:
             saved = db.kv_get(conn, cache_key)
@@ -3608,13 +3778,14 @@ def create_app(
             raise store.Invalid(f"period is week or 1 to {spend.HORIZON_DAYS} days, not {period}")
         result = spend_index.summary(since)
         names = store.shown_session_names(conn, session_cache.get())
-        for row in result["sessions"]:
+        for row in result["sessions"] + result["other_models"]["sessions"]:
             row["name"] = names.get(row["session_id"]) or row["title"] or row["first_prompt"]
         # The graph per day (SPEC SESSION-14) covers its own days: Claude use per hour and the steps closed.
         daily_since = now - timedelta(days=spend.DAILY_DAYS)
+        hub_codex = installed_parts.codex_weeks(conn)
         daily = {"since": daily_since.strftime("%Y-%m-%dT%H:%M:%SZ"), "hours": spend_index.hours(daily_since),
-                 "codex_hours": codex_index.hours(daily_since), "steps": store.steps_closed(conn, daily_since)}
-        report = result | {"period": period, "limits": limits, "codex": codex_index.summary(since, now), "daily": daily,
+                 "codex_hours": codex_index.hours(daily_since, hub_codex), "steps": store.steps_closed(conn, daily_since)}
+        report = result | {"period": period, "limits": limits, "codex": codex_index.summary(since, now, hub_codex), "daily": daily,
                            "refreshing": refreshing}
         if cache_key and not refreshing:
             db.kv_set(conn, cache_key, report)
@@ -3648,8 +3819,8 @@ def create_app(
 
     @app.post(ACTIVITY_MINUTES_PATH)
     def post_activity_minutes(request: Request, conn: Conn, body: ActivityMinutes) -> Response:
-        if not activity.key_matches(conn, request.headers.get("authorization")):
-            return _error(401, "this Mac's key does not match; press Connect a Mac in Cockpit for a new one")
+        if not activity.key_matches(conn, request.headers.get(activity.MAC_KEY_HEADER)):
+            return _error(401, "this Mac's key does not match; in Cockpit's Your time, press Install on your Mac (or New key) for a new line")
         minutes, refused = [], []
         for each in body.minutes:
             try:
@@ -3705,7 +3876,7 @@ def create_app(
     # The uninstaller, with the Mac's own key, tells Cockpit to stop taking it.
     @app.post(ACTIVITY_DISCONNECT_PATH)
     def post_activity_disconnect(request: Request, conn: Conn) -> Response:
-        if not activity.key_matches(conn, request.headers.get("authorization")):
+        if not activity.key_matches(conn, request.headers.get(activity.MAC_KEY_HEADER)):
             return _error(401, "this Mac's key does not match; it no longer works anyway")
         activity.disconnect(conn)
         return JSONResponse({"connected": False})

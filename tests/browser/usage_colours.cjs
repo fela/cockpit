@@ -192,7 +192,7 @@ async function main() {
         const page = await context.newPage();
         await routeMachine(page, LOW_MACHINE);
         page.on("pageerror", (error) => pageErrors.push(error.message));
-        await page.goto(`${info.origin}/classic`);
+        await page.goto(`${info.origin}/`);
         await page.waitForSelector(`#usage .lane.claude .wk.${round.pace}`, { state: "attached", timeout: 15e3 });
         await page.evaluate(() => document.fonts.ready);
         const usage = await page.evaluate(usageNow);
@@ -216,7 +216,7 @@ async function main() {
         check(`usage ${where}: each mark beside its lane (${usage.families.map((fam) => `${fam.family} ${fam.gap.toFixed(1)} px`).join(", ")})`,
           usage.families.length >= 1 && usage.families.every((fam) => fam.gap >= 0 && fam.gap <= 6), JSON.stringify(usage.families));
         // Claude's mark is in Claude's orange (UI-73): an OKLab hue between 30 and 60 degrees, strong enough to read as orange,
-        // and at 2.5:1 against the ground behind it: Claude's own #d97757 stands at 2.97:1 on the light top bar.
+        // and at 2.5:1 against the ground behind it: Claude's own #d97757 stands at about 3:1 on a light ground.
         const [, ma, mb] = oklab(usage.claudeMark.colour);
         const markHue = (Math.atan2(mb, ma) * 180) / Math.PI;
         const markRatio = contrast(usage.claudeMark.colour, usage.claudeMark.ground);
@@ -249,7 +249,7 @@ async function main() {
     const page = await context.newPage();
     await routeMachine(page, LOW_MACHINE);
     page.on("pageerror", (error) => pageErrors.push(error.message));
-    await page.goto(`${info.origin}/classic`);
+    await page.goto(`${info.origin}/`);
     await page.waitForSelector("#usage .lane.claude .wk.over", { state: "attached", timeout: 15e3 });
     await page.hover("#usage .lane.claude");
     await page.waitForSelector(".tip.tip-card .uc-window", { timeout: 15e3 });
@@ -267,7 +267,7 @@ async function main() {
     const unavailablePage = await unavailableContext.newPage();
     unavailablePage.on("pageerror", (error) => pageErrors.push(error.message));
     await routeMachine(unavailablePage, { unavailable: "Load readings are not available on this system" });
-    await unavailablePage.goto(`${info.origin}/classic`);
+    await unavailablePage.goto(`${info.origin}/`);
     await unavailablePage.waitForSelector("#usage .lane.claude .wk", { timeout: 15e3 });
     check("unavailable machine: the indicator is absent", await unavailablePage.locator("#usage .machine-lamp").count() === 0, "indicator present");
     check("unavailable machine: usage and work still render",

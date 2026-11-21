@@ -4,7 +4,7 @@
 // Bash call's card shows the command one part per line   with its words coloured, and the text copied from it is the
 // command's own; - with a tool rule picked, the call's other commands show one per line, each cut to its first line;
 // - the card's heading is Claude's plain one, with the session's own line in its tooltip, and the session is named
-// by its item's title (PERM-3
+// by its item's title (PERM-3).
 "use strict";
 
 const assert = require("node:assert/strict");
@@ -143,11 +143,10 @@ function explained(id) {
       const errors = [];
       page.on("pageerror", (error) => errors.push(error.message));
       page.on("console", (message) => { if (message.type() === "error") errors.push(message.text()); });
-      await page.goto(origin + "/classic");
-      const card = page.locator(`#blocked .blocked-card[data-request="${id}"]`);
-      const line = page.locator(`#blocked [data-request="${id}"]`);
-      await line.waitFor();
-      if (await line.evaluate((el) => el.classList.contains("blocked-line"))) await line.click();
+      await page.goto(origin + "/");
+      // The blocked call is a warning row at the head of Your queue, and its card is the one in Next up.
+      await page.locator(`#sidebar li.warn-row[data-request="${id}"]`).waitFor({ state: "attached" });
+      const card = page.locator(`#next > .blocked-card[data-request="${id}"]`);
       await card.waitFor();
       assert.equal(await card.locator(".blocked-head .what").textContent(), HEADING);
       assert.equal(await card.locator(".blocked-head .what").getAttribute("data-tip"), DESCRIPTION.trim());

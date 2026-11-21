@@ -105,8 +105,8 @@ async function main() {
     const errors = [];
     page.on("pageerror", (error) => errors.push(error.message));
     page.on("console", (message) => { if (message.type() === "error") errors.push(message.text()); });
-    await page.goto(`${info.origin}/classic`);
-    const card = page.locator(`[data-step="${id}"]`).first();
+    await page.goto(`${info.origin}/`);
+    const card = page.locator(`#next [data-step="${id}"]`).first();
     await card.locator(".hist-fold-card .fold-summary").waitFor();
 
     const heading = (await card.locator("h1.task-heading .task-heading-text").innerText()).trim();

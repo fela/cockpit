@@ -91,16 +91,16 @@ async function main() {
         page.setDefaultNavigationTimeout(60000);
         const errors = [];
         page.on("pageerror", (error) => errors.push(error.message));
-        await page.goto(`${info.origin}/classic`);
-        const card = page.locator(`[data-step="${step.id}"]:visible`).first();
+        await page.goto(`${info.origin}/`);
+        // The step takes the user's first place, so it is Next up.
+        const card = page.locator(`#next .next-card[data-step="${step.id}"]`);
         await card.waitFor();
-        if (!(await card.locator(".prose.body").count())) await card.locator(".row-title").first().click();
         await card.locator(".core-links").waitFor();
 
         // Opens Other and reads the card in one go, as a poll's redraw (every five seconds) can replace the card
         // between two reads; a second try reads the new one.
         const read = () => page.evaluate((id) => {
-          const shown = [...document.querySelectorAll(`[data-step="${id}"]`)].find((el) => el.offsetParent !== null);
+          const shown = [...document.querySelectorAll(`#next .next-card[data-step="${id}"]`)].find((el) => el.offsetParent !== null);
           const other = shown.querySelector(".links-other");
           other.open = true;
           const tip = (a) => a.dataset.tip || a.title;
@@ -146,7 +146,7 @@ async function main() {
 
         const shot = path.join(work, `pr-states-${width}-${scheme}.png`);
         await page.evaluate((id) => {
-          const shown = [...document.querySelectorAll(`[data-step="${id}"]`)].find((el) => el.offsetParent !== null);
+          const shown = [...document.querySelectorAll(`#next .next-card[data-step="${id}"]`)].find((el) => el.offsetParent !== null);
           shown.querySelector(".links-other").open = true;
         }, step.id);
         const take = () => card.screenshot({ path: shot });

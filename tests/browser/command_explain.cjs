@@ -70,8 +70,8 @@ let browser;
 
   const executablePath = process.env.BROWSER_EXECUTABLE;
   browser = await chromium.launch({ headless: true, ...(executablePath ? { executablePath } : {}) });
-  // The sidebar layout (/) and the classic one; the step is the only one, so it is Next up in both.
-  for (const view of ["/", "/classic"]) for (const [width, height] of [[1280, 900], [390, 844]]) {
+  // The step is the only one, so it is Next up.
+  for (const [width, height] of [[1280, 900], [390, 844]]) {
     for (const scheme of ["light", "dark"]) {
       const context = await browser.newContext({ extraHTTPHeaders: { Cookie: cookie }, viewport: { width, height }, colorScheme: scheme });
       await context.grantPermissions(["clipboard-read", "clipboard-write"], { origin });
@@ -81,7 +81,7 @@ let browser;
       const errors = [];
       page.on("pageerror", (error) => errors.push(error.message));
       page.on("console", (message) => { if (message.type() === "error") errors.push(message.text()); });
-      await page.goto(origin + view);
+      await page.goto(origin + "/");
       const card = page.locator(`#next [data-step="${step.id}"]`);
       const block = card.locator(".step-run");
       await block.waitFor();
@@ -111,10 +111,10 @@ let browser;
       assert.equal(fits, true, `${width}: the page is wider than the window`);
       // The card of the whole step: the Run block at its top. Copy's feedback can redraw the card mid-shot, so a
       // detached element gets one more try.
-      const shot = { path: path.join(work, `run${view.replace("/", "-")}-${width}-${scheme}.png`) };
+      const shot = { path: path.join(work, `run-${width}-${scheme}.png`) };
       await card.screenshot(shot).catch(() => card.screenshot(shot));
       assert.deepEqual(errors, []);
-      console.log(`PASS ${view} ${width} ${scheme}: the Run block leads the card; the explanation shows above the command, laid out one part per line`);
+      console.log(`PASS ${width} ${scheme}: the Run block leads the card; the explanation shows above the command, laid out one part per line`);
       await context.close();
     }
   }

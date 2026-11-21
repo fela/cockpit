@@ -8,7 +8,8 @@ const { startPreview, fullState } = require("./work.cjs");
   const { info } = await startPreview("cockpit-state-sync-");
   const browser = await chromium.launch({ headless: true });
   try {
-    const context = await browser.newContext({ extraHTTPHeaders: { Cookie: `${info.name}=${info.value}` }, viewport: { width: 1280, height: 900 } });
+    // This case deliberately gates the lazy editor request; offline precaching is covered separately.
+    const context = await browser.newContext({ serviceWorkers: "block", extraHTTPHeaders: { Cookie: `${info.name}=${info.value}` }, viewport: { width: 1280, height: 900 } });
     const page = await context.newPage();
     const errors = [];
     page.on("pageerror", (error) => errors.push(error.message));
@@ -74,7 +75,7 @@ const { startPreview, fullState } = require("./work.cjs");
     const blocked = await browser.newContext({ extraHTTPHeaders: { Cookie: `${info.name}=${info.value}` } });
     await blocked.addInitScript(() => { Storage.prototype.setItem = () => { throw new Error("Storage blocked for test"); }; });
     const blockedPage = await blocked.newPage();
-    await blockedPage.goto(info.origin + "/classic");
+    await blockedPage.goto(info.origin + "/");
     await blockedPage.locator("#next [data-step]").waitFor();
     await blockedPage.keyboard.press("Control+k");
     await blockedPage.getByRole("combobox", { name: "Search commands, work, and sessions" }).fill("Start a new agent session");

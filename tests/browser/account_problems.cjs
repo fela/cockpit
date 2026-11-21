@@ -1,10 +1,11 @@
-// The account problems on the main page (SPEC SESSION-19), at 1280 px in the light look and 390 px in the dark: each
-// says in plain words what is wrong, what it breaks and what to do, with no paths in its words; the paths sit under a
-// closed Details that opens on a click and stays open through a poll's redraw; nothing is wider than the window.
+// The account problems on the main page (SPEC SESSION-19, UI-52), at 1280 px in the light look and 390 px in the dark:
+// each has a warning row in Your queue whose words say in plain words what is wrong, what it breaks and what to do,
+// with no paths in them; the row opens the problem on the card, where the paths sit under a closed Details that opens
+// on a click and stays open through a poll's redraw; nothing is wider than the window.
 // Makes the problems with accounts.link_problems on scratch account folders (work: its own transcripts folder and
 // settings file; spare: transcripts reached through a link), hands them to serve_preview.py in <work>/account-
-// problems.json, and drives a headless Chromium. Prints one line per check, saves each width's banners as
-// banners-<width>.png in the work folder, and exits 1 when one failed.  Usage, from the checkout: node
+// problems.json, and drives a headless Chromium. Prints one line per check, saves each width's opened problem as
+// account-problem-<width>.png in the work folder, and exits 1 when one failed.  Usage, from the checkout: node
 // tests/browser/account_problems.cjs
 
 "use strict";
@@ -74,29 +75,36 @@ async function main() {
       const page = await context.newPage();
       const errors = [];
       page.on("pageerror", (error) => errors.push(String(error)));
-      await page.goto(`${info.origin}/classic`, { waitUntil: "networkidle" });
+      await page.goto(`${info.origin}/`, { waitUntil: "networkidle" });
       const at = `${width} px ${scheme}`;
-      await page.waitForSelector(".warn-card.account-problem", { timeout: 15e3 });
-      const banners = page.locator(".warn-card.account-problem");
-      check(await banners.count() === 2, `${at}: a banner per problem`);
-      const words = await banners.evaluateAll((els) => els.map((el) => el.querySelector(".warn-title").textContent));
+      // On a phone the list is a screen of its own, opened from the item screen's bar.
+      if (width <= 1000) await page.locator(".phone-bar .phone-back").click();
+      const rows = page.locator('#sidebar li.warn-row[data-warning^="account-problem:"]');
+      await rows.first().waitFor({ timeout: 15e3 });
+      check(await rows.count() === 2, `${at}: a warning row per problem`);
+      const words = await rows.evaluateAll((els) => els.map((el) => el.querySelector(".sidebar-title").textContent));
       check(words.every((text) => !text.includes("/") && !text.includes(".sh")), `${at}: no path or file name in the words`);
       check(words[0].startsWith("The work account has stopped sharing your transcripts and memory notes and your settings"),
         `${at}: the first says what the work account stopped sharing`);
       check(words.every((text) => text.includes("Ask a session to")), `${at}: each says what to do`);
-      const paths = banners.first().locator(".warn-paths").first();
+      const key = await rows.first().getAttribute("data-warning");
+      await rows.first().locator(".side-row").click();
+      const card = () => page.locator(`#next .warn-step[data-warning="${key}"]`);
+      await card().waitFor();
+      check((await card().locator(".ask-text").textContent()) === words[0], `${at}: the row opens its problem on the card`);
+      const paths = card().locator(".warn-paths").first();
       check(!(await paths.isVisible()), `${at}: the paths start hidden`);
-      await banners.first().locator("summary").click();
+      await card().locator(".warn-detail > summary").click();
       check(await paths.isVisible(), `${at}: Details shows the paths`);
-      check((await banners.first().locator(".warn-detail").textContent()).includes(path.join(scratch, "claude-work", "projects")), `${at}: the paths name the folder`);
-      check((await banners.first().locator(".warn-detail").textContent()).includes("scripts/second-account.sh"), `${at}: the details name the script`);
+      check((await card().locator(".warn-detail").textContent()).includes(path.join(scratch, "claude-work", "projects")), `${at}: the paths name the folder`);
+      check((await card().locator(".warn-detail").textContent()).includes("scripts/second-account.sh"), `${at}: the details name the script`);
       await page.evaluate(() => { ui.pendingRender = true; return refresh(); });
       await sleep(300);
-      check(await page.locator(".warn-card.account-problem").first().locator(".warn-paths").first().isVisible(), `${at}: a redraw keeps Details open`);
+      check(await card().locator(".warn-paths").first().isVisible(), `${at}: a redraw keeps Details open`);
       const wide = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
       check(wide <= 0, `${at}: nothing wider than the window (${wide} px over)`);
       check(errors.length === 0, `${at}: no page errors ${errors.join("; ")}`);
-      await page.locator("#banner").screenshot({ path: path.join(work, `banners-${width}.png`) });
+      await page.locator("#next").screenshot({ path: path.join(work, `account-problem-${width}.png`) });
       await context.close();
     }
   } finally {

@@ -31,7 +31,7 @@ function check(ok, words) {
   const errors = [];
   page.on("pageerror", (err) => errors.push(String(err)));
 
-  await page.goto(cookie.origin + "/classic", { waitUntil: "networkidle" });
+  await page.goto(cookie.origin + "/", { waitUntil: "networkidle" });
   const ask = page.locator(".team-ask");
   check(await ask.isVisible(), "Cockpit asks for the team while none is set");
   const field = ask.locator("textarea");

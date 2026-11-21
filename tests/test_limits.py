@@ -39,7 +39,7 @@ def answers(monkeypatch: pytest.MonkeyPatch, models: dict[str, str]) -> dict[str
     found: dict[str, tuple[datetime, bool]] = {}
     monkeypatch.setattr(
         limits, "transcript_usage", lambda session_id: Usage(
-            stop=None, answer=found.get(session_id), model=models.get(session_id, "claude-fable-5-2"))
+            stop=None, answer=found.get(session_id), model=models.get(session_id, "claude-fable-5-2"), effort="")
     )
     return found
 
@@ -278,7 +278,7 @@ def test_a_message_that_reaches_the_session_while_usage_is_read_takes_the_place_
                 store.create_message(conn, "cockpit", "moved; continue", {"session_id": SESSION_A}, world.checkout.parent)
         finally:
             conn.close()
-        return Usage(stop=None, answer=None, model="claude-fable-5-2")
+        return Usage(stop=None, answer=None, model="claude-fable-5-2", effort="")
 
     monkeypatch.setattr(limits, "transcript_usage", meanwhile)
     assert sync(world) == []
@@ -400,11 +400,270 @@ def test_recovery_model_and_answer_come_from_one_snapshot(world, monkeypatch):
         reads.append(session_id)
         # A switches from Fable to Opus between reads. A second read would see an Opus success.
         if session_id == SESSION_B and reads.count(SESSION_B) > 1:
-            return Usage(stop=None, answer=(NOW, True), model="claude-opus-5-5")
-        return Usage(stop=None, answer=None, model="claude-fable-5-2")
+            return Usage(stop=None, answer=(NOW, True), model="claude-opus-5-5", effort="")
+        return Usage(stop=None, answer=None, model="claude-fable-5-2", effort="")
 
     monkeypatch.setattr(limits, "transcript_usage", changing_transcript)
     assert sync(world) == []
     assert reads.count(SESSION_B) == 1
     # On the next poll Opus's success still cannot free Fable.
     assert sync(world) == []
+
+
+def owned_item(world, **fields):
+    from tests.test_api import put_item
+    return put_item(world, key="note:quota-work", title="Recover unfinished work", stage="building",
+                    sessions=[SESSION_A], **fields)
+
+
+def recoverable(world, stopped):
+    world.cache.sessions = [make_session(SESSION_A, None, state="stopped", cwd=str(world.checkout))]
+    stopped[SESSION_A] = LimitStop(at=STOP_A, resets=None, cooldown_stops=1)
+
+
+@pytest.mark.parametrize("condition", ["done", "archived", "replaced", "removed", "decision", "complete", "result",
+                                       "snoozed", "future", "external"])
+def test_automatic_recovery_respects_current_task_state(world, stopped, condition):
+    from tests.test_api import put_item, put_step, run_sql
+    recoverable(world, stopped)
+    item = owned_item(world)
+    if condition in ("done", "archived"):
+        column = {"done": "stage", "archived": "archived"}[condition]
+        run_sql(world, f"UPDATE items SET {column} = ? WHERE id = ?", ("done" if condition == "done" else 1, item["id"]))
+    elif condition in ("replaced", "removed"):
+        conn = db.connect(world.db_path)
+        store.create_message(conn, "user", "Original work", {"item_id": item["id"], "session_id": SESSION_A}, world.checkout.parent)
+        conn.execute("UPDATE messages SET created_at = ?", ((NOW - timedelta(hours=2)).isoformat(),))
+        conn.close()
+        put_item(world, key=item["key"], sessions=[SESSION_B, SESSION_A] if condition == "replaced" else [SESSION_B])
+    elif condition in ("decision", "complete", "snoozed", "result"):
+        step = put_step(world, item_key=item["key"], need="read:result" if condition in ("snoozed", "result") else condition)["step"]
+        if condition == "result":
+            run_sql(world, "UPDATE items SET stage = 'prod' WHERE id = ?", (item["id"],))
+        if condition == "snoozed":
+            run_sql(world, "UPDATE steps SET snoozed_until = ? WHERE id = ?", ((NOW + timedelta(days=1)).isoformat(), step["id"]))
+    else:
+        put_item(world, key=item["key"], waiting_on=[{"kind": "agent" if condition == "future" else "bot",
+                  "who": SESSION_A if condition == "future" else "CI", "until": (NOW + timedelta(hours=1)).isoformat(),
+                  **({"why": "check tomorrow"} if condition == "future" else {})}])
+    assert sync(world) == []
+    assert not any(m["quota_recovery_stop"] for m in messages(world))
+
+
+@pytest.mark.parametrize("assignment", ["primary", "due_wait", "handed", "another_open_task", "progress_read_with_due_wait", "progress_read"])
+def test_unfinished_assignments_recover_after_the_limit(world, stopped, assignment):
+    from tests.test_api import put_item, put_step, run_sql
+    recoverable(world, stopped)
+    item = owned_item(world)
+    if assignment == "due_wait":
+        put_item(world, key=item["key"], sessions=[SESSION_B, SESSION_A], waiting_on=[{
+            "kind": "agent", "who": SESSION_A, "until": (NOW - timedelta(minutes=5)).isoformat(), "why": "check upload"}])
+    elif assignment == "handed":
+        put_item(world, key=item["key"], sessions=[SESSION_B, SESSION_A])
+        step = put_step(world, item_key=item["key"], need="decide", session_id=SESSION_A)["step"]
+        conn = db.connect(world.db_path)
+        message = store.create_message(conn, "user", "Proceed", {"session_id": SESSION_A, "item_id": item["id"]}, world.checkout.parent)
+        conn.execute("UPDATE messages SET state = 'sent', created_at = ? WHERE id = ?",
+                     ((NOW - timedelta(hours=1)).isoformat(), message["id"]))
+        conn.execute("UPDATE steps SET handoff_message_id = ? WHERE id = ?", (message["id"], step["id"]))
+        conn.close()
+    elif assignment == "another_open_task":
+        run_sql(world, "UPDATE items SET stage = 'done' WHERE id = ?", (item["id"],))
+        put_item(world, key="note:still-needed", title="Still unfinished work", stage="building", sessions=[SESSION_A])
+    elif assignment == "progress_read":
+        put_step(world, item_key=item["key"], need="read:progress")
+    elif assignment == "progress_read_with_due_wait":
+        put_step(world, item_key=item["key"], need="read:progress")
+        put_item(world, key=item["key"], waiting_on=[{"kind": "agent", "who": SESSION_A, "until": (NOW - timedelta(minutes=5)).isoformat(), "why": "check results"}])
+    [mid] = sync(world)
+    assert messages(world)[-1]["id"] == mid
+    assert messages(world)[-1]["quota_recovery_stop"] == datetime.fromisoformat(STOP_A).isoformat()
+
+
+def test_queue_revalidation_preserves_history_and_snooze_expiry(world, stopped):
+    from tests.test_api import put_step, run_sql
+    recoverable(world, stopped)
+    item = owned_item(world)
+    [mid] = sync(world)
+    step = put_step(world, item_key=item["key"], need="read:progress")["step"]
+    run_sql(world, "UPDATE steps SET snoozed_until = ? WHERE id = ?", ((NOW + timedelta(hours=1)).isoformat(), step["id"]))
+    # Delivery rechecks the state even before the next recovery poll prunes its queue.
+    world.deliverer.send(mid)
+    cancelled = messages(world)[0]
+    assert cancelled["state"] == "failed" and cancelled["dismissed_by"] == "cockpit"
+    assert cancelled["text"].startswith("Claude's model cooldown retry:")
+    assert world.runner.calls == []
+    assert sync(world) == []
+    run_sql(world, "UPDATE steps SET snoozed_until = ? WHERE id = ?", ((NOW - timedelta(seconds=1)).isoformat(), step["id"]))
+    from tests.test_api import put_item
+    put_item(world, key=item["key"], waiting_on=[{"kind": "agent", "who": SESSION_A, "until": (NOW - timedelta(minutes=5)).isoformat(), "why": "check upload"}])
+    [new_mid] = sync(world)
+    assert new_mid != mid
+    assert len(messages(world)) == 2  # the cancelled message stays as evidence
+
+
+def test_a_new_message_replaces_a_queued_retry_even_in_the_same_second(world, stopped, monkeypatch):
+    from tests.test_api import put_item
+    recoverable(world, stopped)
+    owned_item(world)
+    monkeypatch.setattr(db, "now_iso", lambda: NOW.strftime("%Y-%m-%dT%H:%M:%SZ"))
+    [mid] = sync(world)
+    conn = db.connect(world.db_path)
+    user = store.create_message(conn, "user", "Continue my new request", {"session_id": SESSION_A}, world.checkout.parent)
+    conn.close()
+    world.deliverer.send(mid)
+    rows = messages(world)
+    assert rows[0]["dismissed_at"] and "newer message" in rows[0]["dismiss_reason"]
+    assert rows[1]["id"] == user["id"] and rows[1]["state"] == "queued" and not rows[1]["quota_recovery_stop"]
+    assert world.runner.calls == []
+
+
+def test_task_reassignment_during_transcript_read_prevents_queuing(world, stopped, monkeypatch):
+    from tests.test_api import run_sql
+    recoverable(world, stopped)
+    item = owned_item(world)
+    def meanwhile(sid):
+        run_sql(world, "UPDATE items SET sessions = ? WHERE id = ?", (json.dumps([SESSION_B, SESSION_A]), item["id"]))
+        return Usage(stop=None, answer=None, model="claude-fable-5-2", effort="")
+    monkeypatch.setattr(limits, "transcript_usage", meanwhile)
+    assert sync(world) == []
+    assert messages(world) == []
+
+
+def test_a_user_retry_of_a_recovery_message_becomes_an_explicit_request(world, stopped):
+    recoverable(world, stopped)
+    [mid] = sync(world)
+    conn = db.connect(world.db_path)
+    conn.execute("UPDATE messages SET state = 'failed' WHERE id = ?", (mid,))
+    retried = store.retry_message(conn, mid, "user")
+    conn.close()
+    assert retried["state"] == "queued" and not retried["quota_recovery_stop"]
+
+
+def test_a_pause_on_one_current_task_holds_generic_session_recovery(world, stopped):
+    from tests.test_api import put_item
+    recoverable(world, stopped)
+    owned_item(world)
+    put_item(world, key="note:resting", title="Wait until tomorrow", sessions=[SESSION_A], stage="building",
+             waiting_on=[{"kind": "agent", "who": SESSION_A, "until": (NOW + timedelta(days=1)).isoformat(),
+                          "why": "user requested tomorrow", "by_user": True}])
+    assert sync(world) == []
+
+
+def test_a_later_delivered_instruction_reopens_work_behind_an_old_card(world, stopped):
+    from tests.test_api import put_step, run_sql
+    recoverable(world, stopped)
+    item = owned_item(world)
+    step = put_step(world, item_key=item["key"], need="complete")["step"]
+    run_sql(world, "UPDATE steps SET prepared_at = ? WHERE id = ?", ((NOW - timedelta(hours=2)).isoformat(), step["id"]))
+    conn = db.connect(world.db_path)
+    asked = store.create_message(conn, "user", "Please fix another case", {"session_id": SESSION_A, "item_id": item["id"]}, world.checkout.parent)
+    conn.execute("UPDATE messages SET state='sent', created_at=? WHERE id=?", ((NOW - timedelta(hours=1)).isoformat(), asked["id"]))
+    conn.close()
+    assert len(sync(world)) == 1
+
+
+def test_an_obsolete_queued_stop_is_cancelled_without_resuming(world, stopped):
+    recoverable(world, stopped)
+    [mid] = sync(world)
+    stopped[SESSION_A] = LimitStop(at=(NOW - timedelta(minutes=5)).isoformat(), resets=None, cooldown_stops=2)
+    world.deliverer.send(mid)
+    assert messages(world)[0]["dismissed_at"]
+    assert world.runner.calls == []
+    # The newer failure still has its full backoff; the old queued retry cannot bypass it.
+    assert sync(world) == []
+
+
+def test_a_quota_move_advisory_does_not_block_automatic_reset_recovery(world, stopped):
+    from tests.test_api import put_step
+    recoverable(world, stopped)
+    item = owned_item(world)
+    put_step(world, item_key=item["key"], need=f"move:{SESSION_A}:work:20261115")
+    assert len(sync(world)) == 1
+
+
+def test_a_dismissed_uncertain_delivery_still_blocks_another_automatic_retry(world, stopped):
+    recoverable(world, stopped)
+    [mid] = sync(world)
+    conn = db.connect(world.db_path)
+    conn.execute("UPDATE messages SET state='failed', dismissed_at=?, detail='Delivery uncertain: socket closed' WHERE id=?",
+                 (db.now_iso(), mid))
+    conn.close()
+    assert sync(world) == []
+
+
+def test_removing_an_owner_without_messages_still_preserves_the_assignment_history(world, stopped):
+    from tests.test_api import put_item
+    recoverable(world, stopped)
+    item = owned_item(world)
+    put_item(world, key=item["key"], sessions=[SESSION_B])
+    assert sync(world) == []
+    assert messages(world) == []
+
+
+def test_revalidation_and_claim_share_one_transaction(world, stopped, monkeypatch):
+    import sqlite3
+    from cockpit import delivery
+    recoverable(world, stopped)
+    task = owned_item(world)
+    [mid] = sync(world)
+    connect = db.connect
+    observed = []
+    class InspectConnection:
+        def __init__(self, conn):
+            self.conn = conn
+        def __getattr__(self, name):
+            return getattr(self.conn, name)
+        def execute(self, sql, parameters=()):
+            if sql.startswith("UPDATE messages SET state = 'sending'"):
+                assert self.conn.in_transaction
+                other = sqlite3.connect(world.db_path, timeout=0)
+                try:
+                    with pytest.raises(sqlite3.OperationalError, match="locked"):
+                        other.execute("UPDATE items SET stage='done' WHERE id=?", (task["id"],))
+                    observed.append("claim holds the write lock after revalidation")
+                finally:
+                    other.close()
+            return self.conn.execute(sql, parameters)
+    monkeypatch.setattr(db, "connect", lambda path: InspectConnection(connect(path)))
+    monkeypatch.setattr(world.deliverer, "_deliver_in_place", lambda *args: delivery.Sent("socket", SESSION_A, "fake transport"))
+    world.deliverer.send(mid)
+    assert observed == ["claim holds the write lock after revalidation"]
+    assert messages(world)[0]["state"] == "sent"
+
+
+def test_a_queued_claude_retry_stays_undelivered_after_handover(world, stopped):
+    recoverable(world, stopped)
+    owned_item(world)
+    [mid] = sync(world)
+    conn = db.connect(world.db_path)
+    transfer = store.create_message(conn, "user", "Hand over", {"session_id": SESSION_B}, world.checkout.parent)
+    conn.execute("INSERT INTO session_handovers(source_session_id,message_id,target_session_id,created_at) VALUES(?,?,?,?)",
+                 (SESSION_A, transfer["id"], SESSION_B, db.now_iso()))
+    conn.close()
+    world.deliverer.send(mid)
+    row = messages(world)[0]
+    assert row["dismissed_at"] and row["session_id"] == SESSION_A
+    assert world.runner.calls == []
+
+
+def test_snoozing_a_handed_step_holds_automatic_recovery_too(world, stopped):
+    from tests.test_api import put_step
+    recoverable(world, stopped)
+    task = owned_item(world)
+    step = put_step(world, item_key=task["key"], need="decide", session_id=SESSION_A)["step"]
+    conn = db.connect(world.db_path)
+    asked = store.create_message(conn, "user", "Proceed", {"session_id": SESSION_A, "item_id": task["id"]}, world.checkout.parent)
+    conn.execute("UPDATE messages SET state='sent', created_at=? WHERE id=?", ((NOW - timedelta(hours=1)).isoformat(), asked["id"]))
+    conn.execute("UPDATE steps SET handoff_message_id=? WHERE id=?", (asked["id"], step["id"]))
+    conn.close()
+    [mid] = sync(world)
+    response = world.client.post(f"/api/steps/{step['id']}/snooze", json={"until": (NOW + timedelta(days=1)).isoformat()},
+                                 headers=world.user())
+    assert response.status_code == 200, response.text
+    world.deliverer.send(mid)
+    rows = messages(world)
+    assert rows[0]["id"] == asked["id"] and rows[0]["state"] == "sent"
+    assert rows[1]["id"] == mid and rows[1]["dismissed_at"]
+    assert sync(world) == []
+    assert world.runner.calls == []

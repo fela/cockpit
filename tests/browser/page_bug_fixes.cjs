@@ -66,7 +66,7 @@ let server, browser, serverLog = "";
     } finally { await context.close(); }
   };
   const main = async (page) => {
-    await page.goto(origin + "/classic");
+    await page.goto(origin + "/");
     await page.waitForFunction(() => typeof ui !== "undefined" && ui.state);
   };
 
@@ -165,7 +165,7 @@ let server, browser, serverLog = "";
     });
     await page.route(`**/api/steps/${data.step.id}/hand-off`, async (route) => { sends += 1; await route.continue(); });
     await page.evaluate((pageId) => {
-      CockpitChoices.save(pageId, {name:"choice",chosen:"Review tasks",label:"Tasks",step_id:stepId}, () => {});
+      CockpitChoices.save(pageId, {name:"choice",chosen:"Review tasks",label:"Tasks",step_id:stepId}, () => {}, false);
       keepReply(replyKey(true), "Review the plan");
       window.sendingCheck = send();
     }, data.report.id);
@@ -186,6 +186,10 @@ let server, browser, serverLog = "";
 
   await check("P4", async (page) => {
     const data = await fixture(true);
+    // A second step, which the user puts, keeps the item listed after the hand-off, so the hand-off's Take back
+    // shows in a notice.
+    await call("POST", "/api/steps", { item_key: data.item.key, need: "check", ask: "Check the tasks list",
+      session_id: data.item.sessions[0] });
     await main(page);
     await page.clock.install();
     await page.evaluate((id) => {

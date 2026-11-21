@@ -35,6 +35,7 @@ function page(statuses) {
     setInterval: () => 1, clearInterval() {},
     addEventListener: events.addEventListener.bind(events),
     removeEventListener: events.removeEventListener.bind(events),
+    dispatchEvent: events.dispatchEvent.bind(events),
     fetch: (url, { body }) => {
       if (url === "/api/page-errors") reports.push(JSON.parse(body));
       return Promise.resolve(answer(url === "/api/state" && statuses.length ? statuses.shift() : 200));
@@ -96,5 +97,46 @@ function page(statuses) {
     await until(600000);
     assert.equal(reports.at(-1).away_ms, 0);
     console.log("pass: an error long after a time away does not take its start");
+  }
+  {
+    // A script that did not load while the page loads is reported by its file and reloads the page, once a minute at
+    // most; an image that did not load does neither, and nor does a script that fails after the page has loaded.
+    const { context, reports, until } = page([]);
+    const stored = new Map();
+    let reloads = 0;
+    context.sessionStorage = { getItem: (key) => stored.get(key) ?? null, setItem: (key, value) => stored.set(key, value) };
+    context.location.reload = () => { reloads += 1; };
+    const fail = (tagName, src, async = false) => {
+      const event = new Event("error");
+      Object.defineProperty(event, "target", { value: { tagName, src, async } });
+      context.dispatchEvent(event);
+    };
+    const scriptReports = () => reports.filter((each) => each.place === "page script did not load");
+    fail("IMG", "http://example.test/static/icon.svg");
+    // A script added by code, such as the optional editor bundle, is only reported: the page may be in use.
+    fail("SCRIPT", "http://example.test/static/prompt-editor.js?v=1", true);
+    await until(1000);
+    assert.equal(reloads, 0);
+    fail("SCRIPT", "http://example.test/static/sidebar.js?v=1");
+    await until(2000);
+    assert.equal(reloads, 1);
+    assert.match(scriptReports()[0].message, /\/static\/prompt-editor\.js\?v=1 did not load/);
+    assert.match(scriptReports()[1].message, /\/static\/sidebar\.js\?v=1 did not load/);
+    // The reloaded page meets the same failure within the minute: reported, and left as it is.
+    fail("SCRIPT", "http://example.test/static/center.js?v=1");
+    await until(30000);
+    assert.equal(reloads, 1);
+    assert.equal(scriptReports().length, 3);
+    // A minute later the page reloads again; after it has loaded, a failure is only reported.
+    await until(70000);
+    fail("SCRIPT", "http://example.test/static/shell.js?v=1");
+    await until(100000);
+    assert.equal(reloads, 2);
+    context.document.readyState = "complete";
+    fail("SCRIPT", "http://example.test/static/editor.js?v=1");
+    await until(200000);
+    assert.equal(reloads, 2);
+    assert.equal(scriptReports().length, 5);
+    console.log("pass: a script that did not load is reported by its file and reloads the loading page once");
   }
 })().catch((error) => { console.error(error); process.exitCode = 1; });

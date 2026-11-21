@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient
 
 from cockpit import cli, config, db, spend, store
 from cockpit.app import create_app
+from cockpit.views import read as read_view
 from tests.conftest import ORIGIN, SESSION_A, SESSION_B, World
 from tests.test_api import put_card
 
@@ -392,6 +393,28 @@ def test_the_period_counts_the_turns_started_in_it(tmp_path: Path) -> None:
     ]
 
 
+def test_use_by_hour_puts_each_call_in_the_hour_it_ran(tmp_path: Path) -> None:
+    transcript(tmp_path, SESSION, [
+        prompt(-3 * 24 * 60, "Old work"),
+        call("msg_old", -3 * 24 * 60 + 1, usage(output=1000)),
+        prompt(0, "Fix the parser"),
+        call("msg_1", 1, usage(output=1000)),
+        call("msg_2", 70, usage(output=3000)),
+    ])
+    subagent(tmp_path, SESSION, "abc", [
+        prompt(5, "Review the diff") | {"isSidechain": True},
+        call("msg_sub", 130, usage(output=2000)) | {"isSidechain": True, "agentId": "abc"},
+    ])
+    index = index_of(tmp_path)
+    by_hour = index.use_by_hour(NOW - timedelta(days=1))
+    # One turn, started at 10:00, whose calls ran at 10:01, 11:10 and (its subagent's) 12:10.
+    assert sorted(by_hour) == [at(minutes)[:13] + ":00:00Z" for minutes in (0, 60, 120)]
+    usd = [by_hour[at(minutes)[:13] + ":00:00Z"] for minutes in (0, 60, 120)]
+    assert usd[1] == pytest.approx(3 * usd[0])
+    assert usd[2] == pytest.approx(2 * usd[0])
+    assert sum(usd) == pytest.approx(index.summary(NOW - timedelta(days=1))["total"]["usd"], abs=0.01)
+
+
 def test_a_session_keeps_its_kind_in_a_period_that_leaves_out_its_first_turns(tmp_path: Path) -> None:
     transcript(tmp_path, SESSION, [
         peer(-2 * 24 * 60, "Message from Cockpit itself (automatic, not from Sam or an agent):\n\nCockpit wake-up"),
@@ -469,17 +492,33 @@ def test_a_model_without_a_price_is_named(tmp_path: Path, caplog: pytest.LogCapt
     assert "no price for Claude model 'claude-x-9'" in caplog.text
 
 
-def test_a_non_claude_model_is_left_out_without_an_error(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
-    """A call on a model that is not Claude's is no Claude use."""
+def test_calls_on_another_model_count_apart(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    """A Claude Code session that fell back to another model through the model hub: those calls are no Claude use and count
+    apart in tokens, a subagent's too, with a reply's later entries adding only their output (SPEC SESSION-12)."""
     transcript(tmp_path, SESSION, [
+        {"type": "custom-title", "customTitle": "Parser fix"},
         prompt(0, "Fix the parser"),
-        call("msg_1", 1, usage(output=1000), model="other-model-1"),
+        call("msg_1", 1, usage(fresh=10, write_5m=5, read=1000, output=100), model="example-model"),
         call("msg_2", 2, usage(output=1000)),
+        # Before the period.
+        call("msg_0", -2 * 24 * 60, usage(fresh=7, output=7), model="example-model"),
     ])
-    summary = index_of(tmp_path).summary(NOW - timedelta(days=7))
+    subagent(tmp_path, SESSION, "abc", [
+        call("msg_sub", 3, usage(fresh=1, output=20), model="example-model"),
+        call("msg_sub", 3, usage(fresh=1, output=50), model="example-model"),
+    ])
+    summary = index_of(tmp_path).summary(NOW - timedelta(days=1))
     assert summary["unpriced_models"] == []
     assert [row["model"] for row in summary["models"]] == ["opus-5-5"]
     assert (summary["total"]["calls"], summary["total"]["tokens"]["output"]) == (1, 1000)
+    assert summary["other_models"] == {
+        "calls": 2, "tokens": {"fresh": 16, "cached": 1000, "output": 150},
+        "sessions": [{
+            "session_id": SESSION, "title": "Parser fix", "first_prompt": "Fix the parser", "cwd": "/home/sam/dev/app",
+            "models": ["example-model"], "first": at(1), "last": at(3), "calls": 2,
+            "tokens": {"fresh": 16, "cached": 1000, "output": 150},
+        }],
+    }
     assert not [record for record in caplog.records if record.levelno >= logging.ERROR]
 
 
@@ -575,6 +614,68 @@ def test_a_refresh_counts_what_a_transcript_gained_under_one_lock(tmp_path: Path
     assert index.per_session(NOW)[SESSION]["calls"] == 51
 
 
+def test_appended_lines_are_counted_before_reading_the_next_line(tmp_path: Path, monkeypatch) -> None:
+    path = transcript(tmp_path, SESSION, [prompt(0, "Start")])
+    index = index_of(tmp_path)
+    known = index._files[path]
+    offset = known.offset
+    transcript(tmp_path, SESSION, [call("first", 1, usage(output=10)), call("second", 2, usage(output=20))])
+    original_open = Path.open
+
+    class StreamingFile:
+        def __enter__(self):
+            self.handle = original_open(path, "rb")
+            return self
+
+        def __exit__(self, *args):
+            self.handle.close()
+
+        def seek(self, at):
+            return self.handle.seek(at)
+
+        def __iter__(self):
+            for number, raw in enumerate(self.handle):
+                assert index._lock.locked()
+                if number:
+                    assert known.offset > offset
+                    assert "first" in index._seen
+                yield raw
+
+    monkeypatch.setattr(Path, "open", lambda *args, **kwargs: StreamingFile())
+    index.refresh(NOW)
+    assert index.per_session(NOW)[SESSION]["calls"] == 2
+
+
+@pytest.mark.parametrize("kind", ["api-request", "api-request-blob"])
+@pytest.mark.parametrize("compact", [True, False])
+def test_request_snapshots_skip_body_decoding_and_keep_offsets(tmp_path: Path, monkeypatch, kind, compact) -> None:
+    path = transcript(tmp_path, SESSION, [prompt(0, "Start"), call("reply", 1, usage(output=10))])
+    index = index_of(tmp_path)
+    before = index._files[path]
+    # Request records can hold copies of earlier messages and arbitrary tool data, including supplementary Unicode.
+    request = {"type": kind, "message": {"content": "\U0001f600" * 250_000,
+                                       "history": [prompt(0, "Copied prompt"), call("copied", 1, usage(output=50))]}}
+    line = json.dumps(request, ensure_ascii=False, separators=(",", ":") if compact else None) + "\n"
+    with path.open("a") as handle:
+        handle.write(line)
+    # Watch the decoded-line parser so snapshots are skipped before body decoding.
+    decode = spend.SpendIndex._line
+    decoded = []
+
+    def watched(self, known, text):
+        decoded.append(text)
+        return decode(self, known, text)
+
+    monkeypatch.setattr(spend.SpendIndex, "_line", watched)
+    index.refresh(NOW)
+    assert decoded == []
+    assert index._files[path] is before
+    assert before.offset == path.stat().st_size
+    assert len(before.turns) == 1
+    assert index._seen == {"reply": 10}
+    assert index.per_session(NOW)[SESSION]["calls"] == 1
+
+
 def test_page_polls_sum_the_use_once_per_change(tmp_path: Path, monkeypatch) -> None:
     transcript(tmp_path, SESSION, [prompt(0, "x"), call("msg_1", 1, usage(output=10)),
                                    call("msg_2", 2, usage(output=10), model="claude-sonnet-5-5")])
@@ -637,6 +738,156 @@ def test_recent_use_counts_the_last_ten_minutes_of_a_session_and_its_subagents(t
     assert index.per_session(NOW.replace(hour=11, minute=0))[SESSION]["recent_usd"] == 0
 
 
+def test_the_cache_keeps_the_lifetime_of_the_latest_call_that_wrote_to_it(tmp_path: Path) -> None:
+    def cache(minute: int) -> dict[str, Any] | None:
+        """The session's cache at `minute` past 10:00."""
+        held = index_of(tmp_path).caches().get(SESSION)
+        return None if held is None else spend.cache_at(held, NOW.replace(hour=10, minute=minute))
+
+    transcript(tmp_path, SESSION, [prompt(0, "Fix the parser"), call("msg_1", 1, usage(write_5m=100_000, output=100))])
+    # Opus 5.5: writing for 5 minutes costs $5 a million against $0.20 a cache read.
+    assert cache(3) == {
+        "tokens": 100_000, "warm_until": at(6).replace(".000", ""), "minutes_left": 3, "lifetime_minutes": 5,
+        "lifetime_estimated": False, "cold_usd": round(100_000 * (5.0 - 0.2) / 1e6, 2), "model": "claude-opus-5-5",
+    }
+    assert cache(7)["minutes_left"] == 0
+    # An hour's write of part of the prompt keeps all of it for an hour; writing it again costs $8 a million.
+    transcript(tmp_path, SESSION, [call("msg_2", 2, usage(read=100_000, write_1h=1_000, output=100))])
+    assert cache(3) == {
+        "tokens": 101_000, "warm_until": at(62).replace(".000", ""), "minutes_left": 59, "lifetime_minutes": 60,
+        "lifetime_estimated": False, "cold_usd": round(101_000 * (8.0 - 0.2) / 1e6, 2), "model": "claude-opus-5-5",
+    }
+    # A call that only reads keeps the lifetime, from its own time.
+    transcript(tmp_path, SESSION, [call("msg_3", 4, usage(read=101_000, output=100))])
+    assert (cache(5)["warm_until"], cache(5)["lifetime_minutes"]) == (at(64).replace(".000", ""), 60)
+    # A compaction starts the prompt anew: nothing is cached until a call writes to the cache again.
+    transcript(tmp_path, SESSION, [
+        {"parentUuid": None, "isSidechain": False, "type": "system", "subtype": "compact_boundary",
+         "content": "Conversation compacted", "timestamp": at(5)},
+    ])
+    assert cache(6) is None
+    transcript(tmp_path, SESSION, [call("msg_4", 6, usage(write_5m=20_000, output=100))])
+    assert (cache(7)["tokens"], cache(7)["lifetime_minutes"]) == (20_000, 5)
+
+
+def test_the_cache_is_the_one_of_the_sessions_main_conversation(tmp_path: Path) -> None:
+    transcript(tmp_path, SESSION, [prompt(0, "Fix the parser"), call("msg_1", 1, usage(write_5m=50_000, output=100))])
+    # A subagent's later call has its own prompt, which the answer to the session does not use.
+    subagent(tmp_path, SESSION, "a1", [call("msg_2", 2, usage(write_1h=200_000, output=100))])
+    # A session that ran only on another model has no Claude cache.
+    transcript(tmp_path, COPY, [prompt(0, "x"), call("msg_3", 1, usage(write_5m=10_000), model="example-model")])
+    caches = index_of(tmp_path).caches()
+    assert {session_id: (cache["tokens"], cache["lifetime_minutes"]) for session_id, cache in caches.items()} == {
+        SESSION: (50_000, 5),
+    }
+    # Resumed in another folder, the session's transcript there holds its latest call.
+    write(tmp_path / "-home-sam-dev-other" / f"{SESSION}.jsonl", [
+        prompt(10, "Go on"), call("msg_4", 11, usage(write_1h=80_000, output=100), model="claude-sonnet-5-5"),
+    ])
+    cache = index_of(tmp_path).caches()[SESSION]
+    assert (cache["tokens"], cache["lifetime_minutes"], cache["model"]) == (80_000, 60, "claude-sonnet-5-5")
+
+
+def test_a_resumed_copy_follows_its_own_calls_after_the_replies_it_repeats(tmp_path: Path) -> None:
+    first = [prompt(0, "Fix the parser"), call("msg_1", 1, usage(write_1h=100_000, output=100))]
+    transcript(tmp_path, SESSION, first)
+    # Resumed in another folder, the copy repeats the first transcript's reply, then only reads from the cache.
+    write(tmp_path / "-home-sam-dev-other" / f"{SESSION}.jsonl", [
+        *first, prompt(10, "Go on"), call("msg_2", 11, usage(fresh=50, read=100_000, output=100)),
+    ])
+    cache = index_of(tmp_path).caches()[SESSION]
+    assert (cache["tokens"], cache["warm_until"], cache["lifetime_minutes"]) == (100_050, at(71).replace(".000", ""), 60)
+
+
+def test_a_claude_p_turn_leaves_the_conversations_cache_as_it_was(tmp_path: Path) -> None:
+    transcript(tmp_path, SESSION, [
+        prompt(0, "Fix the parser"), call("msg_1", 1, usage(write_1h=100_000, output=100)),
+        prompt(2, "Summarize the session", entrypoint="sdk-cli"),
+        call("msg_2", 3, usage(write_5m=20_000, output=100), model="claude-haiku-5-5"),
+    ])
+    cache = index_of(tmp_path).caches()[SESSION]
+    assert (cache["tokens"], cache["warm_until"], cache["lifetime_minutes"], cache["model"]) == (
+        100_000, at(61).replace(".000", ""), 60, "claude-opus-5-5")
+
+
+def test_a_compaction_in_the_newer_transcript_of_a_session_leaves_no_cache(tmp_path: Path) -> None:
+    transcript(tmp_path, SESSION, [prompt(0, "Fix the parser"), call("msg_1", 1, usage(write_1h=100_000, output=100))])
+    write(tmp_path / "-home-sam-dev-other" / f"{SESSION}.jsonl", [
+        prompt(10, "Go on"), call("msg_2", 11, usage(write_1h=120_000, output=100)),
+        {"parentUuid": None, "isSidechain": False, "type": "system", "subtype": "compact_boundary",
+         "content": "Conversation compacted", "timestamp": at(12)},
+    ])
+    assert index_of(tmp_path).caches() == {}
+
+
+def test_minutes_left_counts_a_started_minute_as_warm() -> None:
+    until = datetime(2026, 1, 12, 10, 5, tzinfo=UTC)
+    cache = {"tokens": 1_000, "warm_until": "2026-01-12T10:05:00Z", "lifetime_minutes": 5, "lifetime_estimated": False,
+             "cold_usd": 0.01, "model": "claude-opus-5-5"}
+    assert spend.cache_at(cache, until - timedelta(seconds=30))["minutes_left"] == 1
+    assert spend.cache_at(cache, until)["minutes_left"] == 0
+    assert spend.cache_at(cache, until + timedelta(seconds=1))["minutes_left"] == 0
+    assert spend.cache_at(cache, until - timedelta(minutes=4, seconds=1))["minutes_left"] == 5
+    assert list(spend.cache_at(cache, until)) == [
+        "tokens", "warm_until", "minutes_left", "lifetime_minutes", "lifetime_estimated", "cold_usd", "model",
+    ]
+
+
+def test_page_polls_work_out_the_caches_once_per_change(tmp_path: Path) -> None:
+    transcript(tmp_path, SESSION, [prompt(0, "Fix the parser"), call("msg_1", 1, usage(write_5m=100_000, output=100))])
+    index = index_of(tmp_path)
+    first = index.caches()
+    assert index.caches() is first
+    index.refresh(NOW)
+    assert index.caches() is first
+    transcript(tmp_path, SESSION, [call("msg_2", 2, usage(read=100_000, write_5m=1_000, output=100))])
+    index.refresh(NOW)
+    second = index.caches()
+    assert second is not first
+    assert second[SESSION]["tokens"] == 101_000
+
+
+def test_each_step_shows_the_cache_of_the_session_that_gets_its_answer(world: World) -> None:
+    def stamped(message_id: str, ago: timedelta) -> dict[str, Any]:
+        entry = call(message_id, 0, usage(write_1h=120_000, output=100))
+        return entry | {"timestamp": (datetime.now(UTC) - ago).strftime("%Y-%m-%dT%H:%M:%S.000Z")}
+
+    def step_of(state: dict[str, Any]) -> dict[str, Any]:
+        [step] = [step for group in ("queue", "ready_next", "snoozed", "with_agents") for step in state[group]]
+        return step
+
+    projects = world.spend_index.projects_dir
+    put_card(world, "review@a")
+    called = stamped("msg_1", timedelta(minutes=1))
+    transcript(projects, SESSION_A, [prompt(0, "Fix the parser"), called])
+    world.spend_index.refresh(datetime.now(UTC))
+    state = world.client.get("/api/state").json()
+    cache = step_of(state)["cache"]
+    until = datetime.fromisoformat(called["timestamp"]) + timedelta(hours=1)
+    assert cache["warm_until"] == until.strftime("%Y-%m-%dT%H:%M:%SZ")
+    # The test's own pace sets the minutes left, so a range: about 59 when it runs at full speed.
+    assert 45 <= cache["minutes_left"] <= 60
+    # Opus 5.5: an hour's write costs $8 a million against $0.20 a cache read.
+    assert (cache["tokens"], cache["lifetime_minutes"], cache["cold_usd"], cache["model"]) == (
+        120_000, 60, 0.94, "claude-opus-5-5")
+    # The sweeper reads it in `cockpit get` too.
+    assert f"     cache warm {cache['minutes_left']} more min, 120K tokens, $0.94 to reload cold\n" in cli.summary(state)
+    # Past its hour the cache expired.
+    expired = stamped("msg_2", timedelta(minutes=90))
+    transcript(projects, SESSION_A, [expired])
+    world.spend_index.refresh(datetime.now(UTC))
+    state = world.client.get("/api/state").json()
+    until = datetime.fromisoformat(expired["timestamp"]) + timedelta(hours=1)
+    assert (step_of(state)["cache"]["warm_until"], step_of(state)["cache"]["minutes_left"]) == (
+        until.strftime("%Y-%m-%dT%H:%M:%SZ"), 0)
+    assert "     cache cold, 120K tokens\n" in cli.summary(state)
+    # A Codex session's cache comes from Codex's files, which hold none for it here.
+    world.cache.sessions = [replace(world.cache.sessions[0], provider="codex")]
+    state = world.client.get("/api/state").json()
+    assert step_of(state)["cache"] is None
+    assert "cache " not in cli.summary(state)
+
+
 def test_a_session_that_answered_on_another_model_is_named(tmp_path: Path) -> None:
     script, old = COPY, "55555555-5555-4555-8555-555555555555"
     transcript(tmp_path, SESSION, [
@@ -658,15 +909,34 @@ def test_a_session_that_answered_on_another_model_is_named(tmp_path: Path) -> No
     index = index_of(tmp_path)
     assert index.wrong_models(NOW, {}) == [{
         "session_id": SESSION, "title": "Parser fix", "first_prompt": "Fix the parser", "model": "claude-sonnet-5-5",
-        "intended": "claude-opus-5-5", "first": at(2), "last": at(3), "calls": 2, "back": False,
+        "claude": True, "intended": "claude-opus-5-5", "latest": "claude-sonnet-5-5", "first": at(2), "last": at(3),
+        "calls": 2, "back": False,
     }]
     transcript(tmp_path, SESSION, [prompt(10, "Go on"), call("msg_7", 11, usage(output=100))])
     index.refresh(NOW)
     assert [(row["calls"], row["back"]) for row in index.wrong_models(NOW, {})] == [(2, True)]
     # A session the user started on Sonnet (SPEC SESSION-22) is wrong on Opus, and back once it is on Sonnet again.
     assert [(row["model"], row["intended"], row["calls"], row["back"])
-            for row in index.wrong_models(NOW, {SESSION: "claude-sonnet-5-5"})] == [
+            for row in index.wrong_models(NOW, {SESSION: spend.ModelChoices(["claude-sonnet-5-5"], True)})] == [
         ("claude-opus-5-5", "claude-sonnet-5-5", 2, False)]
+
+
+def test_a_session_on_another_model_warns_also_when_it_was_chosen(tmp_path: Path) -> None:
+    """The fallback restarts a session on another model; the warning shows it also after a /model pick of that model, and says it is back once its latest own call is on Claude again (SPEC SESSION-20)."""
+    transcript(tmp_path, SESSION, [
+        prompt(0, "Fix the parser"), call("msg_1", 1, usage(output=100)),
+        prompt(2, "<command-name>/model</command-name>\n<command-message>model</command-message>\n<command-args>example-model</command-args>"),
+        call("msg_2", 3, usage(output=100), model="example-model"),
+    ])
+    index = index_of(tmp_path)
+    rows = index.wrong_models(NOW, {})
+    assert [(row["model"], row["claude"], row["latest"], row["calls"], row["back"]) for row in rows] == [
+        ("example-model", False, "example-model", 1, False)]
+    assert index.latest_models() == {SESSION: "example-model"}
+    transcript(tmp_path, SESSION, [call("msg_3", 4, usage(output=100))])
+    index.refresh(NOW)
+    assert [(row["latest"], row["back"]) for row in index.wrong_models(NOW, {})] == [("claude-opus-5-5", True)]
+    assert index.latest_models() == {SESSION: "claude-opus-5-5"}
 
 
 def test_the_latest_model_is_the_one_of_the_sessions_own_latest_call(tmp_path: Path) -> None:
@@ -705,7 +975,7 @@ def test_a_wrong_model_counts_by_the_turn_it_answered(tmp_path: Path) -> None:
         call("msg_5", 3, usage(output=100), model="claude-sonnet-5-5"),
     ])
     # All three started from Cockpit on the main model.
-    started = dict.fromkeys((SESSION, COPY, started_by_script), config.MAIN_MODEL)
+    started = dict.fromkeys((SESSION, COPY, started_by_script), spend.ModelChoices([config.MAIN_MODEL], True))
     rows = index_of(tmp_path).wrong_models(NOW, started)
     assert sorted((row["session_id"], row["model"], row["calls"]) for row in rows) == [
         (SESSION, "claude-sonnet-5-5", 1), (COPY, "claude-sonnet-5-5", 1), (started_by_script, "claude-sonnet-5-5", 1),
@@ -725,8 +995,21 @@ def test_a_session_started_elsewhere_is_judged_by_the_model_it_started_on(tmp_pa
     assert [(row["model"], row["intended"], row["back"]) for row in index.wrong_models(NOW, {})] == [
         ("claude-sonnet-5-5", "claude-haiku-5-5", False)]
     # Started from Cockpit on the main model, its first reply on Haiku is already the wrong one.
-    assert [(row["model"], row["calls"]) for row in index.wrong_models(NOW, {SESSION: config.MAIN_MODEL})] == [
+    assert [(row["model"], row["calls"]) for row in index.wrong_models(NOW, {SESSION: spend.ModelChoices([config.MAIN_MODEL], True)})] == [
         ("claude-sonnet-5-5", 1), ("claude-haiku-5-5", 1)]
+
+
+def test_a_typed_command_names_a_session_only_until_a_prompt_in_words(tmp_path: Path) -> None:
+    typed = "<command-name>/model</command-name>\n<command-message>model</command-message>\n<command-args>fable</command-args>"
+    transcript(tmp_path, SESSION, [prompt(0, typed), call("msg_1", 1, usage(output=100))])
+    index = index_of(tmp_path)
+    assert session_row(index.summary(NOW - timedelta(days=7)), SESSION)["first_prompt"] == "/model"
+    transcript(tmp_path, SESSION, [
+        prompt(2, "Fix the parser"), call("msg_2", 3, usage(output=100)),
+        prompt(4, "and the docs"), call("msg_3", 5, usage(output=100)),
+    ])
+    index.refresh(NOW)
+    assert session_row(index.summary(NOW - timedelta(days=7)), SESSION)["first_prompt"] == "Fix the parser"
 
 
 def test_a_model_picked_with_model_in_the_session_is_intended(tmp_path: Path) -> None:
@@ -744,6 +1027,40 @@ def test_a_model_picked_with_model_in_the_session_is_intended(tmp_path: Path) ->
     transcript(tmp_path, SESSION, [call("msg_4", 6, usage(output=100), model="claude-fable-5-2")])
     index.refresh(NOW)
     assert [(row["model"], row["back"]) for row in index.wrong_models(NOW, {})] == [("claude-sonnet-5-5", True)]
+
+
+def process_ended(minutes: int) -> dict[str, Any]:
+    """The entry Claude Code writes as a session's process ends."""
+    return {"type": "cost-state", "costUSD": 1.5, "timestamp": at(minutes)}
+
+
+def model_note(minutes: int, model: str) -> dict[str, Any]:
+    """The note a process writes when it runs on another model than the conversation last ran on."""
+    return {
+        "parentUuid": "p", "isSidechain": False,
+        "attachment": {"type": "model", "identity": {"modelId": model, "displayName": model}},
+        "type": "attachment", "uuid": f"note-{minutes}", "timestamp": at(minutes), "cwd": "/home/sam/dev/app",
+    }
+
+
+def test_a_model_a_session_was_restarted_on_is_intended(tmp_path: Path) -> None:
+    # A session started in a terminal, ended, and continued with `claude --continue --model claude-fable-5-2`.
+    transcript(tmp_path, SESSION, [
+        prompt(0, "Fix the parser"), call("msg_1", 1, usage(output=100)), process_ended(2),
+        model_note(3, "claude-fable-5-2[1m]"), prompt(3, "You were restarted"),
+        call("msg_2", 4, usage(output=100), model="claude-fable-5-2"),
+    ])
+    index = index_of(tmp_path)
+    assert index.wrong_models(NOW, {}) == []
+    # A switch inside a running process still warns, with no process end before its note.
+    transcript(tmp_path, SESSION, [
+        model_note(5, "claude-sonnet-5-5"), call("msg_3", 6, usage(output=100), model="claude-sonnet-5-5"),
+    ])
+    index.refresh(NOW)
+    assert [row["model"] for row in index.wrong_models(NOW, {})] == ["claude-sonnet-5-5"]
+    # For a session Cockpit started, the model chosen in Cockpit stays the intended one.
+    launched = {SESSION: spend.ModelChoices(["claude-opus-5-5"], True)}
+    assert [row["model"] for row in index.wrong_models(NOW, launched)] == ["claude-sonnet-5-5", "claude-fable-5-2"]
 
 
 def test_a_model_named_in_the_folders_claude_settings_is_intended(tmp_path: Path) -> None:
@@ -794,6 +1111,27 @@ def test_wrong_model_checks_read_each_checkout_once_and_notice_settings_edits(tm
     assert sorted(calls) == sorted(str(folder) for folder in folders)
 
 
+def test_wrong_model_checks_stop_reading_settings_when_calls_leave_the_window(tmp_path: Path, monkeypatch) -> None:
+    transcript(tmp_path, SESSION, [
+        prompt(0, "Fix the parser"), call("opus", 1, usage(output=100)),
+        call("sonnet", 2, usage(output=100), model="claude-sonnet-5-5"),
+    ])
+    index = index_of(tmp_path)
+    checked = []
+
+    def settings(cwd: str) -> list[str]:
+        checked.append(cwd)
+        return []
+
+    monkeypatch.setattr(index, "_settings_models", settings)
+    boundary = datetime.fromisoformat(at(2)) + timedelta(hours=spend.WRONG_MODEL_HOURS)
+    assert [row["model"] for row in index.wrong_models(boundary, {})] == ["claude-sonnet-5-5"]
+    assert checked == ["/home/sam/dev/app"]
+    checked.clear()
+    assert index.wrong_models(boundary + timedelta(seconds=1), {}) == []
+    assert checked == []
+
+
 def test_a_settings_alias_names_its_family_only() -> None:
     assert spend.names_model("fable", "claude-fable-5-2")
     assert spend.names_model("opus[1m]", "claude-opus-5-5")
@@ -817,6 +1155,67 @@ def test_the_page_names_a_session_on_another_model(world: World) -> None:
     # The sweeper reads it in `cockpit get` too.
     assert (f"WARNING: session {SESSION_A} (session {SESSION_A[:4]}) ran on claude-fable-5-2 instead of claude-opus-5-5."
             f" It made 1 call there, the last at {at(1)}. `/model claude-opus-5-5` moves it back.") in cli.summary(state)
+
+
+@pytest.mark.parametrize("initial", [None, "claude-opus-5-5"])
+@pytest.mark.parametrize("launched", [True, False])
+def test_deliberate_cockpit_switch_keeps_earlier_model_use_expected(world: World, initial: str | None, launched: bool) -> None:
+    projects = world.spend_index.projects_dir
+    transcript(projects, SESSION_A, [
+        prompt(0, "Fix the parser"), call("msg_0", 0, usage(output=100)),
+        call("msg_1", 1, usage(output=100), model="claude-fable-5-2"),
+    ])
+    conn = db.connect(world.db_path)
+    insert = (
+        "INSERT INTO messages (author, session_id, text, state, created_at, via, new_options)"
+        " VALUES ('user', ?, 'Continue', ?, ?, ?, ?)"
+    )
+    if launched:
+        conn.execute(insert, (SESSION_A, "sent", at(0), "new", json.dumps({"model": initial})))
+    conn.execute(insert, (SESSION_A, "sent", at(1), "socket", json.dumps({"model": "claude-fable-5-2"})))
+    # Requests that have not reached the session cannot legitimise its later unrequested model.
+    for state in ("queued", "sending", "failed"):
+        conn.execute(insert, (SESSION_A, state, at(2), None, json.dumps({"model": "claude-sonnet-5-5"})))
+    conn.commit()
+    assert store.chosen_models(conn)[SESSION_A].models == (["claude-fable-5-2", "claude-opus-5-5"]
+                                                            if launched else ["claude-fable-5-2"])
+    assert store.chosen_models(conn)[SESSION_A].launched is launched
+    assert store.started_models(conn)[SESSION_A] == "claude-fable-5-2"
+    world.spend_index.refresh(datetime.now(UTC))
+    assert world.client.get("/api/state").json()["wrong_models"] == []
+    # An unrequested model still warns against the latest delivered choice.
+    transcript(projects, SESSION_A, [call("msg_2", 2, usage(output=100), model="claude-sonnet-5-5")])
+    world.spend_index.refresh(datetime.now(UTC))
+    rows = world.client.get("/api/state").json()["wrong_models"]
+    assert [(row["model"], row["intended"], row["back"]) for row in rows] == [
+        ("claude-sonnet-5-5", "claude-fable-5-2", False)]
+    # Switching back deliberately keeps both choices, with the latest first and no duplicates.
+    conn.execute(insert, (SESSION_A, "sent", at(3), "socket", json.dumps({"model": "claude-opus-5-5"})))
+    conn.commit()
+    assert store.chosen_models(conn)[SESSION_A].models == ["claude-opus-5-5", "claude-fable-5-2"]
+    transcript(projects, SESSION_A, [call("msg_3", 3, usage(output=100))])
+    world.spend_index.refresh(datetime.now(UTC))
+    rows = world.client.get("/api/state").json()["wrong_models"]
+    assert [(row["model"], row["intended"], row["back"]) for row in rows] == [
+        ("claude-sonnet-5-5", "claude-opus-5-5", True)]
+    conn.close()
+
+
+def test_the_page_names_a_session_on_the_fallback_model_and_counts_it_apart(world: World) -> None:
+    projects = world.spend_index.projects_dir
+    transcript(projects, SESSION_A, [
+        prompt(0, "Fix the parser"), call("msg_0", 0, usage(output=100)),
+        call("msg_1", 1, usage(fresh=10, read=500, output=100), model="example-model"),
+    ])
+    world.spend_index.refresh(datetime.now(UTC))
+    state = world.client.get("/api/state").json()
+    assert [(row["model"], row["claude"], row["back"]) for row in state["wrong_models"]] == [("example-model", False, False)]
+    assert (f"NOTE: session {SESSION_A} (session {SESSION_A[:4]}) ran on example-model in place of Claude, as the fallback"
+            f" while the model hub could not reach Claude. It made 1 call there, the last at {at(1)}. It moves back once"
+            " the hub reaches Claude again.") in cli.summary(state)
+    spent = world.client.get("/api/spend", params={"period": "7"}).json()
+    assert [(row["name"], row["calls"], row["tokens"]) for row in spent["other_models"]["sessions"]] == [
+        (f"session {SESSION_A[:4]}", 1, {"fresh": 10, "cached": 500, "output": 100})]
 
 
 def test_a_closed_wrong_model_banner_stays_closed_while_the_session_stays_on_that_model(world: World) -> None:
@@ -911,7 +1310,7 @@ def test_investigate_on_a_wrong_model_banner_starts_a_to_do_in_cockpits_checkout
     world.spend_index.refresh(now)
     # The investigation runs in Cockpit's own checkout; the fixture's spec repo sits outside the checkouts.
     app = create_app(replace(world.settings, spec_repo=world.checkout), world.deliverer, world.cache, world.spend_index,
-                     world.codex_index, [])
+                     world.codex_index, [], read_view)
     browser = TestClient(app, base_url=ORIGIN)
     browser.cookies = world.client.cookies
     body = {"session_id": SESSION_A, "model": "claude-fable-5-2"}
@@ -937,7 +1336,7 @@ def test_investigate_on_a_wrong_model_banner_starts_a_to_do_in_cockpits_checkout
 def test_a_message_on_a_warning_starts_a_to_do_in_cockpits_checkout_and_hands_it_the_warning(world: World) -> None:
     # The session runs in Cockpit's own checkout; the fixture's spec repo sits outside the checkouts.
     app = create_app(replace(world.settings, spec_repo=world.checkout), world.deliverer, world.cache, world.spend_index,
-                     world.codex_index, [])
+                     world.codex_index, [], read_view)
     browser = TestClient(app, base_url=ORIGIN)
     browser.cookies = world.client.cookies
     quote = "Codex ~/.codex (sam@example.com) is signed out Codex jobs on this account fail until it signs in."
@@ -974,7 +1373,14 @@ def test_a_message_on_a_warning_starts_a_to_do_in_cockpits_checkout_and_hands_it
                           dict.fromkeys(("provider", "model", "effort", "account")), False, None)
     store.merge_item(conn, item["id"], main["id"], "Both are about the Codex accounts.", "agent:test")
     assert browser.get("/api/state").json()["handed_warnings"] == {key: main["id"]}
-    # Once that item is done the warning is back in Inbox while its cause holds; so it is once one is archived.
+    # Once that item ships the warning is back in Inbox while its cause holds, though its finish step still waits on
+    # the user; so it is once one is done or archived.
+    conn.execute("UPDATE items SET stage = 'prod' WHERE id = ?", (main["id"],))
+    conn.commit()
+    assert browser.get("/api/state").json()["handed_warnings"] == {}
+    conn.execute("UPDATE items SET stage = 'staging' WHERE id = ?", (main["id"],))
+    conn.commit()
+    assert browser.get("/api/state").json()["handed_warnings"] == {key: main["id"]}
     conn.execute("UPDATE items SET stage = 'done' WHERE id = ?", (main["id"],))
     conn.commit()
     assert browser.get("/api/state").json()["handed_warnings"] == {}
@@ -994,7 +1400,7 @@ def test_usage_keeps_a_complete_reading_while_both_indexes_restart(world: World,
     saved = world.client.get("/api/spend", params={"period": period}).json()
     assert saved["ready_at"] and saved["refreshing"] is False
     with db.connect(world.db_path) as conn:
-        assert db.kv_get(conn, f"spend-report-v1:{period}") == saved
+        assert db.kv_get(conn, f"spend-report-v2:{period}") == saved
     for restarting in (world.spend_index, world.codex_index):
         ready_at = restarting.ready_at
         restarting.ready_at = None
@@ -1012,7 +1418,7 @@ def test_usage_keeps_a_complete_reading_while_both_indexes_restart(world: World,
     assert updated["refreshing"] is False
     assert updated["total"]["tokens"]["output"] == 3000
     with db.connect(world.db_path) as conn:
-        assert db.kv_get(conn, f"spend-report-v1:{period}") == updated
+        assert db.kv_get(conn, f"spend-report-v2:{period}") == updated
 
 
 def test_usage_without_a_saved_reading_still_waits_for_its_first_count(world: World) -> None:
@@ -1020,4 +1426,4 @@ def test_usage_without_a_saved_reading_still_waits_for_its_first_count(world: Wo
     assert reading["ready_at"] is None
     assert reading["refreshing"] is True
     with db.connect(world.db_path) as conn:
-        assert db.kv_get(conn, "spend-report-v1:week") is None
+        assert db.kv_get(conn, "spend-report-v2:week") is None

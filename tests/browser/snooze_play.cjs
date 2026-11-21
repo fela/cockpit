@@ -1,5 +1,5 @@
 // Play on a snoozed step wakes it and starts its timer. Checks, at laptop and phone width:
-// - a snoozed step's row opens under Snoozed with a play named "Unsnooze and start the timer";
+// - a snoozed step's row under Waiting opens its card, whose menu has a play named "Unsnooze and start the timer";
 // - the play brings the step back into the queue, starts its timer and shows the content;
 // - two seconds later the timer still runs.
 //
@@ -70,16 +70,21 @@ async function main() {
       const errors = [];
       page.on("pageerror", (error) => errors.push(error.message));
       page.on("console", (message) => { if (message.type() === "error") errors.push(message.text()); });
-      await page.goto(`${info.origin}/classic`, { timeout: 20000 });
-      const group = page.locator("details.snoozed");
-      await group.locator("summary").first().click();
-      const row = page.locator(`.step-row[data-step="${id}"]`).first();
-      await row.locator(".row-head").click();
+      await page.goto(`${info.origin}/`, { timeout: 20000 });
+      // A phone page opens on the item screen; the row is on the list screen.
+      if (width < 600) await page.evaluate(() => setPhoneScreen(true, false));
+      const group = page.locator("#sidebar details.sidebar-group.waiting");
+      const sideRow = group.locator(`li.side-item.snoozed[data-step="${id}"]`);
+      await sideRow.waitFor({ state: "attached" });
+      if (!(await group.evaluate((el) => el.open))) await group.locator(":scope > summary").click();
+      await sideRow.locator(".side-row").click();
+      const row = page.locator(`#next .next-card[data-step="${id}"]`);
+      await row.waitFor();
       // The timer's start is in the step's ⋯ menu (VIEW-29).
       const playButton = row.locator('.step-menu [data-timer="start"]');
       await playButton.waitFor({ state: "attached" });
       const playWords = (await playButton.textContent()).trim();
-      check(`${width}: the snoozed row's menu names its start "Unsnooze and start the timer"`,
+      check(`${width}: the snoozed step's menu names its start "Unsnooze and start the timer"`,
         playWords === "Unsnooze and start the timer", playWords);
       await row.locator(".step-menu > summary").click();
       if (shots) await row.screenshot({ path: path.join(shots, `snoozed-${width}.png`) });
@@ -95,7 +100,7 @@ async function main() {
       check(`${width}: the step is back in the queue`, state.queue.some((step) => step.id === id) && !state.snoozed.some((step) => step.id === id),
         JSON.stringify(state.snoozed.map((step) => step.id)));
       check(`${width}: its timer runs`, state.timer && state.timer.step_id === id, JSON.stringify(state.timer));
-      const card = page.locator(`[data-step="${id}"]`).first();
+      const card = page.locator(`#next .next-card[data-step="${id}"]`);
       const shown = await card.evaluate((el) => el.textContent.includes("The whole description of the snoozed step."));
       check(`${width}: the content shows`, shown, "no content");
       await sleep(2000);

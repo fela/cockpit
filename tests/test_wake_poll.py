@@ -85,6 +85,25 @@ def test_a_waiting_move_counts_as_a_delivery_under_way(world: World, monkeypatch
     assert moved == [waiting] and "move-s-1" in recorder.started
 
 
+def test_the_sweepers_message_goes_out_on_its_own_thread(world: World, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A resume's send lasts until its prompt is in the transcript, which has taken up to 95 s; sent from the poll
+    itself, it held up every other session's waiting messages for that long."""
+    monkeypatch.setattr(config, "DB_PATH", world.db_path)
+    monkeypatch.setattr(server, "finish_withdrawals", lambda: None)
+    monkeypatch.setattr(server, "launch_briefing_once", lambda deliverer: None)
+    monkeypatch.setattr(server, "launch_projects_tidy_once", lambda deliverer: None)
+    monkeypatch.setattr(server.sweeper, "pause_once", lambda conn, cwd, exists: 7)
+
+    def sleep(seconds: float) -> None:
+        raise Stop
+
+    monkeypatch.setattr(server.time, "sleep", sleep)
+    recorder = Recorder()
+    with pytest.raises(Stop):
+        server.wake_sweeper_forever(recorder, world.cache, world.spend_index)  # ty: ignore[invalid-argument-type]
+    assert recorder.sent == [7] and recorder.started == ["send-7"]
+
+
 def a_poll_that_logs(world: World, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, deliverer: Any) -> list:
     """The (level, words before the colon) of what one wake poll logged."""
     monkeypatch.setattr(config, "DB_PATH", world.db_path)

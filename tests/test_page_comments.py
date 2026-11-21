@@ -232,11 +232,14 @@ def test_send_to_the_items_session_needs_a_session(world: World) -> None:
 def test_a_page_opened_for_comments_carries_the_frame_script(world: World) -> None:
     page, _ = setup(world)
     plain = world.client.get(f"/pages/{page['id']}/figure")
-    assert plain.text == REPORT + app_module.FIGURE_SIZE_SCRIPT + app_module.FIGURE_LINK_SCRIPT + app_module.PAGE_CHOICES_SCRIPT
+    identity = world.client.get("/api/offline/session").json()
+    root = f'<html data-offline-user="{identity["user"]}" data-offline-until="{identity["until"]}" data-offline-helper="1">'
+    scoped_report = REPORT.replace("<!doctype html>", "<!doctype html>" + root, 1)
+    assert plain.text == scoped_report + app_module.FIGURE_SIZE_SCRIPT + app_module.FIGURE_LINK_SCRIPT + app_module.PAGE_CHOICES_SCRIPT
     annotated = world.client.get(f"/pages/{page['id']}/figure", params={"comments": 1})
     # The picker's first listeners open the head, so they come before the page's own.
     guard = app_module.PAGE_PICK_GUARD_SCRIPT
-    assert annotated.text == ("<!doctype html>" + guard + REPORT.removeprefix("<!doctype html>") + app_module.FIGURE_SIZE_SCRIPT
+    assert annotated.text == ("<!doctype html>" + root + guard + REPORT.removeprefix("<!doctype html>") + app_module.FIGURE_SIZE_SCRIPT
                               + app_module.FIGURE_LINK_SCRIPT + app_module.PAGE_CHOICES_SCRIPT + app_module.PAGE_FRAME_SCRIPT)
     # It keeps the page's mode (a byte order mark first too) and its html and head tags' attributes, a `>` in one too.
     for before, after in [("<!-- r --> <!DOCTYPE html>\n<html lang=en>\n<head data-x=1>", "<title>t</title>"),
