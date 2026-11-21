@@ -378,16 +378,17 @@ def launch_digest_once(conn: sqlite3.Connection, setup: Setup, now: datetime) ->
     """Queue the current week's digest request when the digest is on, a team is set and the request is due (SPEC
     VIEW-37); returns the message to deliver. It is due from the digest day's hour once that day's briefing is
     stored or DIGEST_WAIT_HOURS have passed, and asked again as `_digest_retry` says; a week without a briefing gets
-    no digest. The check and the queuing are one transaction, so a digest stored meanwhile is never asked for again."""
+    no digest. The schedule's reads, the check and the queuing are one transaction, so a digest stored meanwhile is
+    never asked for again and a save of No digest meanwhile stops the request."""
     if not digest_on(setup) or not team(conn):
         return None
-    end = _digest_week(conn, setup, now)
-    if end is None:
-        return None
-    day = end.isoformat()
-    due = datetime.combine(end, time(schedule(conn, setup)["digest_hour"]), setup.timezone)
-    waited = now >= due + timedelta(hours=DIGEST_WAIT_HOURS)
     with db.transaction(conn):
+        end = _digest_week(conn, setup, now)
+        if end is None:
+            return None
+        day = end.isoformat()
+        due = datetime.combine(end, time(schedule(conn, setup)["digest_hour"]), setup.timezone)
+        waited = now >= due + timedelta(hours=DIGEST_WAIT_HOURS)
         record = db.kv_get(conn, WEEKLY.launch_key)
         if record is not None and record["day"] > day:
             return None  # a poll that read the clock before the last request's

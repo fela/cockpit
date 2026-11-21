@@ -238,3 +238,17 @@ def test_a_failed_digest_keeps_its_retry_after_a_time_zone_change(world: World) 
     finally:
         conn.close()
 
+
+@pytest.mark.usefixtures("settings_on", "team")
+def test_the_digest_reads_the_schedule_in_the_transaction_that_queues_it(world: World, monkeypatch) -> None:
+    brief(world, 11, 7, True)
+    read = briefing.schedule
+    inside: list[bool] = []
+
+    def watched(conn, setup):
+        inside.append(conn.in_transaction)
+        return read(conn, setup)
+
+    monkeypatch.setattr(briefing, "schedule", watched)
+    assert digest(world, at(11, 8)) is not None
+    assert inside and all(inside)
