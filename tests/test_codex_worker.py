@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from cockpit import db
+from cockpit import codex_worker, db
 from cockpit.app import create_app
 from cockpit.codex_agent import CodexAgent, CodexError, ProviderSessions, WorkerRetired
 from cockpit.codex_worker import WorkerClient, launch, socket_path
@@ -512,3 +512,47 @@ def test_retiring_worker_answers_calls_already_connected(world):
             assert call(second, "sessions", []) == {"result": []}
         serving.join(timeout=5)
         assert not serving.is_alive()
+
+
+def test_worker_raises_the_open_file_limit_its_app_server_inherits(tmp_path):
+    """launchd starts the worker with room for 256 open files, which app-server ran out of after a few days."""
+    import resource
+
+    hard = resource.getrlimit(resource.RLIMIT_NOFILE)[1]
+    if hard != resource.RLIM_INFINITY and hard < 1024:
+        pytest.skip("this host's hard limit leaves nothing to raise")
+    script = ("import resource, subprocess, sys; from cockpit import codex_worker; codex_worker.raise_open_files(); "
+              "print(subprocess.run([sys.executable, '-c', 'import resource; "
+              "print(resource.getrlimit(resource.RLIMIT_NOFILE)[0])'], capture_output=True, text=True).stdout)")
+    child = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, check=True,
+                           preexec_fn=lambda: resource.setrlimit(resource.RLIMIT_NOFILE, (256, hard)))
+    expected = codex_worker.OPEN_FILES if hard == resource.RLIM_INFINITY else min(codex_worker.OPEN_FILES, hard)
+    assert int(child.stdout) == expected
+
+
+@pytest.mark.parametrize(
+    ("soft", "hard", "raised"),
+    [(256, "infinity", 10240), (256, 4096, 4096), (20000, "infinity", None), ("infinity", "infinity", None)],
+)
+def test_the_open_file_limit_rises_within_the_hard_limit_and_never_falls(monkeypatch, soft, hard, raised):
+    import resource
+
+    limits = {"infinity": resource.RLIM_INFINITY}
+    current = (limits.get(soft, soft), limits.get(hard, hard))
+    calls = []
+    monkeypatch.setattr(resource, "getrlimit", lambda kind: current)
+    monkeypatch.setattr(resource, "setrlimit", lambda kind, value: calls.append(value))
+    codex_worker.raise_open_files()
+    assert calls == ([] if raised is None else [(raised, current[1])])
+
+
+def test_a_refused_open_file_limit_is_logged_and_the_worker_still_starts(monkeypatch, caplog):
+    import resource
+
+    def refuse(kind, value):
+        raise ValueError("current limit exceeds maximum limit")
+
+    monkeypatch.setattr(resource, "getrlimit", lambda kind: (256, resource.RLIM_INFINITY))
+    monkeypatch.setattr(resource, "setrlimit", refuse)
+    codex_worker.raise_open_files()
+    assert "Could not raise the open-file limit from 256 to 10240" in caplog.text
