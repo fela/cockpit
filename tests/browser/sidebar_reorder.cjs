@@ -27,7 +27,7 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 const SESSION_B = "22222222-2222-4222-8222-222222222222";
 const AGENT = { authorization: `Bearer ${"t".repeat(40)}`, "x-cockpit-as": "sidebar-reorder", "content-type": "application/json" };
-const RESORTED = "#next > .resorted-pin > .reorder.resorted";
+const RESORTED = "#next > .next-card > .resorted-pin > .reorder.resorted";
 
 async function main() {
   const work = workFolder("cockpit-sidebar-reorder-");

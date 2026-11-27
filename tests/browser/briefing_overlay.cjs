@@ -11,7 +11,7 @@
 //   close it;
 // - a click with Ctrl (a new tab) leaves the main page as it is;
 // - a click on a task the briefing mentions closes the layer and opens the task on the main page; a mention of a
-//   task closed long ago, which the page lists nowhere, opens the main page's search of closed work for it;
+//   task closed long ago, which the page lists nowhere, shows that task on the main page's card, with no Search filter;
 // - no page errors and no Content Security Policy errors.
 //
 // Starts serve_preview.py (this checkout's Cockpit on a synthetic database; README.md says what it needs), with
@@ -254,9 +254,9 @@ async function main() {
         !(await page.evaluate(() => Boolean(history.state?.cockpitPageOverlay))) && new URL(page.url()).pathname === "/", page.url());
       await shot("5-mention");
 
-      // A mention of a task the page lists nowhere opens Cockpit's search for it, and that search's address stays
-      // once the layer's history entry is gone. The page loads afresh on the step first: the mention above showed
-      // another task in its place and left the address as it was, so going to that address again would do nothing.
+      // A mention of a task the page lists nowhere shows it on the main page's card, with no Search filter. The page
+      // loads afresh on the step first: the mention above showed another task in its place and left the address as it
+      // was, so going to that address again would do nothing.
       await page.goto("about:blank");
       await page.goto(`${info.origin}/#home/item/${item.id}`);
       await card.waitFor();
@@ -265,11 +265,13 @@ async function main() {
       const searching = await inLayer("the link for the closed task");
       await searching.locator(`.briefing-body a.item-ref[href="/#item/${offPage.id}"]`).click();
       check(`${at}: a click on a closed task the briefing mentions closes the layer`, await closed(), "the layer stayed open");
-      const found = `#find-closed/${encodeURIComponent(`#${offPage.id}`)}`;
-      const address = await waitFor(() => new URL(page.url()).hash, (hash) => hash === found);
-      check(`${at}: and the main page searches closed work for it, in the same tab`, address === found && tabs() === 1
+      const closedShown = await waitFor(() => page.evaluate(() => ui.shownItem === null || document.body.classList.contains("phone-list")
+        || !document.querySelector("#next")?.textContent.includes("Old export file") ? null : String(ui.shownItem)),
+        (id) => id === String(offPage.id));
+      const searched = await page.evaluate(() => Boolean(document.querySelector(".find-bar")) || location.hash.startsWith("#find"));
+      check(`${at}: and the main page shows it on the card, in the same tab, with no Search filter`, closedShown === String(offPage.id) && !searched && tabs() === 1
         && !(await page.evaluate(() => Boolean(history.state?.cockpitPageOverlay))) && new URL(page.url()).pathname === "/",
-        JSON.stringify({ address, tabs: tabs(), url: page.url() }));
+        JSON.stringify({ closedShown, searched, tabs: tabs(), url: page.url() }));
       await shot("6-closed-mention");
 
       check(`${at}: no page or policy errors`, errors.length === 0, errors.join(" | "));

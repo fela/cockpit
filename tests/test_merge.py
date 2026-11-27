@@ -176,6 +176,9 @@ def test_an_item_cannot_merge_into_itself_or_from_a_closed_task(world: World) ->
     closed = _merge(world)
     assert closed.status_code == 409 and "is closed" in closed.json()["detail"]
     assert _merge(world, side="note:none").status_code == 404
+    # A superscript digit is a key, not a number; a number past SQLite's integers names no item.
+    for odd in ("\u00b2", "9223372036854775808", "9" * 300):
+        assert _merge(world, side=odd).status_code == 404
 
 
 def test_an_agent_s_second_card_on_a_task_is_refused(world: World) -> None:

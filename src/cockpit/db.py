@@ -1838,6 +1838,15 @@ MIGRATIONS: list[str] = [
     );
     CREATE INDEX draft_followed_created ON draft_followed(created_at);
     """,
+    # The model a to-do of a text run on several models runs on (SPEC SESSION-31), by the label its title starts
+    # with, else NULL. The limit on an agent's title leaves that label out (store.refuse_long_stored_title). Such
+    # to-dos made before this column are the ones whose text holds the note Add put on them.
+    """
+    ALTER TABLE items ADD COLUMN compared_on TEXT;
+    UPDATE items SET compared_on = substr(title, 1, instr(title, ' · ') - 1)
+    WHERE key LIKE 'todo-%' AND instr(title, ' · ') > 1
+      AND instr(summary, '(multiple agents are working on this with the exact same initial prompt') > 0;
+    """,
 ]
 
 JSON_COLUMNS = frozenset(
@@ -2038,6 +2047,22 @@ def kv_set(conn: sqlite3.Connection, key: str, value: Any) -> None:
         "INSERT INTO kv(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
         (key, json.dumps(value)),
     )
+
+
+def models_key(provider: str) -> str:
+    """The kv key holding the models `provider`'s agent offered on its last session start or load."""
+    return f"models:{provider}"
+
+
+def session_models(conn: sqlite3.Connection, provider: str) -> list[tuple[str, str]]:
+    """The models a session on `provider` can run on, as (value, name): config's, then those its agent offered last
+    (Antigravity lists the ones the signed-in Google account has, acp_agent.AcpAgent._choose_model)."""
+    from cockpit import config
+
+    fixed = [tuple(each) for each in config.SESSION_OPTIONS[provider]["models"]]
+    known = {value for value, _ in fixed}
+    learned = [(value, name) for value, name in kv_get(conn, models_key(provider)) or [] if value not in known]
+    return fixed + learned
 
 
 def backup(conn: sqlite3.Connection, target: Path) -> None:

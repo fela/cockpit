@@ -121,11 +121,13 @@
 }
 :root .button.on { box-shadow: none; }
 /* A closing answer and a confirm key keep their solid plum (motion.css, CONTROL-17). */
-:root :is(.answers > .button:not(.closes, .confirm), .next-card > .actions .step-keys > .button:not(.primary, .accent, .on, .task-done)) {
+:root :is(.answers > .button:not(.closes, .confirm, .on), .next-card > .actions .step-keys > .button:not(.primary, .accent, .on, .task-done)) {
   background: var(--surface);
   box-shadow: var(--shadow-button);
 }
 :root .answers .button { border-radius: var(--radius); }
+/* A picked answer on a question card with several questions wears the selection colour. */
+:root .answers > .button.on { background: var(--accent-bg); color: var(--accent-text); box-shadow: 0 0 0 1px var(--accent-line); }
 :root .button:active:not(:disabled) { transform: none; }
 
 /* Section headings in the serif, at 20 px in ink. */
@@ -358,13 +360,13 @@
 }
 
 /* Resorted: the queue's order changed while the user had this step open. Orange up-and-down
-   arrows, on a queue row and on Next up's top edge. On Next up the key comes before the card in #next, on a
-   zero-height sticky line: it rides 16 px below the header while any of the card shows, above the card's own
-   controls. */
+   arrows, on a queue row and beside Next up's ⋯ key. On Next up the key stands in the card, just before the row
+   the ⋯ ends, on a zero-height sticky line: it rides below the header while any of the card shows, above the
+   card's own controls (sidebar.css places it). */
 :root .row .reorder.resorted, :root .resorted-pin > .reorder.resorted { color: var(--accent-text); }
 :root .row .reorder.resorted > .icon, :root .resorted-pin > .reorder.resorted > .icon { color: currentColor; }
 :root .row .reorder.resorted:hover { color: var(--accent-hover); }
-:root #next > .resorted-pin {
+:root .next-card > .resorted-pin {
   position: sticky;
   top: calc(var(--top-h, var(--header-h)) + 16px);
   z-index: 6;
@@ -387,7 +389,7 @@
 :root .resorted-pin > .reorder.resorted > .icon { width: 16px; height: 16px; }
 /* On a phone the card's marks end its heading's line near its top right, so the key stands clear of their tap areas. */
 @media (max-width: 640px) {
-  :root #next > .resorted-pin { padding-right: 56px; }
+  :root .next-card > .resorted-pin { padding-right: 56px; }
   :root .resorted-pin > .reorder.resorted { width: 24px; height: 24px; }
 }
 

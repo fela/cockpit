@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from cockpit import config, db, sessions, store
+from cockpit.codex_agent import CONTROL_PLANE
 from cockpit.config import user_name
 from cockpit.sessions import Session
 
@@ -82,7 +83,7 @@ def _readable_content(content: Any) -> str:
     return "```json\n" + json.dumps(content, ensure_ascii=False, indent=2) + "\n```"
 
 
-def _transcript(session: Session, folder: Path) -> tuple[Path, list[str]]:
+def _transcript(session: Session, folder: Path) -> tuple[Path, list[str], list[str]]:
     provider = "Codex" if session.provider == "codex" else "Claude"
     paths = ([path for home in config.CODEX_HOMES for folder_name in ("sessions", "archived_sessions")
               for path in (home / folder_name).glob(f"**/*{session.session_id}.jsonl")]
@@ -111,19 +112,88 @@ def _transcript(session: Session, folder: Path) -> tuple[Path, list[str]]:
             message = entry.get("message") if isinstance(entry, dict) else None
             content = message.get("content") if isinstance(message, dict) and "content" in message else entry
             handle.write(f"\n## {number}. {kind}\n\n{_readable_content(content)}\n")
-    instructions = []
-    for entry in entries:
-        if not isinstance(entry, dict) or entry.get("type") != "user" or not isinstance(entry.get("message"), dict):
+    instructions, answers = _conversation(session.provider, entries)
+    picked = sorted({0, *range(max(0, len(instructions) - 3), len(instructions))}) if instructions else []
+    return transcript, [_excerpt(instructions[index]) for index in picked], [_excerpt(answer) for answer in answers[-3:]]
+
+
+# Codex adds these to the conversation as user messages; they are not the user's words.
+CODEX_INJECTED = ("# AGENTS.md instructions", "<environment_context>", "<user_instructions>", "<codex_internal_context")
+CODEX_PROGRESS_NOTE = "[Progress note, written while working; not a final answer] "
+# Claude Code writes a slash command, its output and the caveat before them as user rows in these tags.
+CLAUDE_COMMAND_ROWS = ("<command-name>", "<local-command-stdout>", "<local-command-caveat>")
+
+
+def _turn(provider: str, entry: Any) -> tuple[str, str] | None:
+    """A transcript entry as ("user", the prompt's words) or ("assistant", the text the agent wrote); None for the
+    rest, such as tool calls and results, reasoning, and notes the agent tool adds itself, such as an API error. A
+    Codex user message of only added context is ("user", ""): it starts a new turn, as a goal's next step does, with
+    no words of the user."""
+    if not isinstance(entry, dict):
+        return None
+    if provider != "codex":
+        # Claude Code marks the user rows it writes itself with rowSource, and every prompt it was given with
+        # promptSource. A slash command and its output have the first and not the second in 2.1.331, and neither
+        # in 2.1.326, where their tags mark them; a prompt that has promptSource, or came queued, stays whatever it starts with. A
+        # `claude -p` prompt has both (rowSource
+        # "local", promptSource "sdk"), and it is the words of whoever ran it. transcript_prompt already leaves
+        # out the notes Claude Code adds (isMeta), such as the caveat before a command.
+        if entry.get("type") == "user" and "rowSource" in entry and "promptSource" not in entry:
+            return None
+        prompt = sessions.transcript_prompt(entry)
+        if prompt is not None:
+            command_row = entry.get("type") == "user" and "promptSource" not in entry
+            if command_row and prompt[0].lstrip().startswith(CLAUDE_COMMAND_ROWS):
+                return None
+            return ("user", prompt[0]) if prompt[0].strip() else None
+        message = entry.get("message")
+        own = entry.get("type") == "assistant" and isinstance(message, dict) and message.get("model") != sessions.SYNTHETIC_MODEL
+        content = message.get("content") if own else None
+        text = "\n".join(block["text"] for block in content if isinstance(block, dict) and block.get("type") == "text"
+                         and isinstance(block.get("text"), str)) if isinstance(content, list) else ""
+        return ("assistant", text) if text.strip() else None
+    payload = entry.get("payload")
+    if entry.get("type") != "response_item" or not isinstance(payload, dict) or payload.get("type") != "message":
+        return None
+    role = payload.get("role")
+    if role not in ("user", "assistant"):
+        return None
+    blocks = payload.get("content") if isinstance(payload.get("content"), list) else []
+    texts = [block["text"] for block in blocks if isinstance(block, dict) and isinstance(block.get("text"), str)
+             and block.get("type") == ("input_text" if role == "user" else "output_text")]
+    if role == "user":
+        texts = [text.split(CONTROL_PLANE)[0] for text in texts if not text.lstrip().startswith(CODEX_INJECTED)]
+    text = "\n".join(texts)
+    # Codex marks the text it writes while working "commentary" and a turn's answer "final_answer". A turn stopped
+    # before its answer ends on commentary, and so does an occasional finished turn, so that text is labelled as a
+    # progress note.
+    if role == "assistant" and payload.get("phase") == "commentary" and text.strip():
+        text = CODEX_PROGRESS_NOTE + text
+    return (role, text) if text.strip() or role == "user" else None
+
+
+def _conversation(provider: str, entries: list[Any]) -> tuple[list[str], list[str]]:
+    """The user's messages, and the agent's answers: the last text it wrote before each user message and at the end."""
+    instructions: list[str] = []
+    answers: list[str] = []
+    answer = ""
+    for turn in filter(None, (_turn(provider, entry) for entry in entries)):
+        role, text = turn
+        if role == "assistant":
+            answer = text
             continue
-        content = entry["message"].get("content")
-        text = content if isinstance(content, str) else "\n".join(
-            block["text"] for block in content if isinstance(block, dict) and block.get("type") == "text"
-            and isinstance(block.get("text"), str)
-        ) if isinstance(content, list) else ""
         if text.strip():
             instructions.append(text)
-    picked = sorted({0, *range(max(0, len(instructions) - 3), len(instructions))}) if instructions else []
-    return transcript, [instructions[index][:3000] + (" [excerpt; full message in transcript]" if len(instructions[index]) > 3000 else "") for index in picked]
+        if answer:
+            answers.append(answer)
+        answer = ""
+    if answer:
+        answers.append(answer)
+    return instructions, answers
+
+
+def _excerpt(text: str) -> str:
+    return text[:3000] + (" [excerpt; full message in transcript]" if len(text) > 3000 else "")
 
 
 def prepare(conn: sqlite3.Connection, session: Session, item_id: int, db_path: Path,
@@ -131,7 +201,7 @@ def prepare(conn: sqlite3.Connection, session: Session, item_id: int, db_path: P
     """Create the one durable initial message after the source process has stopped."""
     validate_item(conn, session.session_id, item_id)
     associated = items(conn, session.session_id)
-    transcript, instructions = _transcript(session, db_path.parent / "handovers" / session.session_id)
+    transcript, instructions, answers = _transcript(session, db_path.parent / "handovers" / session.session_id)
     context = []
     for item in associated:
         context.append({
@@ -158,6 +228,8 @@ def prepare(conn: sqlite3.Connection, session: Session, item_id: int, db_path: P
         f"Working directory: {session.cwd}\nTransferred tasks:\n"
         + "\n".join(f"- Item {item['id']}: {item['title']} ({item['key']}); {item['summary']}" for item in associated)
         + "\n\nOriginal request and recent user messages (excerpts):\n\n" + "\n\n---\n\n".join(instructions)
+        + (f"\n\nThe {source_name} agent's latest answers (excerpts, oldest first):\n\n" + "\n\n---\n\n".join(answers)
+           if answers else "")
         + f"\n\nRead the task, open-step and message records at {context_path} first. The complete original conversation"
         f" is at {transcript}, including tool calls and results, with no tail truncation. Look up relevant decisions,"
         " constraints and unfinished actions there, including any compaction summaries, as needed. Reload the current"

@@ -1375,7 +1375,7 @@ def test_a_message_on_a_warning_starts_a_to_do_in_cockpits_checkout_and_hands_it
     conn = db.connect(world.db_path)
     # A to-do merged into another hands the warning on to the item it joined.
     main = store.add_item(conn, "The Codex accounts", None, False,
-                          dict.fromkeys(("provider", "model", "effort", "account")), False, None)
+                          dict.fromkeys(("provider", "model", "effort", "account")), False, None, None)
     store.merge_item(conn, item["id"], main["id"], "Both are about the Codex accounts.", "agent:test")
     assert browser.get("/api/state").json()["handed_warnings"] == {key: main["id"]}
     # Once that item ships the warning is back in Inbox while its cause holds, though its finish step still waits on

@@ -26,6 +26,7 @@ const main = page("hub-foot.js", {
   codexMark: () => "Codex",
   claudeMark: () => "Claude",
   machineLamp: () => null,
+  laneUnits: (group) => group,
   ui: { busy: new Set() },
   toast: (text) => notices.push(text),
 });

@@ -1,11 +1,27 @@
 "use strict";
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
+const path = require("node:path");
+const { spawnSync } = require("node:child_process");
 const { chromium } = require(process.env.PLAYWRIGHT_MODULE || "playwright");
 const { startPreview } = require("./work.cjs");
 
 (async () => {
-  const { info } = await startPreview("cockpit-navigation-");
+  const { work, info } = await startPreview("cockpit-navigation-");
+  // A task archived before this week: the page holds it nowhere, and a mention of it shows it on the card.
+  const cookie = `${info.name}=${info.value}`;
+  const call = async (method, url, headers, body) => {
+    const response = await fetch(info.origin + url, { method, headers: { "content-type": "application/json", ...headers }, body: JSON.stringify(body) });
+    if (!response.ok) throw new Error(`${method} ${url}: HTTP ${response.status}: ${await response.text()}`);
+    return response.json();
+  };
+  const oldTask = await call("PUT", "/api/items", { authorization: `Bearer ${"t".repeat(40)}`, "x-cockpit-as": "navigation-test" },
+    { key: "note:navigation-old-task", title: "Old navigation task" });
+  await call("PUT", "/api/items", { cookie, origin: info.origin }, { key: oldTask.key, archived: true, note: "not needed" });
+  const aged = spawnSync(path.join(__dirname, "../../.venv/bin/python"), ["-c",
+    "import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); c.execute(\"UPDATE items SET archived_at='2000-01-01T00:00:00Z', updated_at='2000-01-01T00:00:00Z' WHERE id=?\", (int(sys.argv[2]),)); c.commit()",
+    path.join(work, "cockpit.db"), String(oldTask.id)], { encoding: "utf8" });
+  if (aged.status !== 0) throw new Error(aged.stderr);
   const browser = await chromium.launch({ executablePath: process.env.BROWSER_EXECUTABLE });
   try {
     for (const width of [1440, 390]) {
@@ -121,6 +137,22 @@ const { startPreview } = require("./work.cjs");
         else { assert.equal(destination.item, ids[1]); assert.equal(destination.route.itemId, ids[1]); assert.equal(destination.route.sessionId, null); }
       }
       console.log(`pass ${width}: a delayed session restore cannot undo Forward, a new task, or a new center view`);
+
+      // A row on a view, such as a closed task on the Time view, names a task the sidebar does not list: the view
+      // closes, the task shows on the card with no Search filter, and Back returns to the view. A task Cockpit does
+      // not have says so and leaves the view open.
+      const doneId = oldTask.id;
+      await page.evaluate(() => openCenter("time"));
+      await page.evaluate((id) => dispatchEvent(new CustomEvent("cockpit:open-item", { detail: id })), doneId);
+      await page.waitForFunction((id) => ui.shownItem === id && !center.view
+        && document.querySelector("#next")?.textContent.includes("Old navigation task"), doneId);
+      assert.equal(await page.evaluate(() => Boolean(ui.find) || location.hash.startsWith("#find")), false, "A closed task shows without Search");
+      await page.goBack(); await page.waitForFunction(() => center.view === "time");
+      await page.evaluate(() => dispatchEvent(new CustomEvent("cockpit:open-item", { detail: 987654 })));
+      await page.locator("#toast", { hasText: "Task 987654 is not on Cockpit" }).waitFor();
+      assert.equal(await page.evaluate(() => center.view), "time", "A missing task leaves the view open");
+      await page.evaluate(() => closeCenter(true));
+      console.log(`pass ${width}: a closed task opened from a view shows on the card and Back reopens the view; a missing one says so`);
 
       if (width === 390) {
         await page.evaluate((id) => selectItem(id), ids[1]);

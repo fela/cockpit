@@ -192,6 +192,84 @@ async function main() {
         check(lightness(on.background) < 0.6 && lightness(on.color) > 0.9 && on.pulse === "",
           `${at}: the arrows are dark red with a light icon and hold still for warnings already there ${JSON.stringify([on.background, on.color, on.pulse])}`);
         check(!on.peekShown, `${at}: the small card stays hidden until the arrows are hovered`);
+        // The arrows stand level with the card's ⋯ key, also when an expiry banner above the heading pushes the ⋯ down.
+        const level = await page.evaluate(async (id) => {
+          const boxes = () => {
+            const key = document.querySelector("#next .warn-key").getBoundingClientRect();
+            const menu = document.querySelector("#next > .next-card .context-marks > .step-menu > summary").getBoundingClientRect();
+            return { key: Math.round(key.top), menu: Math.round(menu.top), gap: Math.round(key.left - menu.right),
+              banner: Boolean(document.querySelector("#next > .next-card > .expiry-banner")) };
+          };
+          const plain = boxes();
+          const step = ui.state.queue.find((one) => one.id === id);
+          step.expires_at = new Date(Date.now() + 2 * 3600e3).toISOString();
+          render(false);
+          await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
+          const banner = boxes();
+          delete step.expires_at;
+          render(false);
+          return { plain, banner };
+        }, stepId);
+        check(level.plain.key === level.plain.menu && level.plain.gap === (width > 1000 ? 8 : 20),
+          `${at}: the arrows stand beside the ⋯ key, level with it ${JSON.stringify(level.plain)}`);
+        check(level.banner.banner && level.banner.key === level.banner.menu && level.banner.menu > level.plain.menu,
+          `${at}: an expiry banner moves the arrows down with the ⋯ key ${JSON.stringify(level.banner)}`);
+        // The arrows and their small card stand inside the step's card but are about the warnings: focusing the arrows
+        // leaves the step's Updated mark, and pressing the small card's button does not hold the step's place.
+        await page.evaluate((id) => { ui.seenText.set(id, "older words"); render(false); }, stepId);
+        await page.focus("#next .warn-key");
+        const marked = await page.evaluate((id) => ({ kept: ui.seenText.get(id) === "older words",
+          mark: Boolean(document.querySelector("#next > .next-card .updated-mark")) }), stepId);
+        check(marked.kept && marked.mark, `${at}: focusing the arrows leaves the step's Updated mark ${JSON.stringify(marked)}`);
+        await page.evaluate(() => document.activeElement?.blur());
+        // Each redraw holds the opened step again, so the check counts the holds the press itself asks for.
+        await page.evaluate(() => {
+          window.holdsAsked = [];
+          window.plainHoldPlace = holdPlace;
+          holdPlace = (id) => { window.holdsAsked.push(id); window.plainHoldPlace(id); };
+        });
+        await page.hover("#next .warn-key");
+        await page.hover("#next .warn-peek-actions button");
+        await page.mouse.down();
+        const pressed = await page.evaluate((id) => ({ holds: window.holdsAsked, kept: ui.seenText.get(id) === "older words" }), stepId);
+        // Let go off the button, so the press signs nothing in.
+        await page.hover("#next .warn-peek-title");
+        await page.mouse.up();
+        await page.evaluate((id) => {
+          holdPlace = window.plainHoldPlace;
+          ui.seenText.delete(id);
+          render(false);
+        }, stepId);
+        check(pressed.holds.length === 0 && pressed.kept, `${at}: pressing the small card's button leaves the step's place and its Updated mark ${JSON.stringify(pressed)}`);
+        await page.mouse.move(5, 890);
+        // The step's card keeps its controls' places for focus with or without the arrows; a feedback pick on the arrows
+        // names Next up, not the step; selected words in their small card offer no quote into the step's reply.
+        const apart = await page.evaluate((id) => {
+          const card = `#next [data-step="${id}"]`;
+          const controls = homeControls(card);
+          const title = document.querySelector("#next .warn-peek-title");
+          const range = document.createRange();
+          range.selectNodeContents(title);
+          getSelection().removeAllRanges();
+          getSelection().addRange(range);
+          const quote = quotable();
+          // Also a selection running from the small card into the step's heading.
+          range.setEndAfter(document.querySelector(`${card} .destination-heading`));
+          getSelection().removeAllRanges();
+          getSelection().addRange(range);
+          const across = quotable();
+          // A selection that only passes over the hidden small card still quotes the step.
+          range.setStartBefore(document.querySelector("#next .warn-pin"));
+          getSelection().removeAllRanges();
+          getSelection().addRange(range);
+          const over = quotable();
+          getSelection().removeAllRanges();
+          return { places: controls.length > 0 && !controls.some((control) => control.closest(".resorted-pin")),
+            pick: pickTarget(document.querySelector("#next .warn-key")).step_id, quote: quote?.key || null, across: across?.key || null, over: over?.key || null,
+            box: Boolean(document.querySelector(`${card} textarea[data-key="msg:step:${id}"]`)) };
+        }, stepId);
+        check(apart.places && apart.pick === null && apart.quote === null && apart.across === null && apart.over === `msg:step:${stepId}` && apart.box,
+          `${at}: the arrows stay apart from the step for focus places, feedback and quotes ${JSON.stringify(apart)}`);
         await page.hover("#next .warn-key");
         await sleep(150);
         const peek = await page.evaluate(() => {
@@ -251,7 +329,7 @@ async function main() {
         await page.focus("#next .warn-peek-actions button");
         const elsewhere = await page.evaluate(async () => {
           render(false);
-          const outside = [...document.querySelectorAll("#next > .next-card button")].find((button) => button.checkVisibility());
+          const outside = [...document.querySelectorAll("#next > .next-card button")].find((button) => !button.closest(".warn-pin") && button.checkVisibility());
           outside?.focus();
           await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
           return { shown: getComputedStyle(document.querySelector("#next .warn-peek")).display !== "none", moved: document.activeElement === outside };
@@ -287,10 +365,18 @@ async function main() {
           return { pulse: document.querySelector("#next .warn-key").getAnimations().length, words: document.querySelector("#next .warn-peek-title").textContent };
         });
         check(gone.pulse === 0 && gone.words === ROWS[0], `${at}: with the newer warning gone the arrows hold still again ${JSON.stringify(gone)}`);
-        await page.locator("#next .warn-key").click();
+        // Enter on the arrows opens the next warning, and keyboard focus stays on Next up's new card.
+        await page.focus("#next .warn-key");
+        await page.keyboard.press("Enter");
         await page.waitForSelector("#next > .warn-step", { timeout: 15e3 });
         check((await page.locator("#next > .warn-step .ask").textContent()).startsWith("The work Claude account is signed out"),
           `${at}: pressing the arrows opens the next warning`);
+        const focusAfter = await page.evaluate(async () => {
+          await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
+          const el = document.activeElement;
+          return { inNext: Boolean(el?.closest("#next > .warn-step")), where: `${el?.tagName}.${el?.className}` };
+        });
+        check(focusAfter.inNext, `${at}: after Enter on the arrows, focus stays on Next up ${JSON.stringify(focusAfter)}`);
       }
 
       // A warning's row opens it.

@@ -570,7 +570,7 @@ def start(
     except SigninError as error:
         raise store.Invalid(str(error)) from None
     with db.transaction(conn):
-        item = conn.execute("SELECT id, key, title FROM items WHERE id = ?", (item_id,)).fetchone()
+        item = conn.execute("SELECT id, key, title, compared_on FROM items WHERE id = ?", (item_id,)).fetchone()
         if item is None:
             raise store.NotFound(f"no item {item_id}")
         store.refuse_long_stored_title(item, {}, actor)

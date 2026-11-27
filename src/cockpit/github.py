@@ -25,6 +25,7 @@ import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from time import monotonic, time
 from typing import Any
 
 from cockpit import db
@@ -35,7 +36,11 @@ CHECK_SECONDS = 60
 TIMEOUT_SECONDS = 30
 RETRY_AFTER = timedelta(hours=1)
 STATE_BATCH = 50
+RATE_LIMIT_DELAY = 60
+RATE_LIMIT_MAX_DELAY = 3600
 GH_SERVER_ERROR = re.compile(r"\AHTTP/[0-9.]+ 5[0-9]{2}(?: |\n|$)")
+GH_THROTTLE_STATUS = re.compile(r"\AHTTP/[0-9.]+ (403|429)(?: |\n|$)")
+GH_THROTTLE_MESSAGE = re.compile(r"\b(?:exceeded a secondary rate limit|API rate limit exceeded)\b", re.IGNORECASE)
 GH_KEY = re.compile(r"^gh:([\w.-]+/[\w.-]+)#(\d+)$")
 # A PR number has no leading zero, so it goes into a GraphQL query as written.
 PULL_URL = re.compile(r"^https://github\.com/([\w.-]+/[\w.-]+)/pull/([1-9]\d*)(?:[/?#]|$)")
@@ -66,6 +71,52 @@ class Pull:
 
 class GitHubError(Exception):
     """GitHub did not answer about an issue or PR."""
+
+
+class GitHubRateLimit(GitHubError):
+    def __init__(self, retry_after: float) -> None:
+        super().__init__("GitHub rate-limited the pull request state check")
+        self.retry_after = retry_after
+
+
+@dataclass
+class StateBackoff:
+    """Pause polling across batches and newly added refs when GitHub throttles it."""
+
+    until: float = 0
+    delay: int = RATE_LIMIT_DELAY
+
+
+def _rate_limit(headers: str, answer: Any, diagnostic: str) -> GitHubRateLimit | None:
+    status = GH_THROTTLE_STATUS.match(headers)
+    messages = [diagnostic]
+    errors = []
+    if isinstance(answer, dict):
+        messages.append(str(answer.get("message", "")))
+        entries = answer.get("errors")
+        if isinstance(entries, list):
+            errors = [error for error in entries if isinstance(error, dict)]
+        messages.extend(str(error.get("message", "")) for error in errors)
+    reported = any(error.get("type") == "RATE_LIMITED" for error in errors) or any(
+        GH_THROTTLE_MESSAGE.search(message) for message in messages
+    )
+    if not status and not reported:
+        return None
+    values = {}
+    for line in headers.splitlines()[1:]:
+        name, _, value = line.partition(":")
+        values[name.lower()] = value.strip()
+
+    def seconds(name: str) -> int | None:
+        value = values.get(name, "")
+        return int(value) if value.isascii() and value.isdecimal() and len(value) <= 12 else None
+
+    retry_after = seconds("retry-after")
+    reset = seconds("x-ratelimit-reset") if values.get("x-ratelimit-remaining") == "0" else None
+    reset_wait = reset - time() if reset is not None else 0
+    if status and status[1] == "403" and retry_after is None and not reported and reset_wait <= 0:
+        return None
+    return GitHubRateLimit(max(retry_after or 0, reset_wait))
 
 
 def url_ref(url: str) -> str | None:
@@ -201,15 +252,17 @@ def ask_states(refs: list[str]) -> States:
         except OSError as exc:
             raise GitHubError(f"gh did not start: {exc}") from exc
         # gh --include prints the HTTP status and headers before the response body.
-        body = result.stdout.partition("\n\n")[2] if result.stdout.startswith("HTTP/") else result.stdout
+        headers, _, body = result.stdout.partition("\n\n") if result.stdout.startswith("HTTP/") else ("", "", result.stdout)
+        answer = None
         decode_error = None
         try:
             answer = json.loads(body)
         except json.JSONDecodeError as exc:
             decode_error = exc
-        else:
-            if isinstance(answer, dict) and isinstance(answer.get("data"), dict):
-                break
+        if (limited := _rate_limit(headers, answer, result.stderr or "")) is not None:
+            raise limited
+        if isinstance(answer, dict) and isinstance(answer.get("data"), dict):
+            break
         if not attempt and GH_SERVER_ERROR.match(result.stdout):
             continue
         missing = "JSON" if decode_error else "data"
@@ -235,28 +288,39 @@ def ask_states(refs: list[str]) -> States:
 
 def check_states(
     conn: sqlite3.Connection, ask: Callable[[list[str]], States], refs: list[str], failed: dict[str, datetime],
-    now: datetime,
+    now: datetime, backoff: StateBackoff,
 ) -> list[str]:
     """Ask GitHub the state of each pull request in `refs` that has not merged, and keep the answers; returns the
     refs whose state changed.
 
     `failed` holds when each lookup last failed, so a broken one is asked again only after RETRY_AFTER.
+    `backoff` holds GitHub's cooldown for the whole state poll.
     """
+    if monotonic() < backoff.until:
+        return []
     known = {record["ref"]: record["state"] for record in conn.execute("SELECT ref, state FROM pull_states")}
     asking = [
         ref for ref in refs
         if known.get(ref) != "merged" and not (ref in failed and now - failed[ref] < RETRY_AFTER)
     ]
     changed = []
+    answered = False
     for start in range(0, len(asking), STATE_BATCH):
         batch = asking[start:start + STATE_BATCH]
         try:
             answer = ask(batch)
+        except GitHubRateLimit as exc:
+            wait = max(backoff.delay, exc.retry_after)
+            backoff.until = monotonic() + wait
+            backoff.delay = min(backoff.delay * 2, RATE_LIMIT_MAX_DELAY)
+            log.warning("GitHub rate-limited pull request state checks; retrying after %.0f s", wait)
+            return changed
         except GitHubError as exc:
             for ref in batch:
                 failed[ref] = now
             log.error("asking GitHub the state of %s failed: %s", ", ".join(batch), exc)
             continue
+        answered = True
         for ref, reason in answer.missing.items():
             failed[ref] = now
             log.error("asking GitHub the state of %s failed: %s", ref, reason)
@@ -269,6 +333,8 @@ def check_states(
             )
             if known.get(ref) != state:
                 changed.append(ref)
+    if answered:
+        backoff.delay = RATE_LIMIT_DELAY
     return changed
 
 

@@ -136,6 +136,10 @@ def test_a_closing_answer_completes_the_item_and_tells_the_session(world: World,
     finally:
         conn.close()
     assert "Sam completed this item with that message" in text
+    # Cockpit refuses a reopen of a done item, so leftover work goes on a new item; pushing follows the task's grant.
+    assert "commit and push only as the task allows" in text
+    assert f"put that work on a new item that links this one, item {item_id}. This item stays done." in text
+    assert "put the item back" not in text
     assert "hands you" not in text
     assert store.release_message(db.connect(world.db_path), answer["id"])
     world.deliverer.send(answer["id"])
@@ -153,6 +157,8 @@ def test_complete_task_without_an_answer_archives_the_session_with_cockpit_s_mes
     assert finished["message"] is None
     assert "Sam completed item" in finished["send"]["text"]
     assert "Once this turn is over, Cockpit stops and archives this session" in finished["send"]["text"]
+    assert "Commit and push your work only as the task allows" in finished["send"]["text"]
+    assert f"put that work on a new item that links this one, item {item_id}." in finished["send"]["text"]
     [archive] = _archives(world)
     assert archive["message_id"] == finished["send"]["id"]
 

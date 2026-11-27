@@ -1,12 +1,14 @@
 // A step's head. A plain to-do carries no tag of its own (SPEC CONTROL-16);
 // one added with Fire and forget keeps its tag (CONTROL-24). Cockpit's own work
-// shows the Cockpit key alone at the end of the title (UI-43), and the priority sits in the step's menu (CONTROL-7).
+// shows the Cockpit key alone leading the card's heading and ending a row's title (UI-43), and the priority sits in
+// the step's menu (CONTROL-7).
 // Checks at 1280, 390 and 320 px:
 // - a plain to-do the user added shows no "To-do" chip on its step, and no "To-do" chip shows anywhere;
 // - a Fire and forget to-do's step shows its "Fire and forget" chip;
-// - a Cockpit step's head has the key right after the title, without the word, and no priority icon;
-// - with a long title, the key follows its last word wherever it wraps; marks end a heading's first line or sit level
-//   with a row's first line (VIEW-29);
+// - a Cockpit step's heading starts with the key at the ⋯ menu's size (a row's title ends in the small key), without
+//   the word, and no priority icon;
+// - with a long title, the key sits on the heading's first line before its first word (on a row, after its last word
+//   wherever it wraps); marks end a heading's first line or sit level with a row's first line (VIEW-29);
 // - the menu's Priority opens the four levels, the current one checked, and choosing one sets the item's priority;
 // - the page has no page errors.
 // Saves a screenshot per width in the work dir.
@@ -51,8 +53,10 @@ function longTitleGeometry(el, breakLayout) {
       const box = marks.querySelector(".step-menu > summary").getBoundingClientRect();
       marks.style.transform = `translate(${rects[0].left - box.left}px, ${rects[0].top - box.top}px)`;
     }
-    const tag = title.nextElementSibling;
+    // The heading leads with the key; a row's title ends in it.
+    const tag = heading ? heading.querySelector(":scope > .chip.cockpit") : title.nextElementSibling;
     const key = tag.getBoundingClientRect();
+    const keyRect = heading ? rects[0] : rects.at(-1);
     const line = tag.parentElement.getBoundingClientRect();
     const strip = marks.getBoundingClientRect();
     const controls = [...marks.querySelectorAll(":scope > :not(.step-menu), :scope > .step-menu > summary")]
@@ -68,7 +72,7 @@ function longTitleGeometry(el, breakLayout) {
       headed: Boolean(heading),
       lines: new Set(rects.map((rect) => Math.round(rect.top))).size,
       clipped: !tag.matches(".chip.cockpit") || getComputedStyle(tag.parentElement).display !== "contents" && key.bottom > line.bottom + 1,
-      keyLine: Math.round((key.top + key.bottom) / 2 - (last.top + last.bottom) / 2),
+      keyLine: Math.round((key.top + key.bottom) / 2 - (keyRect.top + keyRect.bottom) / 2),
       marksTop: Math.round(strip.top - first),
       controls: controls.length,
       menu: Boolean(marks.querySelector(".step-menu > summary")?.checkVisibility()),
@@ -81,7 +85,7 @@ function longTitleGeometry(el, breakLayout) {
           ? strip.bottom <= first + 1 && controls.every((box) => box.bottom <= first + 1)
           : strip.top - first >= -8 && strip.top - first <= 12,
       overlaps: controls.filter((box) => rects.some((rect) => hits(box, rect))).length,
-      gap: Math.round(key.left - last.right),
+      gap: Math.round(heading ? keyRect.left - key.right : key.left - last.right),
     };
   } finally {
     if (original === null) marks.removeAttribute("style");
@@ -158,34 +162,38 @@ async function main() {
           want ? words.includes("Fire and forget") : !words.includes("To-do"), words.join(", ") || "no tags");
         await page.screenshot({ path: path.join(work, `head-marks-${width}-${step}.png`) });
       }
-      // Cockpit's own work: the key alone after the title, and no priority icon in the head.
+      // Cockpit's own work: the key alone leading the heading, and no priority icon in the head.
       await open(toolItem.id);
       // The step's marks, which end its heading's line and hold its ⋯ menu.
       const head = page.locator(`#next [data-step="${tool}"] .context-marks:visible`).first();
       await head.waitFor({ state: "visible", timeout: 10e3 });
       await sleep(300);
-      // The title is Next up's heading, ending in the key.
+      // The title is Next up's heading, leading with the key; on a row the title ends in it.
       const card = page.locator(`#next .next-card[data-step="${tool}"]`);
       const shape = await settled(card, (el) => {
         const tag = el.querySelector(".task-heading > .chip.cockpit, .step-context > .title-line > .chip.cockpit");
-        if (!tag || !tag.previousElementSibling.getClientRects().length) return null;
+        const leads = Boolean(tag && tag.parentElement.matches(".task-heading"));
+        const words = tag && (leads ? tag.parentElement.querySelector(".task-heading-text") : tag.previousElementSibling);
+        if (!words || !words.getClientRects().length) return null;
         const box = tag.getBoundingClientRect();
+        const range = document.createRange();
+        range.selectNodeContents(words);
+        const lines = [...range.getClientRects()];
+        const menu = el.querySelector(".step-menu > summary").getBoundingClientRect();
         return {
-          after: Boolean(tag && tag.previousElementSibling && tag.previousElementSibling.matches(".item-title, .task-heading-text")),
-          wordless: Boolean(tag && getComputedStyle(tag.querySelector(".chip-words")).display === "none"),
-          seen: Boolean(box && box.width >= 14 && box.width <= 16),
+          leads,
+          placed: leads ? tag === tag.parentElement.firstElementChild : words.matches(".item-title"),
+          wordless: getComputedStyle(tag.querySelector(".chip-words")).display === "none",
+          // The heading's key is the ⋯ menu's size; a row's is 14 px.
+          seen: leads ? Math.abs(box.width - menu.width) <= 1 && Math.abs(box.height - menu.height) <= 1 : box.width >= 14 && box.width <= 16,
           prio: el.querySelectorAll(".task-heading .prio, .step-context .prio").length,
-          // From the end of the title's last word to the key, in px.
-          gap: tag ? Math.round(box.left - (() => {
-            const range = document.createRange();
-            range.selectNodeContents(tag.previousElementSibling);
-            return [...range.getClientRects()].at(-1).right;
-          })()) : null,
-          named: tag ? tag.getAttribute("aria-label") : null,
+          // From the key to the heading's first word, or from a row title's last word to the key, in px.
+          gap: Math.round(leads ? lines[0].left - box.right : box.left - lines.at(-1).right),
+          named: tag.getAttribute("aria-label"),
         };
       });
-      check(`${at}: Cockpit key right after the title, without the word`,
-        shape.after && shape.wordless && shape.seen && shape.gap >= 0 && shape.gap <= 12, JSON.stringify(shape));
+      check(`${at}: Cockpit key leads the heading at the ⋯ menu's size, without the word`,
+        shape.placed && shape.wordless && shape.seen && shape.gap >= 0 && shape.gap <= 12, JSON.stringify(shape));
       check(`${at}: the key is named Cockpit for screen readers`, shape.named === "Cockpit", JSON.stringify(shape));
       check(`${at}: no priority icon in the head`, shape.prio === 0, `${shape.prio} found`);
       {
@@ -206,7 +214,7 @@ async function main() {
         }
         check(`${at}: choosing ${level} sets the item's priority`, stored === level, `stored ${stored}`);
       }
-      // A long title ends in the key, with controls ending a heading's first line or level with a row's first line.
+      // A long title's heading leads with the key, with controls ending a heading's first line or level with a row's first line.
       await open(longItem.id);
       await sleep(300);
       // The updated status exercises the strip alongside its menu on headed cards.
@@ -219,7 +227,7 @@ async function main() {
           broken.overlaps > 0 && !longTitleFits(broken), JSON.stringify(broken));
       }
       const lines = await settled(longCard, longTitleGeometry);
-      check(`${at}: a long title ends in the key, with controls ending its heading's first line or level with its row's first line`,
+      check(`${at}: a long title keeps the key on its first line, with controls ending its heading's first line or level with its row's first line`,
         longTitleFits(lines), JSON.stringify(lines));
       const anywhere = await page.$$eval(".chip-words", (nodes) => nodes.filter((node) => node.textContent.trim() === "To-do").length);
       check(`${at}: no To-do tag anywhere on the page`, anywhere === 0, `${anywhere} found`);

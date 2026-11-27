@@ -300,9 +300,26 @@ function showInSidebar(itemId) {
   return row;
 }
 
-// A task closed as not needed this week, which Finished this week lists beside the done ones.
+// A task closed as not needed this week, which Finished this week lists beside the done ones, or an archived task
+// closed earlier that a mention opened (`openMention`).
 function closedEntry(state, itemId) {
-  return state.closed_recently.items.find((entry) => entry.action === "archived" && entry.id === itemId) || null;
+  return state.closed_recently.items.find((entry) => entry.action === "archived" && entry.id === itemId)
+    || ui.mentionedClosed.get(itemId) || null;
+}
+
+// Asks the closed work for a picked task the page does not hold, then draws the card again: the task on it, or the
+// queue's first step when the closed work has no task by that id.
+function lookUpClosed(itemId) {
+  const asking = closedTask(itemId).then((entry) => {
+    // An answer the page no longer waits for, such as one that comes after a state holding the task, changes nothing.
+    if (entry && ui.closedLookups.get(itemId) === asking) ui.mentionedClosed.set(itemId, entry);
+  }, (error) => {
+    if (ui.closedLookups.get(itemId) === asking) toast(`Could not open task ${itemId}: ${error.message}`, true);
+  }).finally(() => {
+    if (ui.closedLookups.get(itemId) === asking) ui.closedLookups.set(itemId, null);
+    if (ui.state && selectedItem() === itemId) render(false);
+  });
+  ui.closedLookups.set(itemId, asking);
 }
 
 // After the user answers, hands off, snoozes or closes the step they picked, the card shows the queue's first step
@@ -356,7 +373,12 @@ function renderSelected(state, lists) {
   const items = new Map(state.items.map((item) => [item.id, item]));
   const found = itemId !== null ? stepOfItem(itemId, lists) : null;
   const closed = itemId !== null && !found && !items.has(itemId) ? closedEntry(state, itemId) : null;
-  if (itemId !== null && !found && !items.has(itemId) && !closed) { dropSelection(); itemId = null; }
+  // A picked task the page lost, such as an archived one after a reload on its card (VIEW-36), waits on an empty
+  // card while the closed work answers for it once (`lookUpClosed`).
+  const lost = itemId !== null && !found && !items.has(itemId) && !closed;
+  if (lost && !ui.closedLookups.has(itemId)) lookUpClosed(itemId);
+  const asking = lost && Boolean(ui.closedLookups.get(itemId));
+  if (lost && !asking) { dropSelection(); itemId = null; }
   const warnings = warningList(state);
   // A warning that went, fixed or closed, leaves the card to the next warning, as warnings rank above every step.
   // A snoozed warning shows when the user opened it from Waiting (SPEC UI-72).
@@ -389,6 +411,10 @@ function renderSelected(state, lists) {
   }
   if (closed) {
     fill("next", h("article", { class: "card next-card item-card", "data-item": itemId }, closedItemRow(closed, state)));
+    return;
+  }
+  if (asking) {
+    fill("next", h("article", { class: "card next-card item-card", "data-item": itemId }));
     return;
   }
   const item = items.get(itemId);
@@ -1004,7 +1030,13 @@ function sidebarRow(item, group, sessions) {
       // A resting agent's row also says why its work picks up only then.
       title: (group === "busy" || group === "waiting") && workTip(item)
         ? [clip(item.title, 100), item.why, clip(workTip(item), 60)].filter(Boolean).join("\n") : clip(item.title, 100),
-      onclick: () => { if (typeof item.id === "number") selectItem(item.id); else openWhenMade(item.id); } },
+      // Search's filter belongs to the search that made it: picking another task here ends it, in this history entry
+      // too, before the task's own entry, so Back and Forward show no filter its address does not hold.
+      onclick: () => {
+        if (typeof item.id !== "number") { openWhenMade(item.id); return; }
+        if (ui.find && item.id !== ui.shownItem) dropFind();
+        selectItem(item.id);
+      } },
     h("span", { class: "sidebar-lead" }, Icons.projectMark(item.project)),
     h("span", { class: "sidebar-title", text: item.title }),
     (group === "busy" || (group === "waiting" && item.wait === "blocked")) && item.activity

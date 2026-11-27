@@ -17,6 +17,7 @@ import threading
 import time
 from collections import Counter
 from collections.abc import AsyncGenerator, Callable, Iterator
+from concurrent.futures import Future
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -70,6 +71,7 @@ from cockpit import (
     emergency,
     flashes,
     gateway_store,
+    gemini_usage,
     handovers,
     history,
     inbox_settings,
@@ -243,7 +245,10 @@ FIGURE_SIZE_SCRIPT = (
 # Added to a figure's page: a link opens in a new tab, as a link in a step does. In a frame a plain link would load
 # its address inside the frame, which most sites refuse, and the page would be gone from the step or the Pages
 # view. A link within the page (`#below`) still moves within it, without a history entry, so the browser's Back
-# closes a page open over Cockpit (SPEC NEXT-47) in one press; a download still downloads, and a page's own
+# closes a page open over Cockpit (SPEC NEXT-47) in one press. A `#` link that names no spot on the page, such as a
+# screen's address in a page that draws its screens from `#/runs`, or a bare `#` or `#top` Home link, changes the
+# page's address in place, again with no history entry: the page's own `hashchange` handler draws that screen, and
+# the browser scrolls to the top for `#` and `#top`. A download still downloads, and a page's own
 # script that handles a click first keeps it. A link in an SVG chart (`href` or `xlink:href`) opens too.
 FIGURE_LINK_SCRIPT = (
     "<script>addEventListener('click', (event) => { const link = event.target.closest && event.target.closest('a[*|href]'); "
@@ -252,7 +257,7 @@ FIGURE_LINK_SCRIPT = (
     "if (/^\\s*javascript:/i.test(href)) return; "
     "if (href.startsWith('#')) { event.preventDefault(); let id = href.slice(1); try { id = decodeURIComponent(id); } catch {} "
     "const target = id && (document.getElementById(id) || document.getElementsByName(id)[0]); "
-    "if (target) target.scrollIntoView(); else if (!id || id === 'top') scrollTo(0, 0); return; } "
+    "if (target) target.scrollIntoView(); else location.replace(href); return; } "
     "link.setAttribute('target', '_blank'); link.setAttribute('rel', 'noopener'); });</script>"
 )
 
@@ -873,6 +878,14 @@ class PageCommentsSend(Body):
     text: Text
 
 
+class AddAlso(Body):
+    nullable = frozenset({"model"})
+
+    # One more agent and model Add runs the same text on (SPEC SESSION-31); a null model is the agent's default.
+    provider: Literal["claude", "codex", "gemini", "grok"]
+    model: OptionName | None
+
+
 class ItemAdd(Body):
     nullable = frozenset({"part", "provider", "model", "effort", "account", "speed", "priority"})
 
@@ -895,6 +908,9 @@ class ItemAdd(Body):
     # The priority the user picked in the form (SPEC CONTROL-10), or null for none: the words of the text then set
     # it; a page loaded before this option sends none.
     priority: Literal["urgent", "high", "normal", "low"] | None = None
+    # The other models the same text runs on (SPEC SESSION-31), each its own to-do; a page loaded before this
+    # option sends none.
+    also: Annotated[list[AddAlso], Field(max_length=store.ADD_ALSO_MAX)] = []
 
 
 class ItemAddMore(Body):
@@ -1488,6 +1504,8 @@ def create_app(
     static_tag = f"{version}-{secrets.token_hex(4)}"
     claude_sign_in = logins.SignIn(False)
     codex_sign_in = codex_login.SignIn()
+    # Antigravity's limits, read only while Gemini is enabled.
+    gemini_quota = gemini_usage.Quota(gemini_usage.run_quota) if "gemini" in settings.providers else None
     local = settings.auth_mode == "local"
     public_host = urlsplit(settings.public_origin).netloc.lower()
     session_cookie = auth.LOCAL_SESSION_COOKIE if local else auth.SESSION_COOKIE
@@ -1978,8 +1996,11 @@ def create_app(
         })
 
     @app.get("/api/offline/session", dependencies=[Depends(user_only)])
-    def offline_session(request: Request) -> dict[str, Any]:
-        return {"user": offline_user, "until": int(request.cookies[session_cookie].split(".")[-2])}
+    def offline_session(request: Request) -> JSONResponse:
+        return JSONResponse(
+            {"user": offline_user, "until": int(request.cookies[session_cookie].split(".")[-2])},
+            headers={"X-Cockpit-Version": version},
+        )
 
     # Old addresses of the Cockpit page: where the sidebar page was tried, and the page from before it; old links keep
     # working.
@@ -1988,11 +2009,12 @@ def create_app(
     def next_page() -> RedirectResponse:
         return RedirectResponse("/", status_code=308)
 
-    # The spec, the list of skills, each skill and the writing examples share one page; its script reads
-    # which from the path.
+    # The spec, the list of skills, each skill and its reference files, and the writing examples share one page;
+    # its script reads which from the path.
     @app.get("/spec")
     @app.get("/skills")
     @app.get("/skills/{name}")
+    @app.get("/skills/{name}/references/{file}")
     @app.get("/writing")
     def spec_page(request: Request) -> HTMLResponse:
         return scoped_page(request, framed_page("spec.html"))
@@ -2182,6 +2204,20 @@ def create_app(
         return {"version": version}
 
     state_versions = state_sync.StateVersions()
+    def page_read(*args: Any) -> Future[views.View]:
+        """Starts `read_view` on a thread of its own, so a request queues only in the page worker, under its time
+        limit (views.READ_SECONDS), and never behind other requests for a thread."""
+        future: Future[views.View] = Future()
+
+        def run() -> None:
+            try:
+                future.set_result(read_view(*args))
+            except BaseException as exc:  # noqa: BLE001 - the request thread raises it from `future.result()`; a
+                # KeyboardInterrupt from the page worker too, or the request would wait forever
+                future.set_exception(exc)
+
+        threading.Thread(target=run, name="page-read", daemon=True).start()
+        return future
 
     @app.get("/api/state")
     def state(request: Request, conn: Conn) -> Response:
@@ -2203,23 +2239,20 @@ def create_app(
         sessions = listing.sessions
         dialogs = store.open_dialogs(sessions)
         warnings = listing.warnings + schedules.warnings(conn)
-        view = read_view(settings.db_path, request.state.me, sessions, warnings, settings.checkouts_dir, opened_items(request))
-        result = view.state
-        checkpoint("page")
-        result |= blocked_lists(conn, now, dialogs)
-        result["account_problems"] = [
+        # The page worker builds the items and steps while this thread reads the figures that need none of them.
+        pending = page_read(
+            settings.db_path, request.state.me, sessions, warnings, settings.checkouts_dir, opened_items(request),
+        )
+        extra: dict[str, Any] = blocked_lists(conn, now, dialogs)
+        extra["account_problems"] = [
             {"text": problem.text, "detail": problem.detail} for problem in listing.account_problems
         ]
-        result["attach"] = settings.attach
-        result["goals_summary"] = history.goals_summary(
-            conn, [goal["text"] for goal in result["goals"] if goal["paused_at"] is None]
-        )
-        result["projects"] = projects.listing(conn)
-        result["providers"] = list(settings.providers)
-        result["features"] = list(config.setup().features)
-        result["default_provider"] = settings.default_provider
+        extra["attach"] = settings.attach
+        extra["providers"] = list(settings.providers)
+        extra["features"] = list(config.setup().features)
+        extra["default_provider"] = settings.default_provider
         # The user's home folder, which a blocked call's folder shows as `~` (SPEC PERM-26).
-        result["home"] = str(Path.home())
+        extra["home"] = str(Path.home())
         # What a new session may start with (SPEC SESSION-22): each enabled provider's models and efforts, its
         # defaults, and the Claude accounts to pick from.
         capacity = installed_parts.model_capacity(conn, now)
@@ -2241,42 +2274,33 @@ def create_app(
             }
             capacity = {model: model_capacity.combine([each[model] for each in local_capacity.values()])
                         for model, _label in config.SESSION_OPTIONS["claude"]["models"]}
-        result["session_options"] = {
+        extra["session_options"] = {
             provider: {
                 "models": [{"name": name, "label": label, "speeds": config.session_speeds(provider, name),
                             "capacity": capacity.get(name, model_capacity.unknown())}
-                           for name, label in config.SESSION_OPTIONS[provider]["models"]],
+                           for name, label in db.session_models(conn, provider)],
                 "efforts": config.SESSION_OPTIONS[provider]["efforts"],
                 "effort": config.SESSION_OPTIONS[provider]["effort"],
             }
             for provider in settings.providers
         }
-        result["session_accounts"] = [
+        extra["session_accounts"] = [
             {"name": account.name, "letter": account.letter} for account in accounts.in_use(settings.claude_accounts, [])
         ]
-        result["codex_requests"] = deliverer.codex.requests() if deliverer.codex is not None else []
-        # Blocked counts Claude permission requests only: the header names them as calls auto mode blocked.
-        # Codex approvals and questions show under Blocked from codex_requests.
-        # The calls auto mode's checker gave no verdict on share one card (SPEC PERM-32).
-        result["counts"]["blocked"] = len(result["permission_requests"]) + bool(result["checker_refusals"])
-        shown = set(dialog_waiters(
-            conn, now, dialogs, [session["session_id"] for session in result["waiting_sessions"]],
-            result["permission_requests"],
-        ))
-        result["waiting_sessions"] = [session for session in result["waiting_sessions"] if session["session_id"] in shown]
-        result["counts"]["sessions_waiting"] = len(result["waiting_sessions"])
-        result["checking"] = sweeper.checking(conn, now)
-        result["sweep_launch"] = sweeper.launch_status(conn, now)
-        result["check_top"] = sweeper.CHECK_TOP
-        result["check_every_minutes"] = sweeper.CHECK_EVERY_MINUTES
-        result["sweeps_paused"] = sweeper.paused(conn)
+        extra["codex_requests"] = deliverer.codex.requests() if deliverer.codex is not None else []
+        extra["checking"] = sweeper.checking(conn, now)
+        extra["sweep_launch"] = sweeper.launch_status(conn, now)
+        extra["check_top"] = sweeper.CHECK_TOP
+        extra["check_every_minutes"] = sweeper.CHECK_EVERY_MINUTES
+        extra["sweeps_paused"] = sweeper.paused(conn)
         # Sessions using a custom API server have no usage on the local subscription accounts.
         claude_usage = {"accounts": [], "error": ""} if accounts.on_api_server(settings.claude_settings) else usage.read(
             settings.claude_rate_limits, now, accounts.in_use(settings.claude_accounts, []), accounts.preference(conn, now),
             running(sessions),
         )
-        result["usage"] = claude_usage | {
+        extra["usage"] = claude_usage | {
             "codex": codex_index.weeks(now),
+            "gemini": gemini_quota.read(now) if gemini_quota is not None else None,
             "machine": machine.read() | {"tasks_now": resources.now_tasks(conn)},
         }
         checkpoint("usage")
@@ -2287,17 +2311,63 @@ def create_app(
         # Cockpit reads no prompt cache for the ACP agents (SPEC SESSION-30).
         caches = {"claude": spend_index.caches(), "codex": codex_index.caches(),
                   **{provider: {} for provider in config.ACP_PROVIDERS}}
+        checkpoint("spend")
+        codex_settings = {each["session_id"]: dict(each) for each in conn.execute(
+            "SELECT session_id, model, effort, speed FROM codex_threads")}
+        acp_models = dict(conn.execute("SELECT session_id, model FROM acp_sessions").fetchall())
+        names = store.shown_session_names(conn, sessions)
+        extra["wrong_models"] = [
+            row | {"name": names.get(row["session_id"]) or row["title"] or row["first_prompt"]}
+            for row in store.not_dismissed(conn, spend_index.wrong_models(now, store.chosen_models(conn)))
+        ]
+        checkpoint("model-warnings")
+        extra["snoozed_warnings"] = store.snoozed_warnings(conn, now)
+        extra["snooze_reads"] = store.snooze_reads(conn, now)
+        extra["handed_warnings"] = store.handed_warnings(conn)
+        extra["top_cards"] = top_cards.showing(conn, now)
+        waiting = claude_sign_in.waiting()
+        extra["claude_sign_ins"] = [
+            entry | {"waiting": entry["account"] in waiting} for entry in accounts.sign_ins(settings.claude_accounts, now)
+        ] if "claude" in settings.providers else []
+        extra["codex_sign_ins"] = codex_login.status(conn, codex_index, codex_sign_in, request.state.me == "user")
+        extra["briefing"] = briefing.status(conn, config.setup())
+        extra["team"] = briefing.team(conn)
+        extra["side_chats"] = sidechat.recent(conn, now)
+        try:
+            extra["emergency"] = emergency.summary()
+        except Exception:
+            # The main page keeps working without the emergency session's row.
+            log.exception("emergency session: could not read it for the main page")
+            extra["emergency"] = None
+        extra["version"] = version
+        # The user's unsent words, which only the user's page reads (drafts.py); agents see none.
+        if request.state.me == "user":
+            extra["drafts"] = drafts.state(conn)
+        checkpoint("extras")
+        view = pending.result()
+        checkpoint("page")
+        result = view.state | extra
+        # Read after the items, so every project an item names is in the list.
+        result["projects"] = projects.listing(conn)
+        result["goals_summary"] = history.goals_summary(
+            conn, [goal["text"] for goal in result["goals"] if goal["paused_at"] is None]
+        )
+        # Blocked counts Claude permission requests only: the header names them as calls auto mode blocked.
+        # Codex approvals and questions show under Blocked from codex_requests.
+        # The calls auto mode's checker gave no verdict on share one card (SPEC PERM-32).
+        result["counts"]["blocked"] = len(result["permission_requests"]) + bool(result["checker_refusals"])
+        shown = set(dialog_waiters(
+            conn, now, dialogs, [session["session_id"] for session in result["waiting_sessions"]],
+            result["permission_requests"],
+        ))
+        result["waiting_sessions"] = [session for session in result["waiting_sessions"] if session["session_id"] in shown]
+        result["counts"]["sessions_waiting"] = len(result["waiting_sessions"])
         for group in ("queue", "ready_next", "snoozed", "with_agents"):
             for step in result[group]:
                 target = step["target"]
                 cache = caches[target["provider"]].get(target["session_id"]) if target else None
                 step["cache"] = None if cache is None else spend.cache_at(cache, now)
-        checkpoint("spend")
-        codex_settings = {each["session_id"]: dict(each) for each in conn.execute(
-            "SELECT session_id, model, effort, speed FROM codex_threads")}
-        acp_models = dict(conn.execute("SELECT session_id, model FROM acp_sessions").fetchall())
         transcript_usages = view.usages
-        checkpoint("transcripts")
         for row in result["sessions"]:
             row["spend"] = spent.get(row["session_id"])
             if row.get("provider") in config.ACP_PROVIDERS:
@@ -2330,34 +2400,6 @@ def create_app(
                 choices[row["settings"]["model"]] = row["settings"]["capacity"]
             row["settings"]["model_capacity"] = choices
         checkpoint("session-settings")
-        names = store.shown_session_names(conn, sessions)
-        result["wrong_models"] = [
-            row | {"name": names.get(row["session_id"]) or row["title"] or row["first_prompt"]}
-            for row in store.not_dismissed(conn, spend_index.wrong_models(now, store.chosen_models(conn)))
-        ]
-        checkpoint("model-warnings")
-        result["snoozed_warnings"] = store.snoozed_warnings(conn, now)
-        result["snooze_reads"] = store.snooze_reads(conn, now)
-        result["handed_warnings"] = store.handed_warnings(conn)
-        result["top_cards"] = top_cards.showing(conn, now)
-        waiting = claude_sign_in.waiting()
-        result["claude_sign_ins"] = [
-            entry | {"waiting": entry["account"] in waiting} for entry in accounts.sign_ins(settings.claude_accounts, now)
-        ] if "claude" in settings.providers else []
-        result["codex_sign_ins"] = codex_login.status(conn, codex_index, codex_sign_in, request.state.me == "user")
-        result["briefing"] = briefing.status(conn, config.setup())
-        result["team"] = briefing.team(conn)
-        result["side_chats"] = sidechat.recent(conn, now)
-        try:
-            result["emergency"] = emergency.summary()
-        except Exception:
-            # The main page keeps working without the emergency session's row.
-            log.exception("emergency session: could not read it for the main page")
-            result["emergency"] = None
-        result["version"] = version
-        # The user's unsent words, which only the user's page reads (drafts.py); agents see none.
-        if request.state.me == "user":
-            result["drafts"] = drafts.state(conn)
         for part in built:
             fields = part.state(now, request.state.me == "user")
             taken = sorted(fields.keys() & result.keys())
@@ -2365,7 +2407,7 @@ def create_app(
                 raise ValueError(f"a part's state fields are already in the state: {', '.join(taken)}")
             result |= fields
         since = request.headers.get("x-cockpit-since")
-        checkpoint("extras")
+        checkpoint("parts")
         if since or request.headers.get("x-cockpit-sync") == "1":
             response = state_versions.response(result, since, request.state.me)
         else:
@@ -2378,7 +2420,7 @@ def create_app(
 
     @app.get("/api/items")
     def get_item(conn: Conn, key: Annotated[str, Query(min_length=1)]) -> dict[str, Any]:
-        return store.item_by_key(conn, key)
+        return store.item_by_ref(conn, key)
 
     # Search with Include closed (SPEC VIEW-21): the closed items that match, beside the open ones the page has.
     @app.get("/api/items/closed")
@@ -2390,7 +2432,7 @@ def create_app(
         fields = body.model_dump(exclude_unset=True)
         store.check_agent_title(fields, request.state.actor)
         store.check_agent_waiting(fields, request.state.actor)
-        stored = conn.execute("SELECT id, key, title FROM items WHERE key = ?", (fields["key"],)).fetchone()
+        stored = conn.execute("SELECT id, key, title, compared_on FROM items WHERE key = ?", (fields["key"],)).fetchone()
         # A run's item lets its session close it without a finish step (SPEC CONTROL-33), so only the scheduler
         # makes one; an item made here under a run's future key would become that run's.
         if stored is None and fields["key"].startswith(store.SCHEDULE_RUN_KEY):
@@ -2410,7 +2452,7 @@ def create_app(
         fields = body.model_dump(exclude_unset=True)
         store.check_agent_title(fields, request.state.actor)
         store.check_agent_waiting(fields, request.state.actor)
-        stored = conn.execute("SELECT id, key, title FROM items WHERE id = ?", (item_id,)).fetchone()
+        stored = conn.execute("SELECT id, key, title, compared_on FROM items WHERE id = ?", (item_id,)).fetchone()
         store.refuse_long_stored_title(stored, fields, request.state.actor)
         return store.patch_item(conn, item_id, fields, request.state.actor)
 
@@ -2425,10 +2467,14 @@ def create_app(
     def add_item(body: ItemAdd, conn: Conn) -> dict[str, Any]:
         sweeper.resume(conn, "added a to-do")
         start = {"provider": body.provider, "model": body.model, "effort": body.effort, "account": body.account, "speed": body.speed}
-        return store.add_item(
-            conn, body.text, body.part.model_dump() if body.part else None, body.pinned, start, body.fire_and_forget,
-            body.priority,
-        )
+        part = body.part.model_dump() if body.part else None
+        if body.also:
+            others = [{"provider": each.provider, "model": each.model, "effort": None, "account": None, "speed": None}
+                      for each in body.also]
+            return store.add_on_models(
+                conn, body.text, part, body.pinned, [start, *others], body.fire_and_forget, body.priority
+            )
+        return store.add_item(conn, body.text, part, body.pinned, start, body.fire_and_forget, body.priority, None)
 
     # More words for a to-do the user added (SPEC CONTROL-18): they join its text and go to its session. A session
     # still starting gets them once it is known, as a follow-up does.
@@ -2736,7 +2782,7 @@ def create_app(
         # One transaction, so a hand-off cannot land between the check and the put.
         with db.transaction(conn):
             actor = request.state.actor
-            stored = conn.execute("SELECT id, key, title FROM items WHERE id = ?", (fields["item_id"],)).fetchone()
+            stored = conn.execute("SELECT id, key, title, compared_on FROM items WHERE id = ?", (fields["item_id"],)).fetchone()
             store.refuse_long_stored_title(stored, {}, actor)
             store.refuse_answer_elsewhere(conn, fields, actor)
             store.refuse_second_card(conn, fields, actor)
@@ -3482,7 +3528,7 @@ def create_app(
         name = store.shown_session_names(conn, sessions).get(row["session_id"]) or row["title"] or row["first_prompt"]
         sweeper.resume(conn, "investigates a session on the wrong model")
         item = store.add_item(conn, store.wrong_model_investigation(row, name), None, False, dict.fromkeys(
-            ("provider", "model", "effort", "account")), False, None)
+            ("provider", "model", "effort", "account")), False, None, None)
         with db.transaction(conn):
             message = store.create_message(
                 conn, "user", item["summary"],
@@ -3500,7 +3546,7 @@ def create_app(
     def message_on_warning(body: WarningMessage, background: BackgroundTasks, conn: Conn) -> dict[str, Any]:
         sweeper.resume(conn, "left a message on a warning")
         item = store.add_item(conn, body.text, body.part.model_dump(), False, dict.fromkeys(
-            ("provider", "model", "effort", "account")), False, None)
+            ("provider", "model", "effort", "account")), False, None, None)
         with db.transaction(conn):
             message = store.create_message(
                 conn, "user", item["summary"],
@@ -3734,7 +3780,7 @@ def create_app(
 
     def doc_view(doc: spec.Doc, conn: sqlite3.Connection) -> dict[str, Any]:
         text = spec.read(doc)
-        blocks = spec.page_blocks(text, doc.key_prefix)
+        blocks = spec.page_blocks(text, doc.key_prefix, doc.links)
         comments = store.doc_comments(conn, doc.key_prefix, comment_since())
         for block in blocks:
             block["comments"] = [comment for comment in comments if comment["target"] == block["key"]]
@@ -3761,11 +3807,13 @@ def create_app(
         doc = spec.spec_doc(settings.spec_repo, settings.spec_branch)
         return spec.edit_all(doc, body.version, body.text, request.state.actor)
 
-    # The user's skills (SPEC SKILLS-1) live in the configured skills repository and branch.
+    # The user's skills (SPEC SKILLS-1) live in the configured skills repository and branch: each its SKILL.md and
+    # the Markdown files in its references/ folder.
     @app.get("/api/skills")
     def get_skills(conn: Conn) -> dict[str, Any]:
+        # A comment on a reference ("skill:cockpit/references/sweep.md:...") counts toward its skill.
         unread = Counter(
-            comment["target"].split(":")[1]
+            comment["target"].split(":")[1].split("/")[0]
             for comment in store.doc_comments(conn, "skill:", comment_since())
             if comment["read_at"] is None
         )
@@ -3774,21 +3822,48 @@ def create_app(
             skill["unread_comments"] = unread[skill["name"]]
         return {"skills": found, "path": str(settings.skills_repo / settings.skills_folder), "branch": settings.skills_branch}
 
-    def skill_doc(name: str) -> spec.Doc:
-        return spec.skill_doc(settings.skills_repo, settings.skills_folder, settings.skills_branch, name)
+    def skill_doc(name: str, file: str) -> spec.Doc:
+        return spec.skill_doc(settings.skills_repo, settings.skills_folder, settings.skills_branch, name, file)
+
+    def skill_view(doc: spec.Doc, name: str, conn: sqlite3.Connection) -> dict[str, Any]:
+        """The file as `doc_view` shows it, with the skill's reference files and the comments waiting on each."""
+        unread = Counter(
+            comment["target"].split(":")[1].removeprefix(f"{name}/")
+            for comment in store.doc_comments(conn, f"skill:{name}/references/", comment_since())
+            if comment["read_at"] is None
+        )
+        files = spec.skill_files(settings.skills_repo, settings.skills_folder, name)[1:]
+        return {
+            **doc_view(doc, conn),
+            "references": [{"file": file.removeprefix("references/"), "unread_comments": unread[file]} for file in files],
+        }
 
     @app.get("/api/skills/{name}")
     def get_skill(name: str, conn: Conn) -> dict[str, Any]:
-        return doc_view(skill_doc(name), conn)
+        return skill_view(skill_doc(name, "SKILL.md"), name, conn)
 
     @app.post("/api/skills/{name}/part", dependencies=[Depends(user_only)])
     def edit_skill_part(name: str, body: SpecPart) -> dict[str, Any]:
-        doc = skill_doc(name)
+        doc = skill_doc(name, "SKILL.md")
         return spec.edit_part(doc, body.old, body.new, "user", datetime.now(UTC))
 
     @app.put("/api/skills/{name}", dependencies=[Depends(user_only)])
     def edit_skill(name: str, body: SpecWhole) -> dict[str, Any]:
-        doc = skill_doc(name)
+        doc = skill_doc(name, "SKILL.md")
+        return spec.edit_all(doc, body.version, body.text, "user")
+
+    @app.get("/api/skills/{name}/references/{file}")
+    def get_skill_reference(name: str, file: str, conn: Conn) -> dict[str, Any]:
+        return skill_view(skill_doc(name, f"references/{file}"), name, conn)
+
+    @app.post("/api/skills/{name}/references/{file}/part", dependencies=[Depends(user_only)])
+    def edit_skill_reference_part(name: str, file: str, body: SpecPart) -> dict[str, Any]:
+        doc = skill_doc(name, f"references/{file}")
+        return spec.edit_part(doc, body.old, body.new, "user", datetime.now(UTC))
+
+    @app.put("/api/skills/{name}/references/{file}", dependencies=[Depends(user_only)])
+    def edit_skill_reference(name: str, file: str, body: SpecWhole) -> dict[str, Any]:
+        doc = skill_doc(name, f"references/{file}")
         return spec.edit_all(doc, body.version, body.text, "user")
 
     # Which controls the user presses and which hover texts they stop on (SPEC UI-45).

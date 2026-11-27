@@ -1,9 +1,11 @@
 """Sessions on agents Cockpit drives over the Agent Client Protocol: Google's Antigravity CLI (`agy`), which is
 Cockpit's "gemini" provider, and Grok Build (SPEC SESSION-30).
 
-ACP is JSON-RPC 2.0 on the agent's stdin and stdout. Cockpit starts one agent process per model and session folder,
-started in that folder, so what an agent loads from a checkout (an agent can read its .env) stays with that checkout's
-sessions: `initialize`, then `session/new`, then a `session/prompt` per message, which answers when the turn ends.
+ACP is JSON-RPC 2.0 on the agent's stdin and stdout. Cockpit starts one agent process per session folder, started in
+that folder, so what an agent loads from a checkout (an agent can read its .env) stays with that checkout's sessions.
+Antigravity's process serves that folder's sessions on every model, since each session sets its own model; Grok takes
+its model on its command line, so it gets one process per model and folder. On a process: `initialize`, then
+`session/new`, then a `session/prompt` per message, which answers when the turn ends.
 While it runs, `session/update` notifications stream the agent's words and tool calls, which Cockpit keeps in acp_log
 because ACP has no call that lists a session's past items; a call is kept by its kind and title, without its input or
 output. `session/request_permission` asks before a tool runs, which reaches the page as a request card shaped like a
@@ -22,16 +24,22 @@ import json
 import logging
 import os
 import queue
+import re
+import shutil
+import stat
 import subprocess
 import sys
+import tempfile
 import threading
+import time
 import uuid
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from cockpit import config, db, patterns
+from cockpit import config, db, patterns, safe_shell
 from cockpit.codex_agent import CONTROL_PLANE, CodexError
 from cockpit.sessions import SESSION_LOG_PARTS, SESSION_LOG_TEXT_MAX, Session, instruction
 
@@ -46,8 +54,30 @@ REQUEST_SECONDS = 60
 STATUS_LABELS = {"pending": "pending", "in_progress": "running", "completed": "done", "failed": "failed"}
 # The most of one diff a permission card shows; a longer one says how much is left out.
 DIFF_MAX = 20000
+# The largest file a diff reads whole (_whole), in bytes.
+FILE_MAX = 1_000_000
 # The method a permission request carries on the page: the request card offers Allow once and Deny for it.
 PERMISSION_METHOD = "session/request_permission"
+# Antigravity asks the user a question as a permission request whose tool call id starts with QUESTION_PREFIX, its
+# options the answers (as T3 Code reads it, apps/server/src/provider/acp/AntigravityAcpSupport.ts). It reaches the
+# page as QUESTION_METHOD, the method of a Codex question, so the card shows the question and its answers.
+QUESTION_PREFIX = "interaction_"
+QUESTION_METHOD = "item/tool/requestUserInput"
+# The JSON-RPC error code ACP answers with when the agent is not signed in.
+AUTH_REQUIRED = -32000
+# Antigravity can go on after a turn ended, when a task it left running finishes: those updates make a late turn of
+# their own, which its usage_update ends, or this many seconds without an update, as T3 Code waits.
+LATE_QUIET_SECONDS = 15 * 60
+# The updates that start a late turn: the agent's words and a new tool call. Others (its usage, its commands) do not.
+LATE_UPDATES = frozenset({"agent_message_chunk", "tool_call"})
+
+
+@dataclass
+class LateTurn:
+    """One late turn (LATE_QUIET_SECONDS): its own object, so a quiet watch acts only on the turn it was started for,
+    with when the agent last sent one of its updates."""
+
+    last: float
 
 
 class AcpError(CodexError):
@@ -55,11 +85,32 @@ class AcpError(CodexError):
     page treat it as they treat Codex's."""
 
 
+def _refusal(name: str, error: Any) -> str:
+    """What an agent's error answer says, in words: a sign-in it lacks as what to do about it."""
+    message = str(error.get("message", error) if isinstance(error, dict) else error)
+    if isinstance(error, dict) and (error.get("code") == AUTH_REQUIRED or "authentication required" in message.lower()):
+        return (f"{name} is not signed in on this machine, so it ran nothing: sign its CLI in on the machine Cockpit"
+                " runs on, then send this again")
+    return message
+
+
+def offered_models(result: dict[str, Any]) -> list[tuple[str, str]] | None:
+    """The models a session/new or session/load answer offers, each as (id, label), from its `model` config option,
+    whose choices may come in groups; None when it has no such option."""
+    option = next((each for each in result.get("configOptions") or []
+                   if isinstance(each, dict) and each.get("id") == "model"), None)
+    if option is None or option.get("type") != "select":
+        return None
+    choices = [inner for each in option.get("options") or [] if isinstance(each, dict)
+               for inner in ([each] if "value" in each else each.get("options") or []) if isinstance(inner, dict)]
+    return [(choice["value"], str(choice.get("name") or "").strip() or choice["value"])
+            for choice in choices if isinstance(choice.get("value"), str) and choice["value"]]
+
+
 def agent_args(provider: str, model: str) -> list[str]:
-    """The command that starts `provider`'s agent in ACP mode on `model`, found on the service's PATH."""
+    """The command that starts `provider`'s agent in ACP mode on `model`, found on the service's PATH. Antigravity
+    starts the same way on every model: each session sets its own (AcpAgent._choose_model)."""
     if provider == "gemini":
-        if model != "default":
-            raise ValueError(f"Antigravity runs on its own default model, not {model}")
         return ["agy", "acp"]
     if provider == "grok":
         return ["grok", "agent", *(["--model", model] if model != "default" else []), "stdio"]
@@ -95,8 +146,10 @@ class Connection:
     thread of its own so a slow handler never stalls the pipe."""
 
     def __init__(self, args: list[str], env: dict[str, str], cwd: Path,
-                 on_message: Callable[[Connection, dict[str, Any]], None], name: str) -> None:
+                 on_message: Callable[[Connection, dict[str, Any]], None], name: str, temp_dir: Path | None) -> None:
+        """`temp_dir` is the process's own temporary folder, removed once it ended, or None for none."""
         self.args, self.env, self.cwd, self.on_message, self.name = args, env, cwd, on_message, name
+        self.temp_dir = temp_dir
         self._lock = threading.Lock()
         self._write_lock = threading.Lock()
         self._next_id = 0
@@ -158,8 +211,7 @@ class Connection:
         except queue.Empty as exc:
             raise AcpError(f"Delivery uncertain: {self.name} did not answer {method} in time") from exc
         if "error" in answer:
-            error = answer["error"]
-            raise AcpError(f"{self.name} refused {method}: {error.get('message', error) if isinstance(error, dict) else error}")
+            raise AcpError(f"{self.name} refused {method}: {_refusal(self.name, answer['error'])}")
         return answer.get("result") or {}
 
     def notify(self, method: str, params: dict[str, Any]) -> None:
@@ -192,6 +244,12 @@ class Connection:
             for each in waiting:
                 each({"error": {"message": f"Delivery uncertain: {self.name} ended"}})
             self.on_message(self, {"method": "cockpit/disconnected", "params": {}})
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                pass  # closed its stdout but lives on: close() removes its folder once it ends
+            else:
+                self._remove_temp()
 
     def close(self) -> None:
         process = self.process
@@ -201,6 +259,12 @@ class Connection:
                 process.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 process.kill()
+                process.wait()
+        self._remove_temp()
+
+    def _remove_temp(self) -> None:
+        if self.temp_dir is not None:
+            shutil.rmtree(self.temp_dir, ignore_errors=True)
 
 
 def _now() -> str:
@@ -208,18 +272,56 @@ def _now() -> str:
 
 
 def _diffs(call: dict[str, Any]) -> list[dict[str, str]]:
-    """The file changes a tool call's content proposes, each as its path and a unified diff of it."""
+    """The file changes a tool call's content proposes, each as its path and a unified diff of it, measured on the whole
+    file where it can be read (_whole), so the diff has the file's line numbers and the lines around the change."""
     diffs = []
     for each in call.get("content") or []:
         if not isinstance(each, dict) or each.get("type") != "diff" or not isinstance(each.get("path"), str):
             continue
-        path, old, new = each["path"], str(each.get("oldText") or ""), str(each.get("newText") or "")
-        diff = "".join(difflib.unified_diff(old.splitlines(keepends=True), new.splitlines(keepends=True),
-                                            "/dev/null" if each.get("oldText") is None else path, path))
+        path, old, new = each["path"], each.get("oldText"), str(each.get("newText") or "")
+        whole = _whole(path, old, new)
+        if whole is not None:
+            old, new = whole
+        # Lines end at "\n" alone, as in git; str.splitlines would also end them at a form feed or a lone "\r".
+        before, after = (re.findall(r"[^\n]*\n|[^\n]+", str(old or "")), re.findall(r"[^\n]*\n|[^\n]+", new))
+        created = old is None and not (os.path.isabs(path) and os.path.lexists(path))
+        lines = difflib.unified_diff(before, after, "/dev/null" if created else path, path)
+        # In a diff of the whole file, a last line without a newline gets the standard marker, so a change to the
+        # final newline alone shows. A diff of the call's own text shows each line on its own.
+        marker = "\\ No newline at end of file\n" if whole is not None or old is None else ""
+        diff = "".join(line if line.endswith("\n") else line + "\n" + marker for line in lines)
         if len(diff) > DIFF_MAX:
             diff = diff[:DIFF_MAX] + f"\n… {len(diff) - DIFF_MAX} more characters of this diff not shown"
         diffs.append({"path": path, "diff": diff})
     return diffs
+
+
+def _whole(path: str, old: Any, new: str) -> tuple[str, str] | None:
+    """The whole file before and after a change, where the change names only part of it: Antigravity's edit sends the
+    text it replaces and its replacement, and its write sends no old text even when it overwrites a file. None when the
+    path is not absolute, the file is missing, unreadable as text or over FILE_MAX bytes, or holds the replaced text
+    other than exactly once; the diff then shows the change as the call sends it."""
+    if not os.path.isabs(path):
+        return None
+    try:
+        # O_NONBLOCK, since opening a pipe waits for a writer, and O_NOCTTY, so a terminal never becomes Cockpit's;
+        # only a regular file is read. newline="" keeps the file's line endings, so a change of them shows in the diff.
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOCTTY)
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode) or info.st_size > FILE_MAX:
+                return None
+            with open(fd, encoding="utf-8", newline="", closefd=False) as file:
+                text = file.read()
+        finally:
+            os.close(fd)
+    except (OSError, ValueError):
+        return None
+    if old is None:
+        return text, new
+    if not isinstance(old, str) or not old or text.count(old) != 1:
+        return None
+    return text, text.replace(old, new)
 
 
 def _paths(call: dict[str, Any], diffs: list[dict[str, str]]) -> list[str]:
@@ -235,16 +337,121 @@ def _tool_name(call: dict[str, Any]) -> str:
     return str(call.get("kind") or (title[0].lower() if title else "tool"))
 
 
+# The fields of Antigravity's shell call input that the card shows (CommandLine, toolSummary or explanation, Cwd,
+# BypassSandbox) or that only time the call. A call with any other field keeps its whole input on the card, since Allow
+# approves all of it.
+_NESTED_KEYS = {"CommandLine", "toolSummary", "explanation", "Cwd", "BypassSandbox", "WaitMsBeforeAsync",
+                "NotificationTimeoutSeconds", "Blocking"}
+
+
+def _parsed(call: dict[str, Any]) -> dict[str, Any]:
+    """Antigravity's shell call input, which it sends either as the call's input itself (`CommandLine` and the rest at
+    its top) or as a JSON object inside the input's `command`; empty for any other call."""
+    raw = call.get("rawInput")
+    if isinstance(raw, dict) and isinstance(raw.get("CommandLine"), str):
+        return raw
+    if not (isinstance(raw, dict) and isinstance(raw.get("command"), str) and raw["command"].startswith("{")):
+        return {}
+    try:
+        nested = json.loads(raw["command"])
+    except ValueError:
+        return {}
+    return nested if isinstance(nested, dict) else {}
+
+
+def _nested(call: dict[str, Any]) -> dict[str, Any]:
+    """Antigravity's shell call input (_parsed): `CommandLine`, `toolSummary` (what the call is for, in a few words),
+    sometimes its own `Cwd`, `BypassSandbox` (true when auto mode asks to run the command outside Antigravity's
+    sandbox), and its timing settings. Empty for any other call, and for one with a field outside _NESTED_KEYS."""
+    nested = _parsed(call)
+    if not (isinstance(nested.get("CommandLine"), str) and set(nested) <= _NESTED_KEYS):
+        return {}
+    if "Cwd" in nested and not isinstance(nested["Cwd"], str):
+        return {}
+    if "BypassSandbox" in nested and not isinstance(nested["BypassSandbox"], bool):
+        return {}
+    return nested
+
+
+def _outside_sandbox(call: dict[str, Any]) -> bool:
+    """Whether Antigravity's auto mode asks to run this shell call outside its sandbox (`BypassSandbox: true`). It reads
+    the input before _nested, so a call whose other fields keep the whole input on the card still says so."""
+    parsed = _parsed(call)
+    return isinstance(parsed.get("CommandLine"), str) and parsed.get("BypassSandbox") is True
+
+
+def _shown_by_diff(call: dict[str, Any]) -> bool:
+    """Whether a call is Antigravity's file edit or write and its diff shows all of its input: the file (Path), the text
+    the edit replaces (Target) and the text that takes its place (Replacement, or a write's Content). The card then
+    shows the diff alone. A call with any other field keeps its whole input on the card, as with _NESTED_KEYS."""
+    raw = call.get("rawInput")
+    if not (isinstance(raw, dict) and isinstance(raw.get("Path"), str)):
+        return False
+    if set(raw) == {"Path", "Target", "Replacement"} and isinstance(raw["Target"], str):
+        old, new = raw["Target"], raw["Replacement"]
+    elif set(raw) == {"Path", "Content"}:
+        old, new = None, raw["Content"]
+    else:
+        return False
+    if not isinstance(new, str):
+        return False
+    return any(isinstance(each, dict) and each.get("type") == "diff" and each.get("path") == raw["Path"]
+               and each.get("oldText") == old and each.get("newText") == new for each in call.get("content") or [])
+
+
+def _cwd(call: dict[str, Any], session_cwd: str) -> str:
+    """The folder a call runs in: the `Cwd` Antigravity names in a shell call's input, also when the card shows that
+    input whole, else the session's folder."""
+    nested = _parsed(call)
+    cwd = nested.get("Cwd")
+    return cwd if isinstance(nested.get("CommandLine"), str) and isinstance(cwd, str) and cwd else session_cwd
+
+
 def _command(call: dict[str, Any]) -> str:
     """What a tool call does, in its own words: the command it runs, else its input as JSON. The Gemini CLI sends a
-    shell call with no input, kind `execute` and the command as its title (its ShellToolInvocation.getDisplayTitle)."""
+    shell call with no input, kind `execute` and the command as its title (its ShellToolInvocation.getDisplayTitle);
+    Antigravity nests its command line in JSON (_nested). Empty for a file edit or write its diff shows whole
+    (_shown_by_diff)."""
     raw = call.get("rawInput")
+    if _shown_by_diff(call):
+        return ""
+    if nested := _nested(call):
+        return nested["CommandLine"]
     if isinstance(raw, dict) and isinstance(raw.get("command"), str):
         return raw["command"]
     title = call.get("title")
     if not raw and call.get("kind") == "execute" and isinstance(title, str) and title.strip():
         return title
     return json.dumps(raw, ensure_ascii=False) if raw else ""
+
+
+def _reason(call: dict[str, Any], command: str) -> str:
+    """What the card says the call is for: Antigravity's summary of a shell call, else the call's title, unless the
+    title is only the command again, as Antigravity's and the Gemini CLI's shell calls title it. Antigravity titles a
+    file edit or write "File notes.txt", so the card names what it does to the file: "Edit notes.txt", "Write notes.txt"."""
+    if _shown_by_diff(call):
+        return f"{'Edit' if 'Target' in call['rawInput'] else 'Write'} {Path(call['rawInput']['Path']).name}"
+    nested = _nested(call)
+    for summary in (nested.get("toolSummary"), nested.get("explanation")):
+        if isinstance(summary, str) and summary.strip():
+            return " ".join(summary.split())
+    title = str(call.get("title") or "")
+    return "" if title.strip() == command.strip() else title
+
+
+def _unique_labels(answers: list[dict[str, str]]) -> None:
+    """Give every answer a label no other answer has, in place: a label only one answer has stays, and answers sharing
+    one get their id after it, "File (b)", with a count after the id while that is taken too, "File (a, 2)"."""
+    names = [each["label"] for each in answers]
+    used = {name for name in names if names.count(name) == 1}
+    for each in answers:
+        if names.count(each["label"]) == 1:
+            continue
+        label, count = f"{each['label']} ({each['value']})", 2
+        while label in used:
+            label, count = f"{each['label']} ({each['value']}, {count})", count + 1
+        used.add(label)
+        each["label"] = label
 
 
 class AcpAgent:
@@ -258,8 +465,8 @@ class AcpAgent:
         self.label = config.PROVIDER_NAMES[provider]
         self._lock = threading.RLock()
         self._ended = threading.Condition(self._lock)
-        # One process per model and session folder, started on first use; a start holds _starting until the agent
-        # answered `initialize`, so a second caller waits for it rather than using it half started.
+        # One process per command (agent_args) and session folder, started on first use; a start holds _starting until
+        # the agent answered `initialize`, so a second caller waits for it rather than using it half started.
         self._connections: dict[tuple[str, str], Connection] = {}
         self._starting = threading.Lock()
         # The connection each session is loaded on, and the sessions whose turn runs, with its start.
@@ -271,10 +478,18 @@ class AcpAgent:
         self._calls: dict[tuple[str, str], int] = {}
         # Sessions being loaded: the agent replays their history, which acp_log holds already.
         self._loading: set[str] = set()
+        # Sessions being stopped: from Stop's interrupt until it lets the session go, no late turn starts, so no
+        # permission request in between is allowed.
+        self._stopping: set[str] = set()
         self._pending: dict[str, dict[str, Any]] = {}
         self._pending_on: dict[str, Connection] = {}
         # Sessions whose turn Stop is cancelling: their permission requests are answered cancelled, never approved.
         self._cancelling: set[str] = set()
+        # Sessions in a late turn (LATE_QUIET_SECONDS).
+        self._late: dict[str, LateTurn] = {}
+        # Held while an update or permission request is handled and while a turn ends, so an update arriving as a turn
+        # ends is either part of that turn or starts the next one. Taken before _lock, never while holding it.
+        self._turn_lock = threading.RLock()
 
     # The database
 
@@ -319,8 +534,17 @@ class AcpAgent:
     def owns(self, session_id: str) -> bool:
         return self._row(session_id) is not None
 
+    def _temp_root(self) -> Path:
+        """Where each Antigravity process gets a temporary folder of its own: its bundle unpacks about 1 GB there on
+        every start, which T3 Code also keeps apart per process."""
+        return self.db_path.parent / "agy-tmp"
+
     def mark_interrupted(self) -> None:
-        """At server start, fail the turns the previous server's agents were running: they ended with it."""
+        """At server start, fail the turns the previous server's agents were running: they ended with it. Their
+        temporary folders go too."""
+        if self.provider == "gemini" and self._temp_root().is_dir():
+            for each in self._temp_root().iterdir():
+                shutil.rmtree(each, ignore_errors=True)
         conn = self._db()
         try:
             conn.execute("UPDATE acp_sessions SET state = 'failed', detail = ?, updated_at = ?"
@@ -362,8 +586,10 @@ class AcpAgent:
     # Starting and messaging sessions
 
     def _connection(self, model: str, cwd: Path) -> Connection:
-        """The live, initialized process for `model` in the folder `cwd`, started if it is not running."""
-        key = (model, str(cwd))
+        """The live, initialized process for `model` in the folder `cwd`, started if it is not running. Models that
+        start the same command (all of Antigravity's) share one."""
+        args = agent_args(self.provider, model)
+        key = (" ".join(args), str(cwd))
         with self._starting:
             with self._lock:
                 connection = self._connections.get(key)
@@ -371,8 +597,12 @@ class AcpAgent:
                 return connection
             if connection is not None:
                 connection.close()  # closed its stdout but may live on
-            connection = Connection(agent_args(self.provider, model), agent_env(self.provider, dict(os.environ)), cwd,
-                                    self._message, f"{self.label} ({model})")
+            env, temp = agent_env(self.provider, dict(os.environ)), None
+            if self.provider == "gemini":
+                self._temp_root().mkdir(parents=True, exist_ok=True)
+                temp = Path(tempfile.mkdtemp(prefix="agy-", dir=self._temp_root()))
+                env = {**env, "TMPDIR": str(temp)}
+            connection = Connection(args, env, cwd, self._message, self.label, temp)
             try:
                 connection.start()
             except Exception:
@@ -386,7 +616,11 @@ class AcpAgent:
                           speed: str) -> str:
         """Start a session for the message `message_id`, attached to it before the prompt goes, even if the web caller
         disappears. `effort` and `speed` are what delivery passes every agent; an ACP agent picks neither."""
-        offered = [each for each, _ in config.SESSION_OPTIONS[self.provider]["models"]]
+        conn = self._db()
+        try:
+            offered = [each for each, _ in db.session_models(conn, self.provider)]
+        finally:
+            conn.close()
         if model not in offered:
             raise AcpError(f"{self.label} offers no model {model}; pick one of {', '.join(offered)}")
         connection = self._connection(model, cwd)
@@ -394,6 +628,8 @@ class AcpAgent:
         session_id = result.get("sessionId")
         if not isinstance(session_id, str) or not session_id:
             raise AcpError(f"{self.label} started a session without an id; no prompt was sent")
+        self._choose_model(connection, session_id, model, result, saved=False)
+        self._choose_mode(connection, session_id, result)
         conn = self._db()
         try:
             with db.transaction(conn):
@@ -421,6 +657,47 @@ class AcpAgent:
                            " starting a duplicate.", session_id=session_id) from exc
         return session_id
 
+    def _choose_model(self, connection: Connection, session_id: str, model: str, result: dict[str, Any],
+                      saved: bool) -> None:
+        """Put a new or loaded Antigravity session on `model`, as T3 Code does, and keep the models its answer
+        (`result`) offers for the page's menu (db.session_models). "default" leaves the model Antigravity's settings
+        chose. A new session's model (`saved` False) that the signed-in Google account does not offer is refused. A
+        loaded session's saved model (`saved` True) goes to Antigravity also when its list leaves it out, as T3 Code's
+        allowUnlistedValue passes a saved value: the CLI still takes model ids it no longer lists. An answer without the
+        list leaves the refusal to Antigravity."""
+        if self.provider != "gemini":
+            return
+        models = offered_models(result)
+        if models is not None:
+            conn = self._db()
+            try:
+                db.kv_set(conn, db.models_key(self.provider), [list(each) for each in models])
+            finally:
+                conn.close()
+        if model == "default":
+            return
+        if not saved and models is not None and model not in [each for each, _ in models]:
+            raise AcpError(f"Antigravity model '{model}' is unavailable for this Google account. Select an available"
+                           " model; no prompt was sent")
+        connection.request("session/set_config_option", {"sessionId": session_id, "configId": "model", "value": model})
+
+    def _choose_mode(self, connection: Connection, session_id: str, result: dict[str, Any]) -> None:
+        """Put a new or loaded Antigravity session in its `auto` mode (SESSION-30): file edits and commands its own
+        check judges safe and reversible run without asking, inside Antigravity's sandbox or, when the sandbox is too
+        narrow, outside it; irreversible ones still come to Cockpit as requests. A loaded session starts in `default`
+        again, so both get it. An answer (`result`) that offers no `auto` mode leaves the session in the mode it has,
+        and the error log says so."""
+        if self.provider != "gemini":
+            return
+        modes = result.get("modes")
+        offered = [each.get("id") for each in modes.get("availableModes") or [] if isinstance(each, dict)] \
+            if isinstance(modes, dict) else []
+        if "auto" not in offered:
+            log.error("%s offers no auto mode (it offers %s); session %s asks before every edit and command",
+                      self.label, offered or "no modes", session_id)
+            return
+        connection.request("session/set_mode", {"sessionId": session_id, "modeId": "auto"})
+
     def _ensure_loaded(self, session_id: str, row: dict[str, Any]) -> Connection:
         """The connection the session is loaded on, loading it again with `session/load` after the agent restarted."""
         with self._lock:
@@ -434,7 +711,9 @@ class AcpAgent:
         with self._lock:
             self._loading.add(session_id)
         try:
-            connection.request("session/load", {"sessionId": session_id, "cwd": row["cwd"], "mcpServers": []})
+            result = connection.request("session/load", {"sessionId": session_id, "cwd": row["cwd"], "mcpServers": []})
+            self._choose_model(connection, session_id, row["model"], result, saved=True)
+            self._choose_mode(connection, session_id, result)
         except AcpError as exc:
             self._save(session_id, state="failed", detail=str(exc))
             raise
@@ -483,7 +762,12 @@ class AcpAgent:
 
     def _turn_ended(self, session_id: str, answer: dict[str, Any]) -> None:
         """The prompt's answer: the turn ended, by its stop reason, or failed. The session's state is saved before the
-        turn counts as over, so whoever waits for its end (interrupt) reads the state it ended in."""
+        turn counts as over, so whoever waits for its end (interrupt) reads the state it ended in. Holds _turn_lock, so
+        no update lands between the turn's words being kept and the turn ending."""
+        with self._turn_lock:
+            self._end_turn(session_id, answer)
+
+    def _end_turn(self, session_id: str, answer: dict[str, Any]) -> None:
         self._flush(session_id)
         with self._lock:
             started = self._active.get(session_id)
@@ -493,8 +777,7 @@ class AcpAgent:
         reply, last = "\n\n".join(messages), (messages[-1] if messages else "")
         if "error" in answer:
             error = answer["error"]
-            self._save(session_id, state="failed",
-                       detail=str(error.get("message", error) if isinstance(error, dict) else error)[:12000])
+            self._save(session_id, state="failed", detail=_refusal(self.label, error)[:12000])
         else:
             from cockpit.questions import asks_in
 
@@ -513,11 +796,62 @@ class AcpAgent:
             self._reply.pop(session_id, None)
             self._unsaid.pop(session_id, None)
             self._cancelling.discard(session_id)
-            self._calls = {key: row for key, row in self._calls.items() if key[0] != session_id}
-            for key in [key for key, each in self._pending.items() if each["params"]["threadId"] == session_id]:
-                self._pending.pop(key)
-                self._pending_on.pop(key, None)
+            self._late.pop(session_id, None)
+            keys = [key for key, each in self._pending.items() if each["params"]["threadId"] == session_id]
+            left_open = [(self._pending.pop(key), self._pending_on.pop(key)) for key in keys]
             self._ended.notify_all()
+        for pending, on in left_open:
+            # The agent still waits for these; the turn they belonged to is over.
+            try:
+                on.write({"id": pending["request_id"], "result": {"outcome": {"outcome": "cancelled"}}})
+            except AcpError:
+                log.warning("%s ended before its request %s was cancelled", self.label, pending["id"])
+
+    def _begin_late(self, connection: Connection, session_id: str) -> bool:
+        """Start a late turn: Antigravity replies by itself, with no prompt open, when a command or scheduled wake it
+        left running finishes, as T3 Code expects of it. The turn holds the session as working until the reply's
+        closing usage_update, or LATE_QUIET_SECONDS without an update. True when the session is in a turn after it."""
+        if self.provider != "gemini":
+            return False
+        with self._lock:
+            if session_id in self._active:
+                return True
+            if (session_id in self._loading or session_id in self._stopping
+                    or self._loaded.get(session_id) is not connection):
+                return False
+            self._active[session_id] = db.now_iso()
+            self._reply[session_id], self._unsaid[session_id] = [], []
+            self._late[session_id] = late = LateTurn(time.monotonic())
+        self._save(session_id, state="working")
+        self._watch_late(session_id, late, LATE_QUIET_SECONDS)
+        return True
+
+    def _watch_late(self, session_id: str, late: LateTurn, seconds: float) -> None:
+        timer = threading.Timer(seconds, self._late_quiet, (session_id, late))
+        timer.daemon = True
+        timer.start()
+
+    def _late_quiet(self, session_id: str, late: LateTurn) -> None:
+        """The watch on the late turn `late`: it ends once the agent sent nothing for LATE_QUIET_SECONDS, and looks
+        again later while the agent still sends or waits on a card for the user. A watch whose turn already ended does
+        nothing, also when a newer late turn runs. It decides and ends the turn under _turn_lock, so an update arriving
+        meanwhile either is part of the turn or starts the next one."""
+        with self._turn_lock:
+            with self._lock:
+                if self._late.get(session_id) is not late:
+                    return
+                if any(each["params"]["threadId"] == session_id for each in self._pending.values()):
+                    # The agent waits for the user's answer: quiet from here on is the user's, not the agent's.
+                    late.last = time.monotonic()
+                left = late.last + LATE_QUIET_SECONDS - time.monotonic()
+                if left <= 0:
+                    self._late.pop(session_id)
+            if left > 0:
+                self._watch_late(session_id, late, left)
+                return
+            log.warning("%s sent nothing for %d minutes in a late reply; its turn ends", self.label,
+                        LATE_QUIET_SECONDS // 60)
+            self._turn_ended(session_id, {"result": {"stopReason": "end_turn"}})
 
     def interrupt(self, session_id: str) -> None:
         """Cancel the session's turn: its open permission requests are answered as cancelled, as ACP asks, and from
@@ -527,6 +861,8 @@ class AcpAgent:
             if session_id not in self._active or connection is None:
                 return
             self._cancelling.add(session_id)
+            # Taken off here, so neither its usage update nor the quiet watch ends the turn as well.
+            late = self._late.pop(session_id, None) is not None
             keys = [key for key, each in self._pending.items() if each["params"]["threadId"] == session_id]
             open_requests = [(self._pending.pop(key), self._pending_on.pop(key)) for key in keys]
         for pending, on in open_requests:
@@ -534,15 +870,38 @@ class AcpAgent:
                 on.write({"id": pending["request_id"], "result": {"outcome": {"outcome": "cancelled"}}})
             except AcpError:
                 log.warning("%s ended before its request %s was cancelled", self.label, pending["id"])
-        connection.notify("session/cancel", {"sessionId": session_id})
+        try:
+            connection.notify("session/cancel", {"sessionId": session_id})
+        finally:
+            if late:
+                # A late turn has no prompt whose answer would end it; it ends here also when the cancel fails.
+                self._turn_ended(session_id, {"result": {"stopReason": "cancelled"}})
+        if late:
+            return
         with self._ended:
             if not self._ended.wait_for(lambda: session_id not in self._active, timeout=30):
                 raise AcpError(f"{self.label} has not confirmed the cancelled turn ended; no new prompt was sent")
 
     def stop(self, session_id: str) -> None:
-        self.interrupt(session_id)
+        """Interrupt, then let go of the session. No late reply begins between the two (_stopping), so Cockpit allows
+        no call on its own meanwhile (_auto_allow); one already running ends here, since its updates are ignored from
+        now on. The user's answer to a card can still land before interrupt begins cancelling (answer)."""
         with self._lock:
+            self._stopping.add(session_id)
+        try:
+            self.interrupt(session_id)
+        except BaseException:
+            # A failed interrupt keeps the session, so Stop can be pressed again.
+            with self._lock:
+                self._stopping.discard(session_id)
+            raise
+        with self._lock:
+            self._stopping.discard(session_id)
             self._loaded.pop(session_id, None)
+            late = self._late.pop(session_id, None) is not None
+            self._calls = {key: row for key, row in self._calls.items() if key[0] != session_id}
+        if late:
+            self._turn_ended(session_id, {"result": {"stopReason": "cancelled"}})
 
     def log(self, session_id: str) -> dict[str, Any]:
         """The end of the session's conversation in sessions.session_log's shape, for the session view (VIEW-26)."""
@@ -573,9 +932,18 @@ class AcpAgent:
             conn.close()
 
     def answer(self, key: str, result: dict[str, Any]) -> None:
-        """The user's answer to a permission request: accept picks the agent's allow-once option, decline its
-        reject-once option, cancel neither. Only one-time options are ever picked: a request without the one asked
+        """The user's answer to a permission request or to one of Antigravity's questions (_answer_question). For a
+        permission request, accept picks the agent's allow-once option, decline its reject-once option, cancel neither. Only one-time options are ever picked: a request without the one asked
         for, or whose call the card could not show, is refused and stays open."""
+        with self._lock:
+            pending = self._pending.get(key)
+            if pending is None:
+                raise AcpError(f"this {self.label} request has already ended")
+            if pending["params"]["threadId"] in self._cancelling:
+                raise AcpError(f"this {self.label} turn is being stopped; its request is cancelled")
+            if pending["method"] == QUESTION_METHOD:
+                self._answer_question(key, pending, result)
+                return
         decision = result.get("decision")
         if decision not in {"accept", "decline", "cancel"}:
             raise AcpError("choose accept, decline or cancel")
@@ -594,11 +962,48 @@ class AcpAgent:
                 kind = "allow_once" if decision == "accept" else "reject_once"
                 chosen = next(each for each in pending["options"] if each.get("kind") == kind)
                 outcome = {"outcome": "selected", "optionId": chosen["optionId"]}
-            # Written under the lock Stop takes, so an answer is either sent before Stop begins or refused.
+            # Written under the lock interrupt takes to begin cancelling (_cancelling) and to cancel the open
+            # requests, so an answer is either sent before that or refused. An Allow can land after Stop marked the
+            # session _stopping and before interrupt marks it _cancelling: the agent gets the Allow, then interrupt
+            # cancels the turn, as when the Allow came just before Stop.
             self._pending.pop(key)
             self._pending_on.pop(key).write({"id": pending["request_id"], "result": {"outcome": outcome}})
+            self._answered(pending)
         self._record(f"{self.provider}.answered", "user", {"request": key, "session_id": pending["params"]["threadId"],
                                                            "decision": decision})
+
+    def _answered(self, pending: dict[str, Any]) -> None:
+        """A late turn's quiet starts again when the user answers, so the agent has its full quiet time to go on.
+        Called under the lock."""
+        late = self._late.get(pending["params"]["threadId"])
+        if late is not None:
+            late.last = time.monotonic()
+
+    def _answer_question(self, key: str, pending: dict[str, Any], result: dict[str, Any]) -> None:
+        """The user's answer to one of Antigravity's questions, in the Codex question card's shape (`answers`), or
+        cancel (`decision`). It picks the option whose label is the answer, else the one whose id is; anything else
+        is refused and the question stays open. Called under the lock."""
+        if result.get("decision") == "cancel":
+            outcome: dict[str, Any] = {"outcome": "cancelled"}
+        else:
+            question_id = pending["params"]["questions"][0]["id"]
+            answers = result.get("answers")
+            given = answers.get(question_id) if isinstance(answers, dict) and set(answers) == {question_id} else None
+            given = given.get("answers") if isinstance(given, dict) else None
+            if not isinstance(given, list) or len(given) != 1 or not isinstance(given[0], str):
+                raise AcpError(f"answer {self.label}'s question with one of its options")
+            # The card sends the label it shows, unique on the card (_question); an option id answers too.
+            by_label = [each for each in pending["options"] if each["label"] == given[0]]
+            chosen = by_label or [each for each in pending["options"] if each["value"] == given[0]]
+            if not chosen:
+                raise AcpError(f"{self.label} offers no single option {given[0]!r}; choose one of "
+                               + ", ".join(each["label"] for each in pending["options"]))
+            outcome = {"outcome": "selected", "optionId": chosen[0]["value"]}
+        self._pending.pop(key)
+        self._pending_on.pop(key).write({"id": pending["request_id"], "result": {"outcome": outcome}})
+        self._answered(pending)
+        self._record(f"{self.provider}.answered", "user", {"request": key, "session_id": pending["params"]["threadId"],
+                                                           "decision": "cancel" if "optionId" not in outcome else "answer"})
 
     # What the agent sends
 
@@ -618,7 +1023,11 @@ class AcpAgent:
 
     def _disconnected(self, connection: Connection) -> None:
         """The agent ended: its turns failed, saved so before they count as over, and its sessions load again on their
-        next message."""
+        next message. Under _turn_lock, so a turn the quiet watch is ending ends first."""
+        with self._turn_lock:
+            self._lose(connection)
+
+    def _lose(self, connection: Connection) -> None:
         with self._lock:
             lost = [sid for sid, each in self._loaded.items() if each is connection]
             ended = [sid for sid in lost if sid in self._active]
@@ -628,11 +1037,13 @@ class AcpAgent:
             for sid in lost:
                 if self._loaded.get(sid) is connection:
                     self._loaded.pop(sid)
+            self._calls = {key: row for key, row in self._calls.items() if key[0] not in lost}
             for sid in ended:
                 self._active.pop(sid, None)
                 self._reply.pop(sid, None)
                 self._unsaid.pop(sid, None)
                 self._cancelling.discard(sid)
+                self._late.pop(sid, None)
             for key in [key for key, each in self._pending_on.items() if each is connection]:
                 self._pending.pop(key, None)
                 self._pending_on.pop(key)
@@ -642,23 +1053,47 @@ class AcpAgent:
         """A request to run a tool, which becomes a card on the page while it comes from the process running the
         session's turn, and is answered cancelled otherwise. The card holds what the request says the call does (its
         command or input, the files it names, the diffs it proposes), in memory only. Allow shows only for an
-        allow-once option and a call the card can show."""
+        allow-once option and a call the card can show. Under _turn_lock, so a card never lands on a turn that is
+        ending."""
+        with self._turn_lock:
+            self._take_permission(connection, request_id, params)
+
+    def _take_permission(self, connection: Connection, request_id: Any, params: dict[str, Any]) -> None:
         session_id = params.get("sessionId")
         call = params.get("toolCall") or {}
         row = self._row(session_id) if isinstance(session_id, str) else None
         options = [each for each in params.get("options") or [] if isinstance(each, dict) and "optionId" in each]
-        kinds = {each.get("kind") for each in options}
-        command, diffs = _command(call), _diffs(call)
-        paths = _paths(call, diffs)
-        offered = [*(["accept"] if "allow_once" in kinds and (command or paths) else []),
-                   *(["decline"] if "reject_once" in kinds else []), "cancel"]
         key = uuid.uuid4().hex
-        pending = {
-            "id": key, "request_id": request_id, "method": PERMISSION_METHOD, "provider": self.provider,
-            "options": options,
-            "params": {"threadId": session_id, "reason": str(call.get("title") or ""), "cwd": row["cwd"] if row else "",
-                       "availableDecisions": offered, "command": command, "paths": paths, "diffs": diffs},
-        }
+        call_id = str(call.get("toolCallId") or "")
+        if self.provider == "gemini" and call_id.startswith(QUESTION_PREFIX):
+            pending = self._question(key, request_id, session_id, row, call_id, call, options)
+            if pending is None:
+                connection.write({"id": request_id, "result": {"outcome": {"outcome": "cancelled"}}})
+                return
+        else:
+            kinds = {each.get("kind") for each in options}
+            command, diffs = _command(call), _diffs(call)
+            if _shown_by_diff(call) and any(len(each["diff"]) > DIFF_MAX for each in diffs):
+                # A diff cut at DIFF_MAX no longer shows all the call does, so the card shows its input whole.
+                command = json.dumps(call["rawInput"], ensure_ascii=False)
+            paths = _paths(call, diffs)
+            cwd = _cwd(call, row["cwd"] if row else "")
+            if _tool_name(call) == "execute" and "allow_once" in kinds and command and safe_shell.safe(command, cwd, str(config.HOME)):
+                self._auto_allow(connection, request_id, session_id, row, call, options)
+                return
+            offered =[*(["accept"] if "allow_once" in kinds and (command or paths) else []),
+                       *(["decline"] if "reject_once" in kinds else []), "cancel"]
+            pending = {
+                "id": key, "request_id": request_id, "method": PERMISSION_METHOD, "provider": self.provider,
+                "options": options,
+                "params": {"threadId": session_id, "reason": _reason(call, command),
+                           "cwd": cwd,
+                           "availableDecisions": offered, "command": command,
+                           "shell": _tool_name(call) == "execute", "paths": paths, "diffs": diffs,
+                           "outsideSandbox": _outside_sandbox(call)},
+            }
+        if row is not None:
+            self._begin_late(connection, session_id)
         with self._lock:
             ours = (row is not None and self._loaded.get(session_id) is connection and session_id in self._active
                     and session_id not in self._cancelling)
@@ -669,19 +1104,85 @@ class AcpAgent:
             connection.write({"id": request_id, "result": {"outcome": {"outcome": "cancelled"}}})
             return
         self._record(f"{self.provider}.requested", self.provider, {
-            "request": key, "session_id": session_id, "method": PERMISSION_METHOD, "tool": _tool_name(call)})
+            "request": key, "session_id": session_id, "method": pending["method"], "tool": _tool_name(call)})
+
+    def _auto_allow(self, connection: Connection, request_id: Any, session_id: Any, row: dict[str, Any] | None,
+                    call: dict[str, Any], options: list[dict[str, Any]]) -> None:
+        """Allow once, without a card, a shell call that only reads or only touches Cockpit (safe_shell.safe), when it
+        comes on one of the session's turns; cancelled otherwise, as a card would be. The event names the session and
+        the kind of call, never the command."""
+        if row is not None:
+            self._begin_late(connection, session_id)
+        with self._lock:
+            ours = (row is not None and self._loaded.get(session_id) is connection and session_id in self._active
+                    and session_id not in self._cancelling and session_id not in self._stopping)
+            if ours:
+                chosen = next(each for each in options if each.get("kind") == "allow_once")
+                connection.write({"id": request_id, "result": {"outcome": {
+                    "outcome": "selected", "optionId": chosen["optionId"]}}})
+                # A late turn's quiet starts again, as when the user answers a card.
+                late = self._late.get(session_id)
+                if late is not None:
+                    late.last = time.monotonic()
+        if not ours:
+            connection.write({"id": request_id, "result": {"outcome": {"outcome": "cancelled"}}})
+            return
+        self._record(f"{self.provider}.auto_allowed", self.provider, {"session_id": session_id,
+                                                                      "tool": _tool_name(call)})
+
+    def _question(self, key: str, request_id: Any, session_id: Any, row: dict[str, Any] | None, call_id: str,
+                  call: dict[str, Any], options: list[dict[str, Any]]) -> dict[str, Any] | None:
+        """One of Antigravity's own questions, which it asks as a permission request whose call id starts
+        QUESTION_PREFIX: the call's title is the question and each option an answer, shown on Codex's question card,
+        each under a label of its own (_unique_labels); the answer picks the option by its id. None when two options
+        share an id or one has none, which T3 Code also refuses."""
+        # Runs of spaces collapse, as the page shows them.
+        answers = [{"value": str(each["optionId"]), "label": " ".join(str(each.get("name") or "").split()) or str(each["optionId"])}
+                    for each in options]
+        values = [each["value"] for each in answers]
+        _unique_labels(answers)
+        if not answers or "" in [each.strip() for each in values] or len(set(values)) != len(values):
+            log.error("%s asked a question with %d options Cockpit cannot tell apart; it was cancelled", self.label,
+                      len(answers))
+            return None
+        return {
+            "id": key, "request_id": request_id, "method": QUESTION_METHOD, "provider": self.provider, "options": answers,
+            "params": {"threadId": session_id, "reason": "", "cwd": row["cwd"] if row else "", "questions": [{
+                "id": call_id, "header": "", "question": str(call.get("title") or "").strip() or "Choose an option.",
+                "options": [{"label": each["label"], "description": ""} for each in answers],
+                "isOther": False, "isSecret": False}]},
+        }
 
     def _update(self, connection: Connection, session_id: Any, update: dict[str, Any]) -> None:
         """One streamed update of a turn: the agent's words, or a tool call starting or changing. Updates replayed
         while a session loads, those of sessions Cockpit did not start, and those from another process than the one
-        running the session's turn are left out."""
+        running the session's turn are left out. Under _turn_lock, so an update arriving as a turn ends is either part
+        of that turn or starts the next one."""
         if not isinstance(session_id, str):
             return
-        with self._lock:
-            if (session_id in self._loading or session_id not in self._active
-                    or self._loaded.get(session_id) is not connection):
-                return
+        with self._turn_lock:
+            self._take_update(connection, session_id, update)
+
+    def _take_update(self, connection: Connection, session_id: str, update: dict[str, Any]) -> None:
         kind = update.get("sessionUpdate")
+        with self._lock:
+            if session_id in self._loading or self._loaded.get(session_id) is not connection:
+                return
+            turn = self._late.get(session_id)
+            late = turn is not None
+            if turn is not None:
+                turn.last = time.monotonic()
+            idle = session_id not in self._active
+        # A call's update after its turn ended changes its row and starts no turn.
+        if idle and kind != "tool_call_update" and not (kind in LATE_UPDATES and self._begin_late(connection, session_id)):
+            return
+        if late and kind == "usage_update":
+            # Antigravity closes each reply with its usage, also one it sends with no prompt open.
+            with self._lock:
+                ends = self._late.pop(session_id, None) is not None
+            if ends:
+                self._turn_ended(session_id, {"result": {"stopReason": "end_turn"}})
+            return
         if kind == "agent_message_chunk":
             content = update.get("content") or {}
             if content.get("type") == "text" and isinstance(content.get("text"), str):

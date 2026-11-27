@@ -8,8 +8,8 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from fastapi.testclient import TestClient
 
-from cockpit import config, db, limits, sessions, store
-from cockpit.codex_agent import CodexError
+from cockpit import config, db, handovers, limits, sessions, store
+from cockpit.codex_agent import CONTROL_PLANE, CodexError
 from tests.conftest import ORIGIN, SESSION_A, SESSION_B, make_session, write_prompt
 from tests.test_api import put_item, put_step
 from tests.test_codex_agent import agent  # noqa: F401
@@ -271,3 +271,143 @@ def test_state_uses_codex_registry_model_and_unknown_claude_model(world, agent):
     assert rows[SESSION_B]["model"] == config.SESSION_OPTIONS["codex"]["models"][0][0]
     assert rows[SESSION_A]["model"] is None
     assert rows[SESSION_A]["handover"]["session_id"] == SESSION_B
+
+
+def _said(role, content):
+    return {"type": role, "message": {"role": role, "content": content}}
+
+
+def test_claude_excerpts_keep_user_prompts_and_each_turns_last_answer(tmp_path):
+    entries = [
+        _said("user", "First request"),
+        _said("assistant", [{"type": "text", "text": "Looking at it"}]),
+        _said("assistant", [{"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "ls"}}]),
+        _said("user", [{"type": "tool_result", "tool_use_id": "t1", "content": "files"}]),
+        _said("assistant", [{"type": "text", "text": "Answer one"}]),
+        _said("user", [{"type": "text", "text": "Second request"}]),
+        _said("assistant", [{"type": "thinking", "thinking": "hidden"}, {"type": "text", "text": "Answer two"}]),
+        {**_said("user", "Summary of the earlier conversation"), "isCompactSummary": True},
+        {**_said("user", "Claude Code's own note"), "isMeta": True},
+        _said("assistant", [{"type": "text", "text": "Answer three"}]),
+        _said("user", "Third request"),
+        _said("assistant", [{"type": "text", "text": "y" * 3500}]),
+        {**_said("assistant", [{"type": "text", "text": "API Error: Request was aborted."}]),
+         "message": {"role": "assistant", "model": "<synthetic>",
+                     "content": [{"type": "text", "text": "API Error: Request was aborted."}]}},
+    ]
+    path = sessions.PROJECTS_DIR / "-home-x" / f"{SESSION_A}.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("".join(json.dumps(entry) + "\n" for entry in entries))
+    session = make_session(SESSION_A, pid=None, state="stopped")
+    _, instructions, answers = handovers._transcript(session, tmp_path / "out")
+    assert instructions == ["First request", "Second request", "Third request"]
+    assert answers == ["Answer one", "Answer three", "y" * 3000 + " [excerpt; full message in transcript]"]
+
+
+def test_claude_excerpts_leave_out_rows_claude_code_wrote(tmp_path):
+    # Rows shaped as Claude Code 2.1.331 writes a local command run before Cockpit's first prompt; the command and its
+    # output are invented.
+    caveat = ("<local-command-caveat>The command below was run directly in Claude Code, not sent to you as a request, "
+              "and its output goes straight to the user. It's recorded here as context for later messages."
+              "</local-command-caveat>")
+    command = ("<command-name>/color</command-name>\n            <command-message>color</command-message>\n"
+               "            <command-args>teal</command-args>")
+    output = "<local-command-stdout>Session color set to teal</local-command-stdout>"
+    notification = "<task-notification>\n<task-id>b1example</task-id>\n<status>completed</status>\n</task-notification>"
+    entries = [
+        {**_said("user", caveat), "isMeta": True, "rowSource": "harness"},
+        {**_said("user", command), "rowSource": "local"},
+        {**_said("user", output), "rowSource": "local"},
+        {**_said("user", "Message from the sweeper via Cockpit: fix item 12"), "origin": {"kind": "human"},
+         "promptSource": "typed"},
+        _said("assistant", [{"type": "text", "text": "Started"}]),
+        {**_said("user", command), "rowSource": "local"},
+        {**_said("user", output), "rowSource": "local"},
+        _said("assistant", [{"type": "text", "text": "Color noted"}]),
+        {**_said("user", notification), "rowSource": "recorded", "promptSource": "system",
+         "origin": {"kind": "task-notification"}},
+        {**_said("user", "<task-notification> is what I pasted; why did it stop?"), "origin": {"kind": "human"},
+         "promptSource": "typed"},
+        _said("assistant", [{"type": "text", "text": "It finished"}]),
+        # A `claude -p --resume` turn, as the emergency page runs one.
+        {**_said("user", "Also check the backups"), "rowSource": "local", "promptSource": "sdk"},
+        _said("assistant", [{"type": "text", "text": "Backups pass"}]),
+    ]
+    path = sessions.PROJECTS_DIR / "-home-x" / f"{SESSION_A}.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("".join(json.dumps(entry) + "\n" for entry in entries))
+    session = make_session(SESSION_A, pid=None, state="stopped")
+    _, instructions, answers = handovers._transcript(session, tmp_path / "out")
+    assert instructions == ["Message from the sweeper via Cockpit: fix item 12",
+                            "<task-notification> is what I pasted; why did it stop?", "Also check the backups"]
+    assert answers == ["Color noted", "It finished", "Backups pass"]
+
+
+
+def test_claude_excerpts_leave_out_commands_with_neither_source_field(tmp_path):
+    # Rows shaped as Claude Code 2.1.326 writes a local command run before the first prompt: none of them carries
+    # rowSource or promptSource. The command and its output are invented.
+    caveat = ("<local-command-caveat>The command below was run directly in Claude Code, not sent to you as a request, "
+              "and its output goes straight to the user.</local-command-caveat>")
+    command = ("<command-name>/color</command-name>\n            <command-message>color</command-message>\n"
+               "            <command-args>teal</command-args>")
+    output = "<local-command-stdout>Session color set to teal</local-command-stdout>"
+    entries = [
+        {**_said("user", caveat), "isMeta": True},
+        _said("user", command),
+        _said("user", output),
+        {**_said("user", "Fix the login page"), "origin": {"kind": "human"}, "promptSource": "typed"},
+        _said("assistant", [{"type": "text", "text": "Fixed"}]),
+        _said("user", "<command-name>/theme</command-name>"),
+        _said("user", [{"type": "text", "text": "<local-command-stdout>Theme set to dark</local-command-stdout>"}]),
+        _said("assistant", [{"type": "text", "text": "Theme noted"}]),
+        # A `claude -p --resume` turn, as the emergency page runs one.
+        {**_said("user", "Also check the backups"), "rowSource": "local", "promptSource": "sdk"},
+        _said("assistant", [{"type": "text", "text": "Backups pass"}]),
+        # A prompt someone gave that happens to start with a command tag.
+        {**_said("user", "<command-name> tags break the quote"), "rowSource": "local", "promptSource": "sdk"},
+        _said("assistant", [{"type": "text", "text": "Quote checked"}]),
+        # The same words typed while a turn ran, which Claude Code records as a queued prompt.
+        {"type": "attachment", "timestamp": "2026-11-26T01:00:00Z",
+         "attachment": {"type": "queued_command", "commandMode": "prompt", "prompt": "<command-name> again"}},
+        _said("assistant", [{"type": "text", "text": "Again checked"}]),
+    ]
+    path = sessions.PROJECTS_DIR / "-home-x" / f"{SESSION_A}.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("".join(json.dumps(entry) + "\n" for entry in entries))
+    session = make_session(SESSION_A, pid=None, state="stopped")
+    _, instructions, answers = handovers._transcript(session, tmp_path / "out")
+    assert instructions == ["Fix the login page", "Also check the backups", "<command-name> tags break the quote",
+                            "<command-name> again"]
+    assert answers == ["Backups pass", "Quote checked", "Again checked"]
+
+def test_codex_excerpts_leave_out_the_context_codex_adds(monkeypatch, tmp_path):
+    home = tmp_path / "codex-home"
+    monkeypatch.setattr(config, "CODEX_HOMES", (home,))
+
+    def message(role, kind, *texts, phase=None):
+        return {"type": "response_item", "payload": {"type": "message", "role": role, "phase": phase,
+                                                     "content": [{"type": kind, "text": text} for text in texts]}}
+
+    records = [
+        {"type": "session_meta", "payload": {"id": SESSION_A, "cwd": "/"}},
+        message("developer", "input_text", "You are Codex"),
+        message("user", "input_text", "# AGENTS.md instructions for /\n\nrules", "<environment_context>\n</environment_context>"),
+        message("user", "input_text", "Fix the bug" + CONTROL_PLANE + " Use the cockpit CLI."),
+        {"type": "response_item", "payload": {"type": "reasoning", "summary": []}},
+        message("assistant", "output_text", "Looking at it", phase="commentary"),
+        message("assistant", "output_text", "Fixed it", phase="final_answer"),
+        message("user", "input_text", '<codex_internal_context source="goal">Continue</codex_internal_context>'),
+        message("assistant", "output_text", "Also done", phase="final_answer"),
+        message("user", "input_text", "Now patch Y"),
+        message("assistant", "output_text", "Checking the tests now, then I'll patch Y.", phase="commentary"),
+        {"type": "event_msg", "payload": {"type": "turn_aborted"}},
+    ]
+    path = home / "sessions" / "2026" / "11" / "25" / f"rollout-test-{SESSION_A}.jsonl"
+    path.parent.mkdir(parents=True)
+    path.write_text("".join(json.dumps(record) + "\n" for record in records))
+    session = replace(make_session(SESSION_A, pid=None, state="stopped"), provider="codex")
+    _, instructions, answers = handovers._transcript(session, tmp_path / "out")
+    assert instructions == ["Fix the bug", "Now patch Y"]
+    assert answers == ["Fixed it", "Also done",
+                       "[Progress note, written while working; not a final answer] Checking the tests now, then I'll patch Y."]

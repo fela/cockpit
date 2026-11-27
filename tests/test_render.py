@@ -4,7 +4,10 @@ import pytest
 
 from cockpit.render import (
     NO_REFS,
+    DocLinks,
     Refs,
+    doc_html,
+    doc_inline_html,
     markdown_html,
     markdown_inline_html,
     mentions_html,
@@ -206,6 +209,24 @@ def test_unknown_numbers_ordinals_code_and_links_stay_as_they_are() -> None:
     assert '>steps 1000</a>–20' in html
     assert markdown_html("[item 10](https://x.example/p)", REFS).count("<a ") == 1
     assert "item-ref" not in markdown_html("item 10", NO_REFS)
+
+
+def test_a_documents_relative_links_open_the_pages_of_its_other_files() -> None:
+    pages = (("SKILL.md", "/skills/cockpit"), ("references/sweep.md", "/skills/cockpit/references/sweep.md"))
+    top, inside = DocLinks("", pages), DocLinks("references", pages)
+    assert doc_html("[Sweeps](references/sweep.md#the-queue) and [x](sweep.md)", top) == (
+        '<p><a href="/skills/cockpit/references/sweep.md#the-queue">Sweeps</a> and x</p>\n'
+    )
+    assert doc_inline_html("[up](../SKILL.md), [next](sweep.md), [out](../../other/SKILL.md)", inside) == (
+        '<a href="/skills/cockpit">up</a>, <a href="/skills/cockpit/references/sweep.md">next</a>, out'
+    )
+    # Other addresses keep their rules: web links open in a new tab, the rest stays text.
+    assert 'target="_blank"' in doc_html("[web](https://x.example/a.md)", top)
+    assert doc_html("[a](/etc/passwd.md) [b](javascript:x.md) [c](file:///x.md)", top) == (
+        "<p>[a](/etc/passwd.md) [b](javascript:x.md) [c](file:///x.md)</p>\n"
+    )
+    # Elsewhere a relative link stays text, as before.
+    assert markdown_html("[Sweeps](references/sweep.md)", NO_REFS) == "<p>[Sweeps](references/sweep.md)</p>\n"
 
 
 def test_a_summary_and_a_short_line_link_their_mentions() -> None:

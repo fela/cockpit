@@ -608,6 +608,10 @@ body[data-briefing-unread] .top-inner:not(:has(.page-tabs)) .brand-mark::before 
 .uc-weeks .uc-label { line-height: 8px; }
 .uc-window + .uc-label, .uc-window + .uc-label + .uc-window { margin-top: 4px; }
 .uc-label { color: var(--pace, var(--uc-dim)); font-weight: 600; font-variant-numeric: tabular-nums; }
+/* Gemini's groups of models (app.js usageCardGemini): each group's name over its week's bar and its two windows. */
+.uc-group { margin-top: 10px; }
+.uc-group-name { color: var(--uc-dim); }
+.uc-group .uc-graphic, .uc-group .uc-windows { margin-top: 4px; }
 .uc-notes { display: grid; row-gap: 3px; margin-top: 8px; }
 .uc-dim { color: var(--uc-dim); }
 .uc-warn { color: oklch(0.83 0.12 72); }
@@ -1156,8 +1160,12 @@ summary.button::-webkit-details-marker { display: none; }
 /* The draft's amber chip there is its pencil alone, its words in its tooltip. */
 :is(.title-line, .task-heading) > .draft-mark { padding: 0 4px; align-self: center; }
 :is(.title-line, .task-heading) > .draft-mark > .label { display: none; }
-/* In the heading they follow its last word, centred on its line. */
-.task-heading > :is(.chip.cockpit, .draft-mark) { vertical-align: middle; margin-left: 8px; }
+/* In the heading the pencil follows its last word, centred on its line. */
+.task-heading > .draft-mark { vertical-align: middle; margin-left: 8px; }
+/* The key leads the heading at the size of the ⋯ menu's key that ends its line, centred on the first line. */
+.task-heading > .chip.cockpit { height: 24px; line-height: inherit; margin: calc((1lh - 24px) / 2) 10px 0 0; vertical-align: top; }
+.task-heading > .chip.cockpit > .cockpit-mark { width: 24px; height: 24px; border-radius: 4px; }
+.task-heading > .chip.cockpit > .cockpit-mark::after { width: 24px; height: 24px; }
 /* On a phone, a one-line row (the handed and closed steps, the overview's work) keeps the key alone, so its ask
    keeps its room; the tag's tooltip still names it. */
 @media (max-width: 640px) {
@@ -1533,7 +1541,7 @@ p.step-run-text { font-family: inherit; font-size: inherit; }
 .answer-words { min-width: 0; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; overflow-wrap: anywhere; }
 /* Next up's keys stand out of the card like the header's, the answers and the tail's keys alike; a closing
    answer and a confirm key use the completion colour (motion.css, CONTROL-17). */
-:is(.answers > .button:not(.closes, .confirm), .next-card > .actions .step-keys > .button:not(.primary, .accent, .on, .task-done)) {
+:is(.answers > .button:not(.closes, .confirm, .on), .next-card > .actions .step-keys > .button:not(.primary, .accent, .on, .task-done)) {
   background: var(--key);
   box-shadow: inset 0 0 0 1px var(--key-edge), inset 0 -2px 0 0 var(--key-edge);
 }
@@ -2132,6 +2140,8 @@ details.menu:not([open]) > .menu-list { display: none; }
 :is(.blocked-card, .waiting-card) .call.expanded { max-height: none; overflow: auto; cursor: pointer; }
 /* A shell command one part per line (PERM-22) shows its first four parts before the fade, on a phone too. */
 :is(.blocked-card, .waiting-card) .call:has(.sh) { --call-lines: 4; }
+/* A file change shows its path and a one-line change with the three lines on each side whole, on a phone too. */
+:is(.blocked-card, .waiting-card) .call:has(.diff-file) { --call-lines: 11; }
 .waiting-card > .call { margin: 6px 0 0 24px; }
 .sh-command { color: var(--text); font-weight: 600; }
 .sh-keyword { color: var(--sh-keyword); font-weight: 600; }
@@ -2141,6 +2151,11 @@ details.menu:not([open]) > .menu-list { display: none; }
 .sh-option { color: var(--text-2); }
 .sh-comment, .sh-heredoc { color: var(--text-3); }
 .sh-comment { font-style: italic; }
+/* A Gemini or Grok file change (SESSION-30): its path, then removed lines red and added lines green. */
+.diff-file { color: var(--text); font-weight: 600; }
+.diff-del { color: var(--fail); }
+.diff-add { color: var(--ok); }
+.diff-at { color: var(--text-3); }
 /* The rule editor: a two-part toggle (sentence first), the suggested sentences, "Write my own". */
 .rule-draft { display: flex; gap: 8px; align-items: flex-start; flex-wrap: wrap; }
 .rule-draft .field { flex: 1 1 100%; min-width: 0; }
@@ -2723,7 +2738,7 @@ body.plain h1 { font-size: var(--fs-ask); margin-bottom: 8px; }
   li:hover > .reveal, .reveal:focus-visible, li:focus-within > .reveal,
   .thumb:hover > .thumb-remove, .thumb-remove:focus-visible { opacity: 1; }
   .button:hover:not(:disabled) { background: var(--hover); }
-  :is(.answers > .button:not(.closes, .confirm), .next-card > .actions .step-keys > .button:not(.primary, .accent, .on, .task-done)):hover:not(:disabled) { background: var(--key-hover); }
+  :is(.answers > .button:not(.closes, .confirm, .on), .next-card > .actions .step-keys > .button:not(.primary, .accent, .on, .task-done)):hover:not(:disabled) { background: var(--key-hover); }
   .button.primary:hover:not(:disabled) { background: var(--accent-hover); }
   .button.ghost:hover:not(:disabled) { color: var(--text); }
   :is(.top-inner, .rail-foot) .button:not(.primary, .accent, .ghost):hover:not(:disabled) { background: var(--shield-key-hi); color: var(--shield-text); }

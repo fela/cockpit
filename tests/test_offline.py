@@ -18,7 +18,10 @@ def test_offline_identity_is_opaque_stable_and_not_a_credential(world: World) ->
     assert f'data-offline-user="{user}"' in first.text
     assert f'data-offline-until="{until}"' in first.text
     assert world.client.cookies.get(auth.SESSION_COOKIE) not in first.text
-    assert world.client.get("/api/offline/session").json() == {"user": user, "until": until}
+    session = world.client.get("/api/offline/session")
+    assert session.json() == {"user": user, "until": until}
+    assert f'<meta name="cockpit-version" content="{session.headers["x-cockpit-version"]}">' in first.text
+    assert session.headers["cache-control"] == "no-store"
 
 
 def test_agents_and_signed_out_browsers_cannot_obtain_offline_identity(world: World, anonymous: TestClient) -> None:

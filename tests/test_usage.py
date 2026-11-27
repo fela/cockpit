@@ -151,7 +151,7 @@ def test_a_broken_file_is_reported(tmp_path: Path, text: str) -> None:
 
 def test_the_state_carries_the_usage(world: World, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(machine, "read", lambda: {"level": "under"})
-    assert world.client.get("/api/state").json()["usage"] == {"accounts": [], "error": "", "codex": [], "machine": {"level": "under", "tasks_now": None}}
+    assert world.client.get("/api/state").json()["usage"] == {"accounts": [], "error": "", "codex": [], "gemini": None, "machine": {"level": "under", "tasks_now": None}}
     now = datetime.now(UTC).timestamp()
     limits = {"five_hour": {"used_percentage": 10, "resets_at": now + 3600}}
     save(world.claude_rate_limits, {"sam@example.com": record(ACCOUNT, limits, now)})

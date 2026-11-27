@@ -168,13 +168,20 @@ Antigravity the way [T3 Code](https://github.com/pingdotgg/t3code) does: without
 keys or cloud project settings from its own environment, so Antigravity uses that stored
 sign-in, and with Antigravity's automatic updates off.
 
-The new-session menu then offers them. Both run on their CLI's default model: Antigravity's
-is the one its settings choose from those the Google account offers. A session keeps the
-agent and model it started with.
+The new-session menu then offers them. Grok runs on its CLI's default model. For new Gemini
+sessions, the model picker starts on Gemini 4 Neon. Choose **Default** to let Antigravity pick the model.
+The menu also lists the models Antigravity last reported for the Google account. Cockpit
+applies a named model over ACP when the session starts and when it loads again. If the
+account lacks that model, Cockpit reports it as unavailable and leaves the prompt unsent.
+A session keeps its choice of agent and model option.
 
 Both agents ask before the tool calls their settings leave to the user. A request either one
 makes appears as a card on Cockpit, as Codex's do, with the command, files and diff the agent
-sent. Cockpit runs one agent process per model and working
+sent. A question Antigravity asks appears as a question card whose options are answer keys;
+one press answers it. Antigravity can also reply after its turn ended, when work it ran in the
+background finishes: Cockpit shows that reply as a new turn until Antigravity reports its usage,
+or until it has been quiet for 15 minutes. Each Antigravity process gets its own temporary
+folder, which goes when the process ends. Cockpit runs one agent process per model and working
 folder, so a checkout's `.env` reaches only that checkout's sessions. The session view shows
 each session's messages and each tool call's kind and status; Cockpit keeps no call title,
 input or output.

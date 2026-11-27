@@ -6,6 +6,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from cockpit import db
 from tests.conftest import SESSION_A, World
 from tests.test_api import add_item, agent_client, put_card, put_item, put_step, queue_ids, run_sql, start_timer
@@ -166,6 +168,36 @@ def test_a_sweep_s_scores_swap_places_once_it_finishes(world: World) -> None:
     assert finished.status_code == 200, finished.text
     queue, ready = queue_ids(world)
     assert quick["id"] in queue and waiting["id"] in queue and others[0]["id"] in ready
+
+
+def test_a_sweep_s_finish_swaps_places_whatever_the_gap(world: World) -> None:
+    put_item(world)
+    queued = [put_card(world, f"n{n}", ask=f"Step {n}", score=70)["step"] for n in range(4)]
+    waiting = put_card(world, "read", ask="Read the result", score=50)["step"]
+    put_card(world, "read", score=73)  # between sweeps, three points above a queued step move nothing
+    assert waiting["id"] in queue_ids(world)[1]
+    sweep = agent_client(world).post("/api/sweeps/start", json={"reorder": False}, headers=world.agent()).json()
+    put_card(world, "read", score=72)
+    finished = agent_client(world).post("/api/sweeps/finish", json={"sweep_id": sweep["id"], "summary": "Light: scores",
+                                                                     "error": ""}, headers=world.agent())
+    assert finished.status_code == 200, finished.text
+    queue, ready = queue_ids(world)
+    assert waiting["id"] in queue and len(ready) == 1 and ready[0] in {step["id"] for step in queued}
+
+
+@pytest.mark.parametrize(("summary", "error"), [("Fill: one task", ""), ("Light: scores", "the sweeper stopped")])
+def test_a_fill_or_failed_sweep_keeps_the_margin(world: World, summary: str, error: str) -> None:
+    put_item(world)
+    for n in range(4):
+        put_card(world, f"n{n}", ask=f"Step {n}", score=70)
+    waiting = put_card(world, "read", ask="Read the result", score=73)["step"]
+    sweep = agent_client(world).post("/api/sweeps/start", json={"reorder": False}, headers=world.agent()).json()
+    strong = put_card(world, "strong", ask="Strong ask", score=81)["step"]  # more than ten above: it still swaps
+    finished = agent_client(world).post("/api/sweeps/finish", json={"sweep_id": sweep["id"], "summary": summary,
+                                                                     "error": error}, headers=world.agent())
+    assert finished.status_code == 200, finished.text
+    queue, ready = queue_ids(world)
+    assert strong["id"] in queue and waiting["id"] in ready
 
 
 def test_the_migration_ends_only_the_takes_an_agent_s_return_made(tmp_path: Path) -> None:

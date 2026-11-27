@@ -1,9 +1,10 @@
 # The sweeper's procedure
 
 The sweeper decides what comes first on Cockpit. Read this file at the start of every sweep, check and pause.
-The parent `SKILL.md` applies too, including readiness, completion and step writing.
+The parent `SKILL.md` applies too, with [Writing a card](writing-a-card.md) for readiness and step writing and [Finishing](finishing.md) for completion.
 Owners prepare work, write steps and run reader checks. Check their facts against live state and leave substantive rewrites to them.
-When writing a step yourself, use the same writing and reader checks.
+When writing a step yourself, use the same writing and [reader check](writing-a-card.md#the-reader-check).
+The queue, ready-next and cache rules are in [Hand-offs and answers](handoffs.md#the-queue).
 Use only available services and connectors. Name unavailable sources in the result.
 
 ## Sweeper commands
@@ -116,7 +117,7 @@ Cockpit turns unanswered session questions into steps within about 30 seconds.
 They use `updated_by: cockpit`, need `question:<uuid>:<time>`, the session's needs and quoted last message.
 Rewrite on the same item and need, adding context, useful answers, score and reasons.
 If it belongs elsewhere, put it there with the blocked session as `session_id`. Cockpit withdraws its automatic step.
-Give any leftover session item a plain title, summary and project. Finish an empty duplicate through a finish step linking the destination.
+Give any leftover session item a plain title, summary and project. Merge an empty duplicate into the item that holds its work with `cockpit item merge`.
 For a status-only last message, dismiss the automatic question with a reason and update the summary.
 
 ### Messages and shared decisions
@@ -132,7 +133,7 @@ Use reason "question for you" and preserve user-set priority. A short answer unb
 
 ### Only what will hold
 
-Apply the parent skill's readiness rules for moving CI, active reviews, recent replies and dependent decisions.
+Apply the [Readiness](writing-a-card.md#readiness) rules for moving CI, active reviews, recent replies and dependent decisions.
 State what held work waits for in its summary. Keep it without an ordinary step until that action is ready.
 A blocking user question can still have a step. Respect the handed-step return protocol.
 
@@ -229,8 +230,8 @@ Prepare the user's actual part and record ownership correctly. Claim only source
 Before creating an item or starting or messaging a session, search keys, links, UUIDs and recent available history.
 Try source URLs, short identifiers, titles and branches. Search recent history before older transcripts.
 For identical work, keep the existing tracker and send it the user's request. Update its summary.
-Put a finish step on the duplicate, quoting the request and linking the answer or continuing work.
-Tell the duplicate's session where work moved. Deliver any awaited answer on the asking item too.
+Merge the duplicate into it with `cockpit item merge`, as [Merging duplicates](merging.md) describes.
+Tell the duplicate's session where work moved. When the joined item holds a handed step, send any awaited answer to the session holding it. Otherwise, deliver the answer on the joined item.
 For related separate work, keep both items, link them both ways and reuse the session that knows the context.
 
 Update stage, waits, links and goal links from live state. Refresh links for changed or removed goals.
@@ -247,11 +248,11 @@ Withdraw only work that is no longer ready. Restore a withdrawn step with its fu
 
 Prepare four queue places and one or two spares fully. Ask owners to finish agent work and verify readiness.
 Send task, links and this brief: "Finish the work and check it. Put the step yourself with your session UUID.
-Follow Asked to get ready in the cockpit skill. Leave score and reasons to the sweeper."
+Follow Asked to get ready in the cockpit skill's references/writing-a-card.md. Leave score and reasons to the sweeper."
 Start a session in the project's checkout only when no owner exists. Preserve active user conversations.
 
 **Prepare in two depths.** Up to four further items get a quick step from existing knowledge, in about ten minutes.
-Ask owners to use "Asked for a quick step". The body opens "Quickly prepared: <what remains unchecked>".
+Ask owners to use [Asked for a quick step](writing-a-card.md#asked-for-a-quick-step). The body opens "Quickly prepared:" and names each check it skipped.
 Cockpit gives a quick step a queue place as soon as one frees, with no separate preparation state. Ask for quick steps only where the ask stays right from what is already known, and never a quick `merge` or `approve` step. Upgrade quick steps when they enter the four places or spares, or when fewer than four fully prepared steps remain.
 Ask these owners before searching for more work. Remove the quick-preparation line after verification.
 
@@ -308,7 +309,7 @@ Group superseded or stale tickets in one cleanup item with verdicts, keeping at 
 
 ### 8. Close obsolete steps, clear failed messages and blocked calls
 
-Close vanished ordinary needs with a readable reason. Follow the parent's rules for finish steps and handed work.
+Close vanished ordinary needs with a readable reason. Follow [Finishing](finishing.md) for finish steps and [Handed a step](handoffs.md#handed-a-step) for handed work.
 After a merge, tell its owner to check deployment and continue promised follow-up.
 For failed messages: dismiss superseded deliveries. For a needed message, fix the cause and retry the unchanged original once with `cockpit message retry ID --as sweep`, whoever sent it. This preserves the sender's text and model choice. Check whether an uncertain delivery arrived before retrying it. If the retry fails, inspect the new failure before another attempt.
 Dismiss an old failure only after successful replacement or when a prepared step carries the remaining user decision.
@@ -396,10 +397,14 @@ Finish with `cockpit sweep finish ID --as sweep --summary "Reorder: what moved; 
 ## Score and reasons
 
 Score is a zero-to-100 judgment of attention deserved now. Only the sweeper sets score and reasons.
-New steps start at 50. Cockpit adds no special points; judge steps together afresh.
+New steps start at 50. Cockpit adds no special points.
+When a run scores all ready steps, first sort them into one list by which the user should do first, using the factors below.
+Give scores in the order the steps should come, with a wider gap where the choice is clearer.
+When a run scores only new steps, give each a score that fits between the scored steps around it.
 Cockpit puts a step whose `expires_at` is still ahead first in the queue and keeps it there; score it as you would with no time.
 User-taken steps follow, newest take first. Other steps follow score, ties favoring older steps.
-The strongest ready-next fills a place; more than ten points above an unprotected step can displace it.
+The strongest ready-next fills a place. When a sweep that rescored the queue finishes without an error, any higher score displaces an unprotected step;
+a fill, a failed sweep, or a step put or returned between sweeps, needs more than ten points above it.
 Returned answers compete by score. Early looks yield to ordinary waiting steps regardless of score.
 
 The user's Inbox factors replace the usual factors below. Weigh every factor that applies, by its place in their list:
@@ -425,7 +430,14 @@ Compare the minutes left with the time the steps that would stand above it are l
 Name the time in the reason, in the user's zone, such as "cache warm until 14:20, saves $0.50",
 and score the step without the factor once `warm_until` has passed.
 
-Weigh consequences, due dates within two days and assigned work. Keep nearby top scores a few points apart.
+**Snoozes and stalled time.** Each step also carries `effort`, about its whole task:
+`snoozes`, how often the user snoozed its steps (a snooze taken back with Undo is left out), and `last_snoozed_at`;
+`user_minutes`, the user's timer minutes on it; `progress`, its latest estimate; and `minutes_since_progress`,
+the user's minutes since that estimate last rose, or all their minutes when it never rose.
+`cockpit get` prints it under the step when the user snoozed or timed it.
+Weigh these as the user's Inbox factors say, and name them in a reason when they decide a score, such as "snoozed 4 times".
+
+Weigh consequences, due dates within two days and assigned work. Keep nearby top scores at least a few points apart.
 When a better task outranks work the user is doing, score it clearly higher and explain the proposed switch in its first reason.
 Let the user choose Reorder or Take it. Preserve their current place and timer.
 Owners set size and progress. Fill only missing estimates on queued or ready-next steps, counting the user's time alone.

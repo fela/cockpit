@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import logging
 import os
+import shutil
+import subprocess
 import sys
 import threading
 import time
@@ -13,7 +16,7 @@ from typing import Any
 
 import pytest
 
-from cockpit import acp_agent, config, db, parts, server, sweeper
+from cockpit import acp_agent, config, db, parts, safe_shell, server, sweeper
 from cockpit.acp_agent import PERMISSION_METHOD, AcpAgent, AcpError, Agents, agent_args, agent_env
 from tests.conftest import SESSION_A, make_session
 from tests.test_api import put_item, put_step
@@ -84,9 +87,9 @@ def test_each_agent_starts_in_acp_mode_on_its_model() -> None:
     assert agent_args("gemini", "default") == ["agy", "acp"]
     assert agent_args("grok", "default") == ["grok", "agent", "stdio"]
     assert agent_args("grok", "grok-4.6") == ["grok", "agent", "--model", "grok-4.6", "stdio"]
-    for provider, model in (("codex", "gpt-6.1-sol"), ("gemini", "pro")):
-        with pytest.raises(ValueError):
-            agent_args(provider, model)
+    assert agent_args("gemini", "gemini-3-pro") == ["agy", "acp"]
+    with pytest.raises(ValueError):
+        agent_args("codex", "gpt-6.1-sol")
 
 
 def test_antigravity_starts_on_its_own_sign_in_as_t3_code_starts_it() -> None:
@@ -109,8 +112,8 @@ def test_a_session_streams_its_turn_into_the_log(gemini: AcpAgent, tmp_path: Pat
     session = gemini.lookup(sid)
     # The words after the tool call are the turn's last message, which the session shows; the reply holds both.
     assert (session.provider, session.state, session.detail) == ("gemini", "done", "from the fake")
-    assert received(tmp_path)[0] == {"args": ["acp"],
-                                     "cwd": str(tmp_path)}
+    started = received(tmp_path)[0]
+    assert (started["args"], started["cwd"]) == (["acp"], str(tmp_path))
     log = gemini.log(sid)
     assert [part["kind"] for part in log["parts"]] == ["instruction", "says", "call", "says"]
     assert log["parts"][0]["text"] == "Say hello"  # the control-plane words Cockpit adds stay out
@@ -134,7 +137,8 @@ def test_a_permission_request_reaches_the_page_and_its_answer_the_agent(gemini: 
     [request] = gemini.requests()
     assert request["method"] == PERMISSION_METHOD and request["provider"] == "gemini"
     assert request["params"] == {"threadId": sid, "reason": "Run make test", "cwd": str(tmp_path), "command": "make test",
-                                 "paths": [], "diffs": [], "availableDecisions": ["accept", "decline", "cancel"]}
+                                 "shell": True, "paths": [], "diffs": [], "outsideSandbox": False,
+                                 "availableDecisions": ["accept", "decline", "cancel"]}
     session = gemini.lookup(sid)
     assert session.waits_on_dialog and session.needs == "Answer the Gemini request on Cockpit"
     with pytest.raises(AcpError):
@@ -163,13 +167,84 @@ def test_an_edit_request_shows_its_file_and_diff(gemini: AcpAgent, tmp_path: Pat
     wait_until(lambda: gemini.requests())
     [request] = gemini.requests()
     params = request["params"]
-    assert (params["command"], params["paths"], params["availableDecisions"]) == (
-        "", ["/work/notes.txt"], ["accept", "decline", "cancel"])
+    assert (params["command"], params["shell"], params["paths"], params["availableDecisions"]) == (
+        "", False, ["/work/notes.txt"], ["accept", "decline", "cancel"])
     assert params["diffs"] == [{"path": "/work/notes.txt",
                                 "diff": "--- /work/notes.txt\n+++ /work/notes.txt\n@@ -1 +1 @@\n-draft\n+final\n"}]
     gemini.answer(request["id"], {"decision": "accept"})
     wait_until(lambda: idle(gemini, sid))
     assert gemini.lookup(sid).detail == "You picked yes."
+
+
+def agy_edit(path: str, target: str, replacement: str, **more: str) -> dict:
+    """An Antigravity file edit as its permission request sends it."""
+    return {"kind": "edit", "title": f"File {Path(path).name}", "locations": [{"path": path}],
+            "rawInput": {"Path": path, "Replacement": replacement, "Target": target, **more},
+            "content": [{"type": "diff", "path": path, "oldText": target, "newText": replacement}]}
+
+
+def test_an_antigravity_edit_shows_its_diff_with_the_lines_around_it(tmp_path: Path) -> None:
+    notes = tmp_path / "notes.txt"
+    notes.write_text("one\ntwo\ncolour: red\nfour\n")
+    call = agy_edit(str(notes), "colour: red", "colour: blue")
+    # The diff shows everything the edit asks, so the card shows no JSON.
+    assert (acp_agent._command(call), acp_agent._reason(call, "")) == ("", "Edit notes.txt")
+    assert acp_agent._diffs(call) == [{"path": str(notes), "diff": (
+        f"--- {notes}\n+++ {notes}\n@@ -1,4 +1,4 @@\n one\n two\n-colour: red\n+colour: blue\n four\n")}]
+    # Text the file holds twice, or not at all, shows as the call sends it, each line on its own.
+    notes.write_text("colour: red\ncolour: red\n")
+    assert acp_agent._diffs(call)[0]["diff"] == f"--- {notes}\n+++ {notes}\n@@ -1 +1 @@\n-colour: red\n+colour: blue\n"
+    # A field the diff does not show keeps the whole input on the card, since Allow approves all of it.
+    extra = agy_edit(str(notes), "colour: red", "colour: blue", AllowMultiple="true")
+    assert json.loads(acp_agent._command(extra)) == extra["rawInput"]
+    # So does an input the diff does not match.
+    other = agy_edit(str(notes), "colour: red", "colour: blue")
+    other["content"][0]["newText"] = "colour: green"
+    assert json.loads(acp_agent._command(other)) == other["rawInput"]
+    # And an edit that names no text to replace.
+    blank = agy_edit(str(notes), None, "colour: blue")
+    assert json.loads(acp_agent._command(blank)) == blank["rawInput"]
+
+
+def test_an_antigravity_write_shows_what_it_overwrites(tmp_path: Path) -> None:
+    hello = tmp_path / "hello.py"
+    call = {"kind": "edit", "title": "File hello.py", "rawInput": {"Content": "print('hi')\n", "Path": str(hello)},
+            "content": [{"type": "diff", "path": str(hello), "newText": "print('hi')\n"}]}
+    assert (acp_agent._command(call), acp_agent._reason(call, "")) == ("", "Write hello.py")
+    assert acp_agent._diffs(call)[0]["diff"] == f"--- /dev/null\n+++ {hello}\n@@ -0,0 +1 @@\n+print('hi')\n"
+    hello.write_text("print('hello')\n")
+    assert acp_agent._diffs(call)[0]["diff"] == f"--- {hello}\n+++ {hello}\n@@ -1 +1 @@\n-print('hello')\n+print('hi')\n"
+    # A change of line endings alone shows.
+    hello.write_bytes(b"print('hi')\r\n")
+    assert acp_agent._diffs(call)[0]["diff"] == f"--- {hello}\n+++ {hello}\n@@ -1 +1 @@\n-print('hi')\r\n+print('hi')\n"
+    # A file it cannot read as text shows the new content alone, not as a new file.
+    hello.write_bytes(b"\xff\xfe")
+    assert acp_agent._diffs(call)[0]["diff"] == f"--- {hello}\n+++ {hello}\n@@ -0,0 +1 @@\n+print('hi')\n"
+    # Nor does Cockpit read what is not a regular file, such as a pipe, which would wait for a writer.
+    pipe = tmp_path / "pipe"
+    os.mkfifo(pipe)
+    write = {**call, "rawInput": {"Content": "x\n", "Path": str(pipe)},
+             "content": [{"type": "diff", "path": str(pipe), "newText": "x\n"}]}
+    assert acp_agent._diffs(write)[0]["diff"] == f"--- {pipe}\n+++ {pipe}\n@@ -0,0 +1 @@\n+x\n"
+    # Or a folder, and either leaves no file open.
+    opened = len(os.listdir("/proc/self/fd"))
+    assert acp_agent._whole(str(tmp_path), None, "x\n") is None
+    assert len(os.listdir("/proc/self/fd")) == opened
+    # Content that is not text keeps the whole input on the card.
+    empty = {**call, "rawInput": {"Content": None, "Path": str(hello)}, "content": [{"type": "diff", "path": str(hello)}]}
+    assert json.loads(acp_agent._command(empty)) == empty["rawInput"]
+
+
+def test_a_write_too_long_for_its_diff_keeps_its_input_on_the_card(gemini: AcpAgent, tmp_path: Path) -> None:
+    sid = start(gemini, tmp_path, "[[BIG WRITE]] the file", "default")
+    wait_until(lambda: gemini.requests())
+    [request] = gemini.requests()
+    params = request["params"]
+    assert params["reason"] == "Write big.txt"
+    assert "more characters of this diff not shown" in params["diffs"][0]["diff"]
+    assert json.loads(params["command"]) == {"Content": "x" * 30000, "Path": "/work/big.txt"}
+    gemini.answer(request["id"], {"decision": "decline"})
+    wait_until(lambda: idle(gemini, sid))
 
 
 def test_allow_never_falls_back_to_allow_always(gemini: AcpAgent, tmp_path: Path) -> None:
@@ -263,7 +338,7 @@ def test_each_folder_gets_its_own_agent_process(gemini: AcpAgent, tmp_path: Path
     b = start(gemini, second, "Say hello", "default")
     c = start(gemini, first, "Say hello", "default")
     wait_until(lambda: idle(gemini, a) and idle(gemini, b) and idle(gemini, c))
-    assert sorted(gemini._connections) == [("default", str(first)), ("default", str(second))]
+    assert sorted(gemini._connections) == [("agy acp", str(first)), ("agy acp", str(second))]
     assert [each["cwd"] for each in received(tmp_path) if "cwd" in each and "args" in each] == [str(first), str(second)]
     assert gemini._loaded[a] is gemini._loaded[c] is not gemini._loaded[b]
 
@@ -281,22 +356,39 @@ def test_concurrent_starts_wait_for_the_agent_to_initialize(gemini: AcpAgent, tm
     assert len([each for each in received(tmp_path) if "args" in each]) == 1
 
 
-def test_sessions_start_and_load_without_an_auto_mode(gemini: AcpAgent, tmp_path: Path) -> None:
+def test_sessions_start_and_load_in_auto_mode(gemini: AcpAgent, tmp_path: Path) -> None:
     sid = start(gemini, tmp_path, "Say hello", "default")
     wait_until(lambda: idle(gemini, sid))
-    gemini._connections[("default", str(tmp_path))].close()
+    gemini._connections[("agy acp", str(tmp_path))].close()
     wait_until(lambda: sid not in gemini._loaded)
     gemini.send(sid, "Say hello again", restart=False)
     wait_until(lambda: idle(gemini, sid))
-    sent = {each["method"]: each["params"] for each in received(tmp_path) if each.get("method") in ("session/new", "session/load")}
-    assert sent == {"session/new": {"cwd": str(tmp_path), "mcpServers": []},
-                    "session/load": {"sessionId": sid, "cwd": str(tmp_path), "mcpServers": []}}
+    # A loaded session starts in Antigravity's default mode again, so auto goes after the load too, before the prompt.
+    sent = [(each["method"], each["params"]) for each in received(tmp_path)
+            if each.get("method") in ("session/new", "session/load", "session/set_mode", "session/prompt")]
+    auto = ("session/set_mode", {"sessionId": sid, "modeId": "auto"})
+    assert [each[0] for each in sent] == ["session/new", "session/set_mode", "session/prompt",
+                                          "session/load", "session/set_mode", "session/prompt"]
+    assert sent[0][1] == {"cwd": str(tmp_path), "mcpServers": []}
+    assert sent[3][1] == {"sessionId": sid, "cwd": str(tmp_path), "mcpServers": []}
+    assert sent[1] == sent[4] == auto
+
+
+def test_an_agent_without_auto_mode_stays_in_its_mode_and_logs_an_error(
+        gemini: AcpAgent, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
+    monkeypatch.setenv("FAKE_ACP_NO_AUTO", "1")
+    with caplog.at_level(logging.ERROR, logger="cockpit.acp_agent"):
+        sid = start(gemini, tmp_path, "Say hello", "default")
+        wait_until(lambda: idle(gemini, sid))
+    assert gemini.lookup(sid).state == "done"
+    assert not any(each.get("method") == "session/set_mode" for each in received(tmp_path))
+    assert any("offers no auto mode" in each.getMessage() for each in caplog.records)
 
 
 def test_a_restarted_agent_loads_the_session_without_logging_its_replay(gemini: AcpAgent, tmp_path: Path) -> None:
     sid = start(gemini, tmp_path, "Say hello", "default")
     wait_until(lambda: idle(gemini, sid))
-    gemini._connections[("default", str(tmp_path))].close()
+    gemini._connections[("agy acp", str(tmp_path))].close()
     wait_until(lambda: sid not in gemini._loaded)
     gemini.send(sid, "Say hello again", restart=False)
     wait_until(lambda: idle(gemini, sid))
@@ -306,7 +398,7 @@ def test_a_restarted_agent_loads_the_session_without_logging_its_replay(gemini: 
 
 def test_an_agent_that_ends_mid_turn_fails_the_turn(gemini: AcpAgent, tmp_path: Path) -> None:
     sid = start(gemini, tmp_path, "[[WAIT]] for ever", "default")
-    gemini._connections[("default", str(tmp_path))].close()
+    gemini._connections[("agy acp", str(tmp_path))].close()
     wait_until(lambda: idle(gemini, sid))
     session = gemini.lookup(sid)
     assert session.state == "failed" and "ended" in session.detail
@@ -387,21 +479,34 @@ def test_the_setup_enables_the_acp_agents(tmp_path: Path) -> None:
         config.read_setup(write_setup(tmp_path, {"providers": ["claude", "llama"]}), parts.setup_tables())
 
 
-def test_a_message_starts_a_gemini_session_through_delivery(world, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+@pytest.mark.parametrize("model", [None, "default"])
+def test_a_message_starts_a_gemini_session_through_delivery(world, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+                                                            model: str | None) -> None:
     setup = config.setup()
     monkeypatch.setattr(config, "setup", lambda: dataclasses.replace(setup, providers=("claude", "gemini")))
+    monkeypatch.setenv("FAKE_ACP_ARGS", str(tmp_path / "args.jsonl"))
     put_agents_on_path(tmp_path / "bin", monkeypatch)
     agent = AcpAgent(world.db_path, "gemini")
     world.deliverer.codex = Agents(None, {"gemini": agent})
     world.deliverer.enabled_providers = ("claude", "gemini")
     try:
-        response = world.client.post("/api/messages", json={"text": "Say hello", "target": {
-            "new_cwd": str(world.checkout), "provider": "gemini", "model": "default"}}, headers=world.user())
+        target = {"new_cwd": str(world.checkout), "provider": "gemini"}
+        if model is not None:
+            target["model"] = model
+        response = world.client.post("/api/messages", json={"text": "Say hello", "target": target},
+                                     headers=world.user())
         assert response.status_code == 200, response.text
         sent = world.client.get(f"/api/messages/{response.json()['id']}").json()
         assert (sent["state"], sent["via"], sent["detail"]) == ("sent", "new", "started a Gemini session")
         sid = sent["session_id"]
         wait_until(lambda: idle(agent, sid))
+        calls = [each for each in received(tmp_path)
+                 if each.get("method") in ("session/set_config_option", "session/prompt")]
+        if model is None:
+            choose_model = calls.pop(0)
+            assert choose_model["method"] == "session/set_config_option"
+            assert choose_model["params"] == {"sessionId": sid, "configId": "model", "value": "gemini-4-neon"}
+        assert [each["method"] for each in calls] == ["session/prompt"]
         assert world.runner.calls == []  # no claude command ran
         log = world.client.get(f"/api/sessions/{sid}/log", headers=world.user()).json()
         assert [part["kind"] for part in log["parts"]] == ["instruction", "says", "call", "says"]
@@ -440,8 +545,9 @@ def test_a_gemini_shell_call_shows_its_command_and_keeps_it_out_of_the_log(gemin
     sid = start(gemini, tmp_path, "[[SHELL]] run the tests", "default")
     wait_until(lambda: gemini.requests())
     [request] = gemini.requests()
-    assert (request["params"]["command"], request["params"]["availableDecisions"]) == (
-        "make test TOKEN=s3cret", ["accept", "decline", "cancel"])
+    # The title is the command again, so the card says it once.
+    assert (request["params"]["command"], request["params"]["reason"], request["params"]["availableDecisions"]) == (
+        "make test TOKEN=s3cret", "", ["accept", "decline", "cancel"])
     gemini.answer(request["id"], {"decision": "accept"})
     wait_until(lambda: idle(gemini, sid))
     [call] = [part for part in gemini.log(sid)["parts"] if part["kind"] == "call"]
@@ -474,7 +580,8 @@ def test_an_answer_is_written_under_the_lock_stop_takes(gemini: AcpAgent, tmp_pa
 
 
 def test_the_sweeper_ignores_the_acp_agents_requests_and_answers() -> None:
-    assert {"gemini.requested", "gemini.answered", "grok.requested", "grok.answered"} <= set(sweeper.QUIET_KINDS)
+    assert {"gemini.requested", "gemini.answered", "gemini.auto_allowed", "grok.requested", "grok.answered",
+            "grok.auto_allowed"} <= set(sweeper.QUIET_KINDS)
 
 
 def test_a_codex_start_goes_to_codex_while_an_acp_agent_is_on(world, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -526,6 +633,796 @@ def test_the_board_shows_a_step_for_a_gemini_session(world) -> None:
     assert (row["model"], row["settings"]["provider"], row["settings"]["model"]) == ("default", "gemini", "default")
 
 
+def test_an_antigravity_shell_call_shows_its_command_line_and_summary(gemini: AcpAgent, tmp_path: Path) -> None:
+    sid = start(gemini, tmp_path, "[[NESTED]] run the tests", "default")
+    wait_until(lambda: gemini.requests())
+    [request] = gemini.requests()
+    params = request["params"]
+    # The call runs in its own folder, not the session's, so the card names that one.
+    assert (params["command"], params["reason"], params["cwd"], params["shell"], params["availableDecisions"]) == (
+        "git status && make test", "Check the tree and run the tests", "/srv/other", True,
+        ["accept", "decline", "cancel"])
+    gemini.answer(request["id"], {"decision": "accept"})
+    wait_until(lambda: idle(gemini, sid))
+    assert gemini.lookup(sid).detail == "You picked yes."
+
+
+def test_only_a_nested_command_line_unpacks() -> None:
+    def call(command: str) -> dict:
+        return {"kind": "execute", "title": "t", "rawInput": {"command": command}}
+
+    assert acp_agent._command(call('{"CommandLine": "ls", "toolSummary": "List"}')) == "ls"
+    assert acp_agent._reason(call('{"CommandLine": "ls", "toolSummary": "  "}'), "ls") == "t"
+    assert acp_agent._reason(call('{"CommandLine": "ls", "explanation": "List the folder"}'), "ls") == "List the folder"
+    # A field the card does not show keeps the whole input, since Allow approves all of it.
+    for other in ('{"Path": "/x"}', '{"CommandLine": 3}', "{not json", '{"a": 1} && ls',
+                  '{"CommandLine": "ls", "Env": {"A": "1"}}', '{"CommandLine": "ls", "Cwd": 3}'):
+        assert acp_agent._command(call(other)) == other
+
+
+def test_a_shell_call_runs_in_its_own_folder_also_when_its_input_shows_whole() -> None:
+    def call(command: str) -> dict:
+        return {"kind": "execute", "title": "t", "rawInput": {"command": command}}
+
+    assert acp_agent._cwd(call('{"CommandLine": "pwd", "Cwd": "/tmp"}'), "/home/sam") == "/tmp"
+    # An extra field keeps the whole input on the card; the folder line still names the call's own folder.
+    extra = call('{"CommandLine": "pwd", "Cwd": "/tmp", "Env": {"A": "1"}}')
+    assert acp_agent._command(extra) == extra["rawInput"]["command"]
+    assert acp_agent._cwd(extra, "/home/sam") == "/tmp"
+    for other in ('{"CommandLine": "pwd"}', '{"CommandLine": "pwd", "Cwd": 3}', '{"CommandLine": "pwd", "Cwd": ""}',
+                  '{"Cwd": "/tmp"}', "pwd", "{not json"):
+        assert acp_agent._cwd(call(other), "/home/sam") == "/home/sam"
+
+
+def test_an_antigravity_shell_call_with_its_input_at_the_top_shows_its_command_line(gemini: AcpAgent,
+                                                                                     tmp_path: Path) -> None:
+    sid = start(gemini, tmp_path, "[[FLAT]] run the tests", "default")
+    wait_until(lambda: gemini.requests())
+    [request] = gemini.requests()
+    params = request["params"]
+    assert (params["command"], params["reason"], params["cwd"], params["shell"]) == (
+        "make test", "Run the tests", str(tmp_path), True)
+    gemini.answer(request["id"], {"decision": "accept"})
+    wait_until(lambda: idle(gemini, sid))
+    assert params["outsideSandbox"] is False
+    flat = {"kind": "execute", "title": "t", "rawInput": {"CommandLine": "pwd", "Cwd": "/tmp", "Env": {"A": "1"}}}
+    # A field the card does not show keeps the whole input, as in the nested shape; the folder is still the call's.
+    assert acp_agent._command(flat) == json.dumps(flat["rawInput"])
+    assert acp_agent._cwd(flat, "/home/sam") == "/tmp"
+
+
+def test_a_shell_call_auto_mode_sends_outside_the_sandbox_says_so(gemini: AcpAgent, tmp_path: Path) -> None:
+    sid = start(gemini, tmp_path, "[[BYPASS]] clean up", "default")
+    wait_until(lambda: gemini.requests())
+    [request] = gemini.requests()
+    params = request["params"]
+    assert (params["command"], params["reason"], params["shell"], params["outsideSandbox"]) == (
+        "rm -rf /srv/old", "Delete the old folder", True, True)
+    gemini.answer(request["id"], {"decision": "decline"})
+    wait_until(lambda: idle(gemini, sid))
+    # A BypassSandbox that is not true or false keeps the whole input on the card.
+    odd = {"kind": "execute", "title": "t", "rawInput": {"CommandLine": "ls", "BypassSandbox": "yes"}}
+    assert acp_agent._command(odd) == json.dumps(odd["rawInput"])
+    assert acp_agent._outside_sandbox(odd) is False
+    # A field the card does not unpack keeps the whole input, and the card still says the call leaves the sandbox,
+    # whether the input comes flat or as JSON inside `command`.
+    extra = {"CommandLine": "make clean", "BypassSandbox": True, "Env": {"LC_ALL": "C"}}
+    for raw in (extra, {"command": json.dumps(extra)}):
+        wide = {"kind": "execute", "title": "t", "rawInput": raw}
+        assert acp_agent._nested(wide) == {}
+        assert acp_agent._outside_sandbox(wide) is True
+    assert acp_agent._outside_sandbox({"kind": "execute", "title": "t", "rawInput": {"command": "ls"}}) is False
+    no_command = {"kind": "execute", "title": "t", "rawInput": {"command": json.dumps({"BypassSandbox": True})}}
+    assert acp_agent._outside_sandbox(no_command) is False
+
+
+def test_a_shell_call_that_only_reads_runs_without_a_card(gemini: AcpAgent, tmp_path: Path, db_path: Path) -> None:
+    sid = start(gemini, tmp_path, "[[SAFE]] look around", "default")
+    wait_until(lambda: idle(gemini, sid))
+    assert gemini.requests() == []
+    assert gemini.lookup(sid).detail == "You picked yes."
+    conn = db.connect(db_path)
+    try:
+        [data] = [json.loads(row["data"]) for row in
+                  conn.execute("SELECT data FROM events WHERE kind = 'gemini.auto_allowed' ORDER BY id")]
+        asked = conn.execute("SELECT count(*) FROM events WHERE kind = 'gemini.requested'").fetchone()[0]
+    finally:
+        conn.close()
+    # The event holds no command, as a card's events do not.
+    assert (data, asked) == ({"session_id": sid, "tool": "execute"}, 0)
+
+
+@pytest.mark.parametrize("command", [
+    "cockpit get | head -n 120", "git status", "git -C /srv/x log --oneline -5", "grep -E 'a|b' src/x.py",
+    "grep -rn foo src 2>/dev/null | head", "ls -la 2>&1 | tail -5", "find . -name '*.py'", "sed -n 1,20p a.py",
+    "gh pr view 12 --json title", "git branch -a", "cd /srv && ls", "sort -nr x", "ls 1>&2", "jq .a x.json",
+    "jq .important imports.json", "grep '[ab]' x",
+])
+def test_reading_commands_are_safe(command: str) -> None:
+    assert safe_shell.safe(command, "/home/sam/dev", "/home/sam")
+
+
+@pytest.mark.parametrize("command", [
+    "", "git status && make test", "git diff --output=x", "git diff --no-index /a /b", "cat foo#bar; rm x",
+    "echo hi # ; rm -rf /", "echo x > file", "echo x >> file", "echo a 2> f", "ls &> f", "ls >&f", "cat < file",
+    "cat <(id)", "cat ~/.ssh/id_rsa", "cat .env", "sleep 1 &", "echo $HOME", "echo `id`", "echo a\nrm b",
+    "sort -o out in", "sort -uo out in", "find . -name x -exec rm {} ;", "sed -i s/a/b/ a.py", "gh pr comment 12",
+    "gh api repos/x", "git branch new", "git push", "python3 -c 1", "awk '{print}' x", "xargs rm", "rg --pre cat x",
+    "uniq a b", "git status; ", "cockpit spec get --out x", "cat \"unclosed", "A=1 ls",
+    # A quoted separator is an argument, so its options are still the part's own.
+    "sort x \";\" cat -o y", "sort --outp=x in", "uniq -c - -out", "git log --out=x", "file -C -m x",
+    "rg --hostname-bin=x foo", "rg -z foo", "jq -n env", "grep -R x .",
+    # A glob, the home folder or a hidden folder in it can reach credentials under another spelling.
+    "cat ~/.ss?/id_*", "grep -r BEGIN ~", "cd ~ && grep -r x", "cat ~/.gemini/settings.json", "cat /proc/self/environ",
+    "ls ~other", "echo {a,b}", "cd de?o && ls",
+    # A stream number apart from its redirect, or quoted, is an argument: here uniq's output file.
+    "uniq 1 >/dev/null /dev/null", "uniq x \"1\">/dev/null",
+    "jq -n -f a.jq", "jq -nL. x", "jq 'include \"a\"; .' x", "jq -n 'env.HOME'", "ls -[[:alpha:]]*",
+])
+def test_commands_that_could_write_run_or_reach_secrets_still_ask(command: str) -> None:
+    assert not safe_shell.safe(command, "/home/sam/dev", "/home/sam")
+
+
+def test_a_command_in_a_credential_folder_still_asks() -> None:
+    assert not safe_shell.safe("ls", "/home/sam/.ssh", "/home/sam")
+
+
+def test_a_link_into_a_hidden_home_folder_still_asks(tmp_path: Path) -> None:
+    (tmp_path / ".hidden").mkdir()
+    (tmp_path / ".hidden" / "token").write_text("x")
+    work = tmp_path / "work"
+    work.mkdir()
+    (work / "plain").write_text("x")
+    (work / "link").symlink_to(tmp_path / ".hidden" / "token")
+    home = str(tmp_path)
+    assert safe_shell.safe("cat plain", str(work), home)
+    assert not safe_shell.safe("cat link", str(work), home)
+    assert not safe_shell.safe("cat l*", str(work), home)
+
+
+def test_a_glob_that_matches_an_option_still_asks(tmp_path: Path) -> None:
+    (tmp_path / "--hostname-bin=x").write_text("x")
+    assert not safe_shell.safe("rg --host* foo", str(tmp_path), "/home/sam")
+
+
+def _folder_with_env(tmp_path: Path) -> str:
+    work = tmp_path / "work"
+    (work / "src").mkdir(parents=True)
+    for name in (".env", "a.txt", "b.txt", "src/x.py", "src/gateway_oauth.py"):
+        (work / name).write_text("x")
+    return str(work)
+
+
+def test_a_glob_that_uniq_could_write_through_still_asks(tmp_path: Path) -> None:
+    work = _folder_with_env(tmp_path)
+    assert safe_shell.safe("uniq a.txt", work, str(tmp_path / "home"))
+    # Bash expands it to `uniq a.txt b.txt`, which writes b.txt.
+    assert not safe_shell.safe("uniq *.txt", work, str(tmp_path / "home"))
+
+
+@pytest.mark.parametrize("command", [
+    "grep -r SECRET .", "grep --recursive SECRET", "grep -d recurse SECRET .", "grep --directories=recurse x",
+    "grep -r src", "grep -rn -A 3 foo", "grep -r -e foo", "diff -r . /tmp", "diff . src", "cd src && grep -r x ..",
+])
+def test_a_recursive_read_of_a_folder_holding_a_credential_still_asks(command: str, tmp_path: Path) -> None:
+    assert not safe_shell.safe(command, _folder_with_env(tmp_path), str(tmp_path / "home"))
+
+
+@pytest.mark.parametrize("command", [
+    "grep -rn foo src", "grep -rn -A 3 foo src", "grep -r -e foo src", "diff a.txt b.txt", "grep -r foo -- src",
+])
+def test_a_recursive_read_that_stays_clear_of_credentials_is_safe(command: str, tmp_path: Path) -> None:
+    # A source file's name, such as gateway_oauth.py, is no credential.
+    assert safe_shell.safe(command, _folder_with_env(tmp_path), str(tmp_path / "home"))
+
+
+needs_rg = pytest.mark.skipif(shutil.which("rg") is None, reason="rg is not installed")
+
+
+@needs_rg
+@pytest.mark.parametrize("command", [
+    "rg --hidden SECRET", "rg -uu SECRET", "rg -. SECRET", "rg --unrestricted --unrestricted x", "rg -l --hidden x",
+    "rg -lq. x", "rg -g '.en?' SECRET", "rg --type-add 'c:.e*' -tc SECRET", "rg --glob --count --glob '*' SECRET",
+    "rg --iglob -c --iglob '*' SECRET", "rg --hidden --path-separator x SECRET",
+])
+def test_rg_that_would_read_a_credential_still_asks(command: str, tmp_path: Path) -> None:
+    assert not safe_shell.safe(command, _folder_with_env(tmp_path), str(tmp_path / "home"))
+
+
+@needs_rg
+@pytest.mark.parametrize("command", [
+    "rg foo", "rg -n foo src", "rg -l foo", "rg -c foo src", "rg --json foo", "rg -nA3 foo", "rg -e foo -g '*.py'",
+    "rg -u foo", "rg foo *",
+])
+def test_rg_that_leaves_credentials_out_is_safe(command: str, tmp_path: Path) -> None:
+    # rg leaves hidden files such as .env out unless told otherwise; -c, -l and --json only change what it prints.
+    assert safe_shell.safe(command, _folder_with_env(tmp_path), str(tmp_path / "home"))
+
+
+@needs_rg
+def test_rg_asks_when_an_ignore_file_names_a_credential_back_in(tmp_path: Path) -> None:
+    home = str(tmp_path / "home")
+    work = _folder_with_env(tmp_path)
+    Path(work, "ignored").write_text("!.env\n")
+    assert safe_shell.safe("rg SECRET", work, home)
+    assert not safe_shell.safe("rg --ignore-file ignored SECRET", work, home)
+    subprocess.run(["git", "init", "-q", work], check=True)
+    Path(work, ".git", "info", "exclude").write_text("!.env\n")
+    assert not safe_shell.safe("rg SECRET", work, home)
+    Path(work, ".git", "info", "exclude").write_text("")
+    Path(work, ".ignore").write_text("!.env\n")
+    assert not safe_shell.safe("rg SECRET", work, home)
+
+
+@needs_rg
+def test_rg_with_a_glob_skips_an_ignored_hidden_folder(tmp_path: Path) -> None:
+    work = _folder_with_env(tmp_path)
+    Path(work, ".venv", "lib").mkdir(parents=True)
+    Path(work, ".venv", "lib", "cacert.pem").write_text("x")
+    Path(work, ".gitignore").write_text(".venv\n")
+    assert safe_shell.safe("rg -g '*.py' foo", work, str(tmp_path / "home"))
+
+
+def test_the_edit_card_shows_a_change_to_the_final_newline(tmp_path: Path) -> None:
+    notes = tmp_path / "f.txt"
+    notes.write_text("hello\n")
+    write = {"rawInput": {"Content": "hello", "Path": str(notes)},
+             "content": [{"type": "diff", "path": str(notes), "newText": "hello"}]}
+    assert acp_agent._diffs(write)[0]["diff"] == (
+        f"--- {notes}\n+++ {notes}\n@@ -1 +1 @@\n-hello\n+hello\n\\ No newline at end of file\n")
+    # Lines end at a newline alone, so a form feed inside the file gets no marker.
+    notes.write_text("a\n\x0c\nb\n")
+    assert acp_agent._diffs(agy_edit(str(notes), "b", "B"))[0]["diff"] == (
+        f"--- {notes}\n+++ {notes}\n@@ -1,3 +1,3 @@\n a\n \x0c\n-b\n+B\n")
+
+
+def test_rg_asks_when_it_is_not_installed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("PATH", str(tmp_path / "empty"))
+    assert not safe_shell.safe("rg foo", _folder_with_env(tmp_path), str(tmp_path / "home"))
+
+
+def test_a_recursive_read_below_a_link_to_a_credential_or_of_a_large_folder_still_asks(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    (home / ".ssh").mkdir(parents=True)
+    (home / ".ssh" / "key").write_text("x")
+    work = tmp_path / "work"
+    (work / "src").mkdir(parents=True)
+    (work / "src" / "keys").symlink_to(home / ".ssh")
+    assert not safe_shell.safe("grep -r foo src", str(work), str(home))
+    big = tmp_path / "big"
+    big.mkdir()
+    for index in range(safe_shell._TREE_MAX + 1):
+        (big / f"f{index}").touch()
+    assert not safe_shell.safe("grep -r foo .", str(big), str(home))
+
+
+def test_a_recursive_read_that_reaches_a_credential_another_way_still_asks(tmp_path: Path) -> None:
+    home = str(tmp_path / "home")
+    work = _folder_with_env(tmp_path)
+    # A folder given after `=`.
+    assert not safe_shell.safe("diff -r --from-file=. src", work, home)
+    # diff -r follows a link to a folder that holds a credential.
+    (tmp_path / "outside").mkdir()
+    (tmp_path / "outside" / ".env").write_text("x")
+    for side in ("left", "right"):
+        (tmp_path / "pair" / side).mkdir(parents=True)
+        (tmp_path / "pair" / side / "link").symlink_to(tmp_path / "outside")
+    assert not safe_shell.safe("diff -r left right", str(tmp_path / "pair"), home)
+    # bash's cd takes `..` off `link/..` before following the link.
+    (tmp_path / "start" / "project" / "sub").mkdir(parents=True)
+    (tmp_path / "start" / "project" / "sub" / ".env").write_text("x")
+    (tmp_path / "deep" / "elsewhere").mkdir(parents=True)
+    (tmp_path / "start" / "link").symlink_to(tmp_path / "deep" / "elsewhere")
+    assert not safe_shell.safe("cd link/../project && grep -r SECRET sub", str(tmp_path / "start"), home)
+    # A folder named like a source file is still a credential's folder.
+    (tmp_path / "named" / "credentials.py").mkdir(parents=True)
+    (tmp_path / "named" / "credentials.py" / "data").write_text("x")
+    assert not safe_shell.safe("grep -r foo .", str(tmp_path / "named"), home)
+
+
+def test_git_grep_asks_when_a_tracked_file_holds_a_credentials_name(tmp_path: Path) -> None:
+    home = str(tmp_path / "home")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "a.txt").write_text("x")
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(["git", "-C", str(repo), "add", "a.txt"], check=True)
+    assert safe_shell.safe("git grep foo", str(repo), home)
+    assert not safe_shell.safe("git grep --untracked foo", str(repo), home)
+    (repo / ".env").write_text("x")
+    subprocess.run(["git", "-C", str(repo), "add", ".env"], check=True)
+    assert not safe_shell.safe("git grep foo", str(repo), home)
+    assert not safe_shell.safe("git -C repo grep foo", str(tmp_path), home)
+
+
+def test_git_grep_from_a_subfolder_checks_the_whole_repository(tmp_path: Path) -> None:
+    home = str(tmp_path / "home")
+    repo = tmp_path / "repo"
+    (repo / "sub").mkdir(parents=True)
+    (repo / "sub" / "b.txt").write_text("x")
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(["git", "-C", str(repo), "add", "sub/b.txt"], check=True)
+    sub = str(repo / "sub")
+    assert safe_shell.safe("git grep foo ..", sub, home)
+    assert safe_shell.safe("git grep -e foo b.txt", sub, home)
+    # A word that names no file may be a revision, whose files are not listed.
+    assert not safe_shell.safe("git grep foo HEAD~1", sub, home)
+    assert not safe_shell.safe("git grep -e foo -e -- HEAD~1", sub, home)
+    # A `--` before the pattern is skipped by git, so HEAD~1 is a revision there too.
+    assert not safe_shell.safe("git grep -n -- foo HEAD~1", sub, home)
+    assert safe_shell.safe("git grep -n foo -- b.txt", sub, home)
+    (repo / ".env").write_text("x")
+    subprocess.run(["git", "-C", str(repo), "add", ".env"], check=True)
+    for command in ("git grep foo", "git grep foo ..", "git grep foo -- :/", "git grep foo -- ':(top)'"):
+        assert not safe_shell.safe(command, sub, home)
+
+
 def test_a_blank_execute_title_is_no_command() -> None:
     assert acp_agent._command({"kind": "execute", "title": "   "}) == ""
     assert acp_agent._command({"kind": "execute", "title": "ls -la"}) == "ls -la"
+
+
+def models(db_path: Path) -> list[tuple[str, str]]:
+    conn = db.connect(db_path)
+    try:
+        return db.session_models(conn, "gemini")
+    finally:
+        conn.close()
+
+
+def test_each_antigravity_process_gets_its_own_temporary_folder(gemini: AcpAgent, tmp_path: Path) -> None:
+    first, second = tmp_path / "one", tmp_path / "two"
+    first.mkdir()
+    second.mkdir()
+    for folder in (first, second):
+        sid = start(gemini, folder, "Say hello", "default")
+        wait_until(lambda: idle(gemini, sid))
+    temps = [Path(each["tmpdir"]) for each in received(tmp_path) if "args" in each]
+    assert len(set(temps)) == 2 and all(each.parent == tmp_path / "agy-tmp" and each.is_dir() for each in temps)
+    gemini._connections[("agy acp", str(first))].close()
+    wait_until(lambda: not temps[0].exists())
+    assert temps[1].is_dir()
+    gemini.mark_interrupted()  # a server start clears what a killed server left
+    assert list((tmp_path / "agy-tmp").iterdir()) == []
+
+
+def test_sessions_learn_the_google_accounts_models_and_start_on_the_chosen_one(gemini: AcpAgent, tmp_path: Path,
+                                                                               db_path: Path) -> None:
+    assert models(db_path) == [("gemini-4-neon", "Gemini 4 Neon"), ("default", "Default")]
+    with pytest.raises(AcpError, match="offers no model gemini-3-pro"):
+        start(gemini, tmp_path, "Say hello", "gemini-3-pro")
+    first = start(gemini, tmp_path, "Say hello", "default")
+    wait_until(lambda: idle(gemini, first))
+    assert models(db_path) == [("gemini-4-neon", "Gemini 4 Neon"), ("default", "Default"),
+                               ("gemini-3-pro", "Gemini 3 Pro"),
+                               ("gemini-3-flash", "Gemini 3 Flash"), ("claude-sonnet", "claude-sonnet")]
+    second = start(gemini, tmp_path, "Say hello", "gemini-3-pro")
+    wait_until(lambda: idle(gemini, second))
+    chosen = [each["params"] for each in received(tmp_path) if each.get("method") == "session/set_config_option"]
+    assert chosen == [{"sessionId": second, "configId": "model", "value": "gemini-3-pro"}]
+    # A restarted agent loads the session and puts it back on its model.
+    gemini._connections[("agy acp", str(tmp_path))].close()
+    wait_until(lambda: second not in gemini._loaded)
+    gemini.send(second, "Say hello again", restart=False)
+    wait_until(lambda: idle(gemini, second))
+    chosen = [each["params"] for each in received(tmp_path) if each.get("method") == "session/set_config_option"]
+    assert chosen[1:] == [{"sessionId": second, "configId": "model", "value": "gemini-3-pro"}]
+
+
+def test_a_model_the_google_account_no_longer_offers_is_refused(gemini: AcpAgent, tmp_path: Path,
+                                                                 db_path: Path) -> None:
+    conn = db.connect(db_path)
+    try:
+        db.kv_set(conn, db.models_key("gemini"), [["gemini-2-ultra", "Gemini 2 Ultra"]])
+    finally:
+        conn.close()
+    with pytest.raises(AcpError, match="'gemini-2-ultra' is unavailable for this Google account"):
+        start(gemini, tmp_path, "Say hello", "gemini-2-ultra")
+    assert not any(each.get("method") in ("session/set_config_option", "session/prompt") for each in received(tmp_path))
+    assert ("gemini-2-ultra", "Gemini 2 Ultra") not in models(db_path)  # the account's answer replaced the old list
+
+
+def test_a_signed_out_antigravity_says_to_sign_it_in(gemini: AcpAgent, tmp_path: Path,
+                                                     monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("FAKE_ACP_SIGNED_OUT", "1")
+    with pytest.raises(AcpError, match="Gemini is not signed in on this machine"):
+        start(gemini, tmp_path, "Say hello", "default")
+
+
+def test_an_antigravity_question_shows_as_a_question_card_and_takes_its_answer(gemini: AcpAgent, tmp_path: Path,
+                                                                             db_path: Path) -> None:
+    sid = start(gemini, tmp_path, "[[QUESTION]] pick a file", "default")
+    wait_until(lambda: gemini.requests())
+    [request] = gemini.requests()
+    assert request["method"] == acp_agent.QUESTION_METHOD
+    assert request["params"] == {"threadId": sid, "reason": "", "cwd": str(tmp_path), "questions": [{
+        "id": "interaction_q1", "header": "", "question": "Which file?", "isOther": False, "isSecret": False,
+        "options": [{"label": "notes.txt", "description": ""}, {"label": "todo.txt", "description": ""}]}]}
+    for wrong in ({"answers": {"interaction_q1": {"answers": ["readme.txt"]}}}, {"answers": {}},
+                  {"answers": {"interaction_q1": {"answers": ["a", "b"]}}}, {"decision": "accept"}):
+        with pytest.raises(AcpError):
+            gemini.answer(request["id"], wrong)
+    assert len(gemini.requests()) == 1
+    gemini.answer(request["id"], {"answers": {"interaction_q1": {"answers": ["todo.txt"]}}})  # by its label
+    wait_until(lambda: idle(gemini, sid))
+    assert gemini.lookup(sid).detail == "You picked b."
+    gemini.send(sid, "[[QUESTION]] again", restart=False)
+    wait_until(lambda: gemini.requests())
+    gemini.answer(gemini.requests()[0]["id"], {"answers": {"interaction_q1": {"answers": ["a"]}}})  # by its id
+    wait_until(lambda: idle(gemini, sid))
+    assert gemini.lookup(sid).detail == "You picked a."
+    gemini.send(sid, "[[QUESTION]] once more", restart=False)
+    wait_until(lambda: gemini.requests())
+    gemini.answer(gemini.requests()[0]["id"], {"decision": "cancel"})
+    wait_until(lambda: idle(gemini, sid))
+    assert gemini.lookup(sid).detail == "You picked cancelled."
+    conn = db.connect(db_path)
+    try:
+        answered = [json.loads(row["data"])["decision"] for row in
+                    conn.execute("SELECT data FROM events WHERE kind = 'gemini.answered' ORDER BY id")]
+    finally:
+        conn.close()
+    assert answered == ["answer", "answer", "cancel"]
+
+
+def test_a_question_whose_options_share_an_id_is_cancelled(gemini: AcpAgent, tmp_path: Path) -> None:
+    sid = start(gemini, tmp_path, "[[TWINS]] pick a file", "default")
+    wait_until(lambda: idle(gemini, sid))
+    assert gemini.requests() == [] and gemini.lookup(sid).detail == "You picked cancelled."
+
+
+def test_a_late_reply_runs_as_a_turn_until_its_usage_update(gemini: AcpAgent, tmp_path: Path) -> None:
+    sid = start(gemini, tmp_path, "[[LATER]] run it in the background", "default")
+    wait_until(lambda: idle(gemini, sid))
+    assert gemini.lookup(sid).detail == "Started it."
+    (tmp_path / "go").touch()
+    wait_until(lambda: not idle(gemini, sid))
+    time.sleep(0.2)
+    assert gemini.lookup(sid).working_now  # until the reply's usage update
+    (tmp_path / "go-end").touch()
+    wait_until(lambda: idle(gemini, sid))
+    session = gemini.lookup(sid)
+    assert (session.state, session.detail) == ("done", "It finished.")
+    assert gemini._late == {}
+
+
+def test_stop_ends_a_late_reply(gemini: AcpAgent, tmp_path: Path) -> None:
+    sid = late_reply(gemini, tmp_path)
+    gemini.stop(sid)
+    assert idle(gemini, sid) and gemini._late == {}
+    assert gemini.lookup(sid).detail == "It finished."
+    assert [each for each in received(tmp_path) if each.get("method") == "session/cancel"] != []
+
+
+def test_a_late_reply_that_goes_quiet_ends(gemini: AcpAgent, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(acp_agent, "LATE_QUIET_SECONDS", 0.3)
+    sid = start(gemini, tmp_path, "[[LATER]] run it in the background", "default")
+    wait_until(lambda: idle(gemini, sid))
+    (tmp_path / "go").touch()
+    wait_until(lambda: not idle(gemini, sid))
+    wait_until(lambda: idle(gemini, sid))
+    assert gemini.lookup(sid).detail == "It finished." and gemini._late == {}
+
+
+def test_grok_takes_no_late_reply(db_path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("FAKE_ACP_ARGS", str(tmp_path / "args.jsonl"))
+    put_agents_on_path(tmp_path / "bin", monkeypatch)
+    grok = AcpAgent(db_path, "grok")
+    try:
+        sid = start(grok, tmp_path, "[[LATER]] run it in the background", "default")
+        wait_until(lambda: idle(grok, sid))
+        (tmp_path / "go").touch()
+        time.sleep(0.3)
+        assert idle(grok, sid) and grok.lookup(sid).detail == "Started it."
+    finally:
+        for connection in grok._connections.values():
+            connection.close()
+
+
+def test_a_question_card_answers_by_the_label_it_shows(gemini: AcpAgent, tmp_path: Path) -> None:
+    sid = start(gemini, tmp_path, "[[CROSSED]] pick", "default")
+    wait_until(lambda: gemini.requests())
+    gemini.answer(gemini.requests()[0]["id"], {"answers": {"interaction_q1": {"answers": ["Open"]}}})
+    wait_until(lambda: idle(gemini, sid))
+    assert gemini.lookup(sid).detail == "You picked a."
+    gemini.send(sid, "[[NAMESAKES]] pick", restart=False)
+    wait_until(lambda: gemini.requests())
+    [request] = gemini.requests()
+    assert [each["label"] for each in request["params"]["questions"][0]["options"]] == ["notes.txt (a)", "notes.txt (b)"]
+    for wrong in ({"answers": [["notes.txt (b)"]]}, {"answers": {"interaction_q1": {"answers": "b"}}},
+                  {"answers": {"interaction_q1": ["b"]}},
+                  {"answers": {"interaction_q1": {"answers": ["notes.txt (b)"]}, "other": {"answers": []}}}):
+        with pytest.raises(AcpError):
+            gemini.answer(request["id"], wrong)
+    gemini.answer(request["id"], {"answers": {"interaction_q1": {"answers": ["notes.txt (b)"]}}})
+    wait_until(lambda: idle(gemini, sid))
+    assert gemini.lookup(sid).detail == "You picked b."
+
+
+def late_reply(gemini: AcpAgent, tmp_path: Path) -> str:
+    """A session whose late reply, "It finished.", is running."""
+    sid = start(gemini, tmp_path, "[[LATER]] run it in the background", "default")
+    wait_until(lambda: idle(gemini, sid))
+    (tmp_path / "go").touch()
+    wait_until(lambda: not idle(gemini, sid) and gemini._reply.get(sid) == ["It finished."])
+    return sid
+
+
+def turns(db_path: Path, session_id: str) -> int:
+    conn = db.connect(db_path)
+    try:
+        return conn.execute("SELECT count(*) FROM session_turns WHERE session_id = ?", (session_id,)).fetchone()[0]
+    finally:
+        conn.close()
+
+
+def test_a_usage_update_racing_stop_ends_the_late_reply_once(gemini: AcpAgent, tmp_path: Path, db_path: Path) -> None:
+    sid = late_reply(gemini, tmp_path)
+    connection = gemini._loaded[sid]
+    cancel = connection.notify
+
+    def cancel_then_usage(method: str, params: dict) -> None:
+        cancel(method, params)
+        gemini._update(connection, sid, {"sessionUpdate": "usage_update", "used": 10, "size": 1000})
+
+    connection.notify = cancel_then_usage
+    before = turns(db_path, sid)
+    gemini.stop(sid)
+    assert idle(gemini, sid) and gemini.lookup(sid).detail == "It finished."
+    assert turns(db_path, sid) == before + 1
+
+
+def test_a_late_reply_that_begins_as_stop_lets_go_ends_with_it(gemini: AcpAgent, tmp_path: Path) -> None:
+    sid = late_reply(gemini, tmp_path)
+    connection = gemini._loaded[sid]
+    interrupt = gemini.interrupt
+
+    def interrupt_then_more(session_id: str) -> None:
+        interrupt(session_id)
+        gemini._update(connection, sid, {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "More."}})
+
+    gemini.interrupt = interrupt_then_more
+    gemini.stop(sid)
+    assert idle(gemini, sid) and gemini._late == {}
+
+
+def test_a_safe_call_in_a_late_reply_starts_its_quiet_again(gemini: AcpAgent, tmp_path: Path) -> None:
+    sid = late_reply(gemini, tmp_path)
+    connection = gemini._loaded[sid]
+    late = gemini._late[sid]
+    late.last -= acp_agent.LATE_QUIET_SECONDS
+    written: list[dict] = []
+    connection.write = written.append
+    gemini._auto_allow(connection, 7, sid, {}, {"kind": "execute"}, [{"kind": "allow_once", "optionId": "yes"}])
+    assert written == [{"id": 7, "result": {"outcome": {"outcome": "selected", "optionId": "yes"}}}]
+    assert time.monotonic() - late.last < 5
+
+
+def test_a_safe_call_that_comes_as_stop_lets_go_is_cancelled(gemini: AcpAgent, tmp_path: Path) -> None:
+    sid = start(gemini, tmp_path, "hello", "default")
+    wait_until(lambda: idle(gemini, sid))
+    connection = gemini._loaded[sid]
+    written: list[dict] = []
+    interrupt = gemini.interrupt
+
+    def interrupt_then_ask(session_id: str) -> None:
+        interrupt(session_id)
+        write, connection.write = connection.write, written.append
+        try:
+            gemini._auto_allow(connection, 7, sid, {}, {"kind": "execute"}, [{"kind": "allow_once", "optionId": "yes"}])
+        finally:
+            connection.write = write
+
+    gemini.interrupt = interrupt_then_ask
+    gemini.stop(sid)
+    assert written == [{"id": 7, "result": {"outcome": {"outcome": "cancelled"}}}]
+    assert idle(gemini, sid) and gemini._late == {}
+
+
+def test_a_safe_call_while_stop_runs_is_cancelled(gemini: AcpAgent, tmp_path: Path) -> None:
+    sid = late_reply(gemini, tmp_path)
+    connection = gemini._loaded[sid]
+    written: list[dict] = []
+    connection.write = written.append
+    gemini._stopping.add(sid)
+    gemini._auto_allow(connection, 7, sid, {}, {"kind": "execute"}, [{"kind": "allow_once", "optionId": "yes"}])
+    gemini._stopping.discard(sid)
+    assert written == [{"id": 7, "result": {"outcome": {"outcome": "cancelled"}}}]
+
+
+def test_a_stop_whose_interrupt_fails_keeps_the_session_for_another_stop(gemini: AcpAgent, tmp_path: Path) -> None:
+    sid = start(gemini, tmp_path, "hello", "default")
+    wait_until(lambda: idle(gemini, sid))
+
+    def fail(session_id: str) -> None:
+        raise acp_agent.AcpError("no answer")
+
+    gemini.interrupt = fail
+    with pytest.raises(acp_agent.AcpError):
+        gemini.stop(sid)
+    assert sid in gemini._loaded and sid not in gemini._stopping
+
+
+def test_a_late_reply_ends_when_its_cancel_cannot_be_sent(gemini: AcpAgent, tmp_path: Path) -> None:
+    sid = late_reply(gemini, tmp_path)
+    connection = gemini._loaded[sid]
+
+    def broken(method: str, params: dict) -> None:
+        raise AcpError("the pipe is gone")
+
+    connection.notify = broken
+    with pytest.raises(AcpError):
+        gemini.stop(sid)
+    assert idle(gemini, sid) and gemini._active == {}
+
+
+QUESTION = {"sessionId": None, "toolCall": {"toolCallId": "interaction_q9", "title": "Keep going?"},
+            "options": [{"optionId": "yes", "name": "Yes", "kind": "allow_once"}]}
+
+
+def test_a_late_question_keeps_its_reply_open_until_answered(gemini: AcpAgent, tmp_path: Path,
+                                                            monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(acp_agent, "LATE_QUIET_SECONDS", 1.0)
+    sid = late_reply(gemini, tmp_path)
+    connection = gemini._loaded[sid]
+    gemini._permission(connection, 99, {**QUESTION, "sessionId": sid})
+    time.sleep(2.5)  # past the quiet time twice over
+    assert gemini.lookup(sid).state == "blocked" and len(gemini.requests()) == 1  # the turn waits on the card
+    gemini.answer(gemini.requests()[0]["id"], {"answers": {"interaction_q9": {"answers": ["Yes"]}}})
+    wait_until(lambda: idle(gemini, sid))
+    wait_until(lambda: any(each.get("id") == 99 for each in received(tmp_path)))
+    [reply] = [each for each in received(tmp_path) if each.get("id") == 99]
+    assert reply["result"] == {"outcome": {"outcome": "selected", "optionId": "yes"}}
+
+
+def test_a_turn_that_ends_with_a_card_open_tells_the_agent_it_is_cancelled(gemini: AcpAgent, tmp_path: Path) -> None:
+    sid = late_reply(gemini, tmp_path)
+    connection = gemini._loaded[sid]
+    gemini._permission(connection, 98, {**QUESTION, "sessionId": sid})
+    assert len(gemini.requests()) == 1
+    (tmp_path / "go-end").touch()  # the reply's usage update ends it
+    wait_until(lambda: idle(gemini, sid))
+    wait_until(lambda: gemini.requests() == [])
+    wait_until(lambda: any(each.get("id") == 98 for each in received(tmp_path)))
+    [reply] = [each for each in received(tmp_path) if each.get("id") == 98]
+    assert reply["result"] == {"outcome": {"outcome": "cancelled"}}
+
+
+def test_a_load_answer_without_models_still_sets_the_saved_model(gemini: AcpAgent) -> None:
+    sent = []
+
+    class Connection:
+        def request(self, method: str, params: dict) -> dict:
+            sent.append((method, params))
+            return {}
+
+    gemini._choose_model(Connection(), "s1", "gemini-3-pro", {}, saved=True)
+    assert sent == [("session/set_config_option", {"sessionId": "s1", "configId": "model", "value": "gemini-3-pro"})]
+
+
+def test_a_saved_model_the_agent_no_longer_lists_still_loads(gemini: AcpAgent) -> None:
+    sent = []
+
+    class Connection:
+        def request(self, method: str, params: dict) -> dict:
+            sent.append((method, params))
+            return {}
+
+    listed = {"configOptions": [{"id": "model", "type": "select",
+                                 "options": [{"value": "gemini-3.8-flash", "name": "Gemini 3.8 Flash"}]}]}
+    # A new choice of a model the account does not list is refused before it reaches the agent.
+    with pytest.raises(AcpError, match="'gemini-3.8-flash-retired' is unavailable"):
+        gemini._choose_model(Connection(), "s1", "gemini-3.8-flash-retired", listed, saved=False)
+    assert sent == []
+    # A saved session's model goes to the agent, which still takes the old id.
+    gemini._choose_model(Connection(), "s1", "gemini-3.8-flash-retired", listed, saved=True)
+    assert sent == [("session/set_config_option",
+                     {"sessionId": "s1", "configId": "model", "value": "gemini-3.8-flash-retired"})]
+
+
+def test_a_saved_session_on_an_unlisted_model_takes_its_next_message(gemini: AcpAgent, tmp_path: Path,
+                                                                     db_path: Path) -> None:
+    conn = db.connect(db_path)
+    try:
+        conn.execute("INSERT INTO acp_sessions (session_id, provider, name, cwd, model, state, updated_at)"
+                     " VALUES ('old', 'gemini', 'x', ?, 'gemini-3.8-flash-retired', 'done', ?)", (str(tmp_path), db.now_iso()))
+    finally:
+        conn.close()
+    gemini.send("old", "Say hello", restart=False)
+    wait_until(lambda: idle(gemini, "old"))
+    assert gemini.lookup("old").state == "done"
+    chosen = [each["params"] for each in received(tmp_path) if each.get("method") == "session/set_config_option"]
+    assert chosen == [{"sessionId": "old", "configId": "model", "value": "gemini-3.8-flash-retired"}]
+
+
+def test_question_labels_stay_unique_when_a_suffix_matches_another_option(gemini: AcpAgent, tmp_path: Path) -> None:
+    sid = start(gemini, tmp_path, "[[LOOKALIKES]] pick", "default")
+    wait_until(lambda: gemini.requests())
+    [request] = gemini.requests()
+    labels = [each["label"] for each in request["params"]["questions"][0]["options"]]
+    assert labels == ["File (a, 2)", "File (b)", "File (a)"]
+    gemini.answer(request["id"], {"answers": {"interaction_q1": {"answers": ["File (a)"]}}})
+    wait_until(lambda: idle(gemini, sid))
+    assert gemini.lookup(sid).detail == "You picked c."
+    gemini.send(sid, "[[LOOKALIKES]] again", restart=False)
+    wait_until(lambda: gemini.requests())
+    gemini.answer(gemini.requests()[0]["id"], {"answers": {"interaction_q1": {"answers": ["File (a, 2)"]}}})
+    wait_until(lambda: idle(gemini, sid))
+    assert gemini.lookup(sid).detail == "You picked a."
+
+
+def test_unique_labels_for_any_input() -> None:
+    for names in (["File", "File", "File (a)"], ["x", "x", "x (a)", "x (a, 2)", "x (a)"], ["a", "a", "a (a)", "a (a)"]):
+        answers = [{"value": value, "label": name} for value, name in zip("abcdefgh", names)]
+        acp_agent._unique_labels(answers)
+        labels = [each["label"] for each in answers]
+        assert len(set(labels)) == len(labels), labels
+
+
+CHUNK = {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "More."}}
+USAGE = {"sessionUpdate": "usage_update", "used": 10, "size": 1000}
+
+
+def replies(db_path: Path, session_id: str) -> list[str]:
+    conn = db.connect(db_path)
+    try:
+        return [row["reply"] for row in conn.execute(
+            "SELECT reply FROM session_turns WHERE session_id = ? ORDER BY started_at, ended_at", (session_id,))]
+    finally:
+        conn.close()
+
+
+def test_a_chunk_arriving_as_the_quiet_watch_ends_a_late_reply_is_kept(gemini: AcpAgent, tmp_path: Path,
+                                                                       db_path: Path,
+                                                                       monkeypatch: pytest.MonkeyPatch) -> None:
+    sid = late_reply(gemini, tmp_path)
+    connection = gemini._loaded[sid]
+    late = gemini._late[sid]
+    late.last -= acp_agent.LATE_QUIET_SECONDS  # quiet for the whole quiet time
+    save = gemini._save
+    arriving: list[threading.Thread] = []
+
+    def save_as_a_chunk_arrives(session_id: str, **changes: Any) -> None:
+        if changes.get("state") == "done" and not arriving:
+            # The ending turn's words are kept and its reply read: the agent's next words arrive now.
+            arriving.append(threading.Thread(target=gemini._update, args=(connection, sid, CHUNK)))
+            arriving[0].start()
+            arriving[0].join(0.5)
+        save(session_id, **changes)
+
+    monkeypatch.setattr(gemini, "_save", save_as_a_chunk_arrives)
+    gemini._late_quiet(sid, late)
+    arriving[0].join()
+    # The words came after the turn ended, so they start the next late turn.
+    assert gemini._reply.get(sid) == ["More."] and gemini._late[sid] is not late
+    gemini._update(connection, sid, USAGE)
+    assert idle(gemini, sid)
+    says = [part["text"] for part in gemini.log(sid)["parts"] if part["kind"] == "says"]
+    assert says[-2:] == ["It finished.", "More."]
+    assert replies(db_path, sid)[-2:] == ["It finished.", "More."]
+
+
+def test_a_stale_quiet_watch_leaves_a_newer_late_reply_alone(gemini: AcpAgent, tmp_path: Path) -> None:
+    sid = late_reply(gemini, tmp_path)
+    connection = gemini._loaded[sid]
+    first = gemini._late[sid]
+    gemini._update(connection, sid, USAGE)  # the first late reply ends
+    assert idle(gemini, sid)
+    gemini._update(connection, sid, CHUNK)  # a second one begins
+    second = gemini._late[sid]
+    assert second is not first
+    second.last -= acp_agent.LATE_QUIET_SECONDS
+    gemini._late_quiet(sid, first)  # the first reply's watch fires late
+    assert not idle(gemini, sid) and gemini._late[sid] is second
+    gemini._late_quiet(sid, second)
+    assert idle(gemini, sid) and gemini._late == {}
+
+
+def test_a_call_that_finishes_after_its_turn_shows_finished(gemini: AcpAgent, tmp_path: Path) -> None:
+    sid = start(gemini, tmp_path, "Say hello", "default")
+    wait_until(lambda: idle(gemini, sid))
+    connection = gemini._loaded[sid]
+    gemini._update(connection, sid, {"sessionUpdate": "tool_call_update", "toolCallId": "c2", "status": "failed"})
+    assert idle(gemini, sid)
+    [call] = [each for each in gemini.log(sid)["parts"] if each["kind"] == "call"]
+    assert call["error"] is True

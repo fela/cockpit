@@ -118,17 +118,18 @@ def test_states_are_kept_merged_prs_are_not_asked_again_and_the_page_shows_them(
     conn = db.connect(world.db_path)
     refs = [f"example-org/app#{number}" for number in range(1, github.STATE_BATCH + 3)]
     asked: list[list[str]] = []
+    backoff = github.StateBackoff()
     answers = {"example-org/app#1": "merged", "example-org/app#2": "draft"}
 
     def ask(batch: list[str]) -> github.States:
         asked.append(batch)
         return github.States(found={ref: answers.get(ref, "open") for ref in batch}, missing={})
 
-    assert github.check_states(conn, ask, refs, {}, NOW) == refs
+    assert github.check_states(conn, ask, refs, {}, NOW, backoff) == refs
     assert [len(batch) for batch in asked] == [github.STATE_BATCH, 2]
     answers["example-org/app#2"] = "open"
     asked.clear()
-    assert github.check_states(conn, ask, refs, {}, NOW) == ["example-org/app#2"]
+    assert github.check_states(conn, ask, refs, {}, NOW, backoff) == ["example-org/app#2"]
     assert "example-org/app#1" not in [ref for batch in asked for ref in batch]
     states = world.client.get("/api/state").json()["pull_states"]
     assert states["example-org/app#1"] == "merged"
@@ -139,11 +140,12 @@ def test_a_pr_github_gives_no_state_for_is_logged_and_asked_again_after_an_hour(
     conn = db.connect(world.db_path)
     failed: dict[str, datetime] = {}
     refs = ["example-org/app#1", "example-org/app#2"]
+    backoff = github.StateBackoff()
 
     def partly(batch: list[str]) -> github.States:
         return github.States(found={"example-org/app#1": "open"}, missing={"example-org/app#2": "it is an issue"})
 
-    assert github.check_states(conn, partly, refs, failed, NOW) == ["example-org/app#1"]
+    assert github.check_states(conn, partly, refs, failed, NOW, backoff) == ["example-org/app#1"]
     assert "asking GitHub the state of example-org/app#2 failed: it is an issue" in caplog.text
     asked: list[list[str]] = []
 
@@ -151,11 +153,11 @@ def test_a_pr_github_gives_no_state_for_is_logged_and_asked_again_after_an_hour(
         asked.append(batch)
         raise github.GitHubError("rate limited")
 
-    github.check_states(conn, broken, refs, failed, NOW + timedelta(minutes=59))
+    github.check_states(conn, broken, refs, failed, NOW + timedelta(minutes=59), backoff)
     assert asked == [["example-org/app#1"]]
     assert "asking GitHub the state of example-org/app#1 failed: rate limited" in caplog.text
     asked.clear()
-    github.check_states(conn, broken, refs, failed, NOW + github.RETRY_AFTER)
+    github.check_states(conn, broken, refs, failed, NOW + github.RETRY_AFTER, backoff)
     assert asked == [["example-org/app#2"]]
 
 
@@ -168,7 +170,7 @@ def test_githubs_answer_is_read_even_when_gh_exits_nonzero(monkeypatch) -> None:
             "p3": None,
             "p4": {"issueOrPullRequest": {"__typename": "PullRequest", "state": "CLOSED", "isDraft": False}},
         },
-        "errors": [{"path": ["p3"], "message": "Could not resolve to a Repository"}],
+        "errors": [{"path": ["p3"], "type": "NOT_FOUND", "message": "Could not resolve the repo gone/RATE_LIMITED"}],
     }
     queries: list[str] = []
 
@@ -183,7 +185,7 @@ def test_githubs_answer_is_read_even_when_gh_exits_nonzero(monkeypatch) -> None:
     refs = ["a/b#1", "a/b#2", "a/b#3", "gone/repo#4", "a/b#5"]
     assert github.ask_states(refs) == github.States(
         found={"a/b#1": "draft", "a/b#2": "merged", "a/b#5": "closed"},
-        missing={"a/b#3": "it is an issue", "gone/repo#4": "Could not resolve to a Repository"},
+        missing={"a/b#3": "it is an issue", "gone/repo#4": "Could not resolve the repo gone/RATE_LIMITED"},
     )
     assert len(queries) == 1
     assert 'p3: repository(owner: "gone", name: "repo") { issueOrPullRequest(number: 4)' in queries[0]
@@ -212,6 +214,7 @@ def test_a_pr_state_batch_retries_temporary_failures_once(
     refs = ["example-org/app#1", "example-org/app#2"]
     failed: dict[str, datetime] = {}
     queries: list[list[str]] = []
+    backoff = github.StateBackoff()
     pull = {"issueOrPullRequest": {"__typename": "PullRequest", "state": "OPEN", "isDraft": False}}
 
     def run(args, *, timeout, **kwargs):
@@ -230,7 +233,7 @@ def test_a_pr_state_batch_retries_temporary_failures_once(
         )
 
     monkeypatch.setattr("cockpit.github.subprocess.run", run)
-    assert github.check_states(conn, github.ask_states, refs, failed, NOW) == ([] if error else refs)
+    assert github.check_states(conn, github.ask_states, refs, failed, NOW, backoff) == ([] if error else refs)
     attempts = len(failures) + (error is None)
     assert queries == [queries[0]] * attempts
     assert "--include" in queries[0]
@@ -242,5 +245,78 @@ def test_a_pr_state_batch_retries_temporary_failures_once(
         assert failed == dict.fromkeys(refs, NOW)
         assert error in caplog.text
         assert "private-header-marker" not in caplog.text
-        assert github.check_states(conn, github.ask_states, refs, failed, NOW + timedelta(minutes=1)) == []
+        assert github.check_states(conn, github.ask_states, refs, failed, NOW + timedelta(minutes=1), backoff) == []
         assert len(queries) == attempts
+
+
+
+@pytest.mark.parametrize(("status", "body", "stderr"), [
+    (403, "{}", "gh: You have exceeded a secondary rate limit. (HTTP 403)"),
+    (200, '{"errors":[{"message":"You have exceeded a secondary rate limit"}]}', ""),
+    (200, '{"errors":[{"type":"RATE_LIMITED","message":"API rate limit exceeded"}]}', ""),
+    (429, "", ""),
+])
+def test_pr_state_throttling_pauses_all_batches_and_new_refs(
+    world: World, monkeypatch, caplog, status: int, body: str, stderr: str,
+) -> None:
+    conn = db.connect(world.db_path)
+    first = "example-org/app#1"
+    refs = [f"example-org/app#{number}" for number in range(1, github.STATE_BATCH + 3)]
+    conn.execute("INSERT INTO pull_states (ref, state, checked_at) VALUES (?, 'draft', 'earlier')", (first,))
+    failed: dict[str, datetime] = {}
+    backoff = github.StateBackoff()
+    clock = 100
+    monkeypatch.setattr(github, "monotonic", lambda: clock)
+    responses = [
+        subprocess.CompletedProcess([], 1, f"HTTP/2.0 {status}\nrEtRy-AfTeR: 90\n\n{body}", stderr),
+        subprocess.CompletedProcess([], 1, f"HTTP/2.0 {status}\n\n{body}", stderr),
+        subprocess.CompletedProcess([], 0, "HTTP/2.0 200 OK\n\n" + json.dumps({"data": {
+            "p0": {"issueOrPullRequest": {"__typename": "PullRequest", "state": "OPEN", "isDraft": False}},
+        }}), ""),
+    ]
+    queries = []
+
+    def run(args, **kwargs):
+        queries.append(args)
+        return responses.pop(0)
+
+    monkeypatch.setattr(github.subprocess, "run", run)
+
+    assert github.check_states(conn, github.ask_states, refs, failed, NOW, backoff) == []
+    assert len(queries) == 1
+    assert failed == {}
+    assert github.pull_states(conn) == {first: "draft"}
+    assert [record.levelname for record in caplog.records] == ["WARNING"]
+    assert "retrying after 90 s" in caplog.text
+
+    for clock in (160, 189):
+        assert github.check_states(conn, github.ask_states, ["new/repo#1"], failed, NOW, backoff) == []
+    assert len(queries) == 1
+
+    clock = 190
+    assert github.check_states(conn, github.ask_states, refs, failed, NOW, backoff) == []
+    assert len(queries) == 2
+    assert "retrying after 120 s" in caplog.text
+
+    clock = 309
+    assert github.check_states(conn, github.ask_states, [first], failed, NOW, backoff) == []
+    clock = 310
+    assert github.check_states(conn, github.ask_states, [first], failed, NOW, backoff) == [first]
+    assert github.pull_states(conn) == {first: "open"}
+    assert backoff.delay == github.RATE_LIMIT_DELAY
+
+
+@pytest.mark.parametrize(("headers", "wait"), [
+    ("Retry-After: 0\n", 0),
+    ("X-RateLimit-Remaining: 0\nX-RateLimit-Reset: {reset}\n", 300),
+    ("Retry-After: 90\nX-RateLimit-Remaining: 0\nX-RateLimit-Reset: {reset}\n", 300),
+])
+def test_pr_state_throttling_uses_retry_evidence_in_a_403(monkeypatch, headers: str, wait: int) -> None:
+    monkeypatch.setattr(github, "time", lambda: NOW.timestamp())
+    reset = int(NOW.timestamp()) + 300
+    monkeypatch.setattr(github.subprocess, "run", lambda args, **kwargs: subprocess.CompletedProcess(
+        args, 1, "HTTP/2.0 403 Forbidden\n" + headers.format(reset=reset) + "\n", "",
+    ))
+    with pytest.raises(github.GitHubRateLimit) as error:
+        github.ask_states(["example-org/app#1"])
+    assert error.value.retry_after == wait

@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from cockpit import spec
+from cockpit import spec, store
 from tests.conftest import World
 
 COCKPIT_SKILL = """---
@@ -35,6 +35,20 @@ description: Review a PR.
 Read the diff.
 """
 
+# A file in the cockpit skill's references/ folder, with links to the skill's other files.
+SWEEP_REFERENCE = """# Sweeps
+
+The parent [SKILL.md](../SKILL.md) applies, with [Finishing](finishing.md#done) and [Gone](missing.md).
+
+Sessions post steps.
+"""
+FINISHING_REFERENCE = """# Finishing
+
+## Done
+
+Close the item.
+"""
+
 
 def git(repo: Path, *command: str) -> str:
     return subprocess.run(["git", "-C", str(repo), *command], check=True, capture_output=True, text=True).stdout
@@ -59,6 +73,13 @@ def remote(world: World, tmp_path: Path) -> Path:
     for name, text in (("cockpit", COCKPIT_SKILL), ("example-skill", REVIEW_SKILL)):
         (seed / "skills" / name).mkdir(parents=True)
         (seed / "skills" / name / "SKILL.md").write_text(text)
+    references = seed / "skills" / "cockpit" / "references"
+    references.mkdir()
+    (references / "sweep.md").write_text(SWEEP_REFERENCE)
+    (references / "finishing.md").write_text(FINISHING_REFERENCE)
+    # Neither is a reference the page shows: a name outside the pattern, and a file that is not Markdown.
+    (references / "Notes.md").write_text("# Notes\n")
+    (references / "data.json").write_text("{}\n")
     git(seed, "add", ".")
     git(seed, "commit", "-q", "-m", "skills")
     git(seed, "push", "-q", str(remote), "skills")
@@ -187,6 +208,85 @@ def test_a_clash_on_an_oddly_named_file_or_one_deleted_upstream_leaves_the_skill
     # With the clash cleared, the next edit goes through and is pushed.
     response = world.client.post("/api/skills/cockpit/part", json=edit, headers=world.user())
     assert response.status_code == 200 and response.json()["committed"] is True, response.json()
+
+
+def test_a_skill_lists_its_references_and_each_opens_with_comments_of_its_own(world: World, remote: Path) -> None:
+    comment(world, "skill:cockpit:Cockpit:Sessions post steps.")
+    comment(world, "skill:cockpit/references/sweep.md:Sweeps:Sessions post steps.")
+    skill = world.client.get("/api/skills/cockpit").json()
+    assert skill["references"] == [{"file": "finishing.md", "unread_comments": 0}, {"file": "sweep.md", "unread_comments": 1}]
+    assert [entry["text"] for block in skill["blocks"] for entry in block["comments"]] == ["Too long"]
+    assert skill["unplaced_comments"] == []
+
+    page = world.client.get("/api/skills/cockpit/references/sweep.md").json()
+    assert page["text"] == SWEEP_REFERENCE and page["references"] == skill["references"]
+    paragraph = page["blocks"][2]
+    assert paragraph["key"] == "skill:cockpit/references/sweep.md:Sweeps:Sessions post steps."
+    assert [entry["text"] for entry in paragraph["comments"]] == ["Too long"] and page["unplaced_comments"] == []
+    # Links to the skill's other files open their pages; one to a file the skill does not have keeps its words.
+    links = page["blocks"][1]["html"]
+    assert '<a href="/skills/cockpit">SKILL.md</a>' in links
+    assert '<a href="/skills/cockpit/references/finishing.md#done">Finishing</a>' in links
+    assert "and Gone." in links and "missing.md" not in links
+    # Both comments count toward the skill in the list.
+    assert world.client.get("/api/skills").json()["skills"][0]["unread_comments"] == 2
+    assert world.client.get("/skills/cockpit/references/sweep.md").status_code == 200
+
+
+def test_skill_links_open_the_reference_pages(world: World, remote: Path, tmp_path: Path) -> None:
+    checkout = tmp_path / "skills-repo" / "skills" / "cockpit"
+    (checkout / "SKILL.md").write_text(COCKPIT_SKILL + "\nSee [Sweeps](references/sweep.md#sweeps) and [up](../cockpit/SKILL.md).\n")
+    html = world.client.get("/api/skills/cockpit").json()["blocks"][-1]["html"]
+    assert html == '<p>See <a href="/skills/cockpit/references/sweep.md#sweeps">Sweeps</a> and up.</p>\n'
+
+
+def test_user_edit_of_a_reference_is_committed_and_pushed(world: World, remote: Path, tmp_path: Path) -> None:
+    edit = {"old": "Sessions post steps.", "new": "Sessions post short steps."}
+    response = world.client.post("/api/skills/cockpit/references/sweep.md/part", json=edit, headers=world.user())
+    assert response.status_code == 200 and response.json()["committed"] is True, response.json()
+    reference = tmp_path / "skills-repo" / "skills" / "cockpit" / "references" / "sweep.md"
+    assert "Sessions post short steps." in reference.read_text()
+    assert "Sessions post steps." in (tmp_path / "skills-repo" / "skills" / "cockpit" / "SKILL.md").read_text()
+    page = world.client.get("/api/skills/cockpit/references/sweep.md").json()
+    whole = {"version": page["version"], "text": page["text"] + "\nThen stop.\n"}
+    response = world.client.put("/api/skills/cockpit/references/sweep.md", json=whole, headers=world.user())
+    assert response.status_code == 200 and response.json()["committed"] is True, response.json()
+    pushed = subprocess.run(
+        ["git", "--git-dir", str(remote), "log", "--format=%s", "skills"], check=True, capture_output=True, text=True
+    ).stdout.split("\n")
+    assert pushed[1] == "cockpit/references/sweep.md: Sam edited a paragraph under Sweeps on Cockpit"
+    assert reference.read_text().endswith("Then stop.\n")
+    assert world.client.put("/api/skills/cockpit/references/sweep.md", json=whole, headers=world.agent()).status_code == 403
+    assert world.client.post("/api/skills/cockpit/references/sweep.md/part", json=edit, headers=world.agent()).status_code == 403
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/api/skills/cockpit/references/missing.md",
+        "/api/skills/cockpit/references/Notes.md",
+        "/api/skills/cockpit/references/data.json",
+        "/api/skills/cockpit/references/sweep",
+        "/api/skills/cockpit/references/..%2FSKILL.md",
+        "/api/skills/cockpit/references/..%2F..%2Fexample-skill%2FSKILL.md",
+        "/api/skills/cockpit/references/%2E%2E",
+        "/api/skills/example-skill/references/sweep.md",
+        "/api/skills/missing/references/sweep.md",
+    ],
+)
+def test_only_a_skills_own_reference_files_open(world: World, remote: Path, path: str) -> None:
+    assert world.client.get(path).status_code == 404
+    assert world.client.post(f"{path}/part", json={"old": "x", "new": "y"}, headers=world.user()).status_code == 404
+
+
+def test_a_skill_file_outside_the_pattern_is_refused(tmp_path: Path) -> None:
+    (tmp_path / "skills" / "cockpit" / "references").mkdir(parents=True)
+    (tmp_path / "skills" / "cockpit" / "SKILL.md").write_text("# Cockpit\n")
+    (tmp_path / "skills" / "secret.md").write_text("# Secret\n")
+    for file in ("../secret.md", "references/../../secret.md", "/etc/passwd", "references/", "SKILL.md/"):
+        with pytest.raises(store.NotFound):
+            spec.skill_doc(tmp_path, "skills", "skills", "cockpit", file)
+    assert spec.skill_doc(tmp_path, "skills", "skills", "cockpit", "SKILL.md").key_prefix == "skill:cockpit:"
 
 
 def test_a_folded_description_reads_as_one_line() -> None:

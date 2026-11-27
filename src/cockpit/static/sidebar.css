@@ -77,7 +77,8 @@ body[data-briefing-unread] .rail .brand-mark::before { content: ""; position: ab
 .rail-line > #usage { display: flex; flex: 1 1 140px; flex-wrap: wrap; align-items: center; row-gap: 6px; margin: 0; background: none; box-shadow: none; }
 :root .rail-line > #usage { gap: 10px; }
 .rail-line > #usage > .fam-sep { margin: 0; }
-.rail-line > #usage > .usage { flex: 1 1 0; }
+/* Groups of lanes side by side (the hub's link and Gemini's) share the line by their lanes' spans (app.js laneUnits). */
+.rail-line > #usage > .usage { flex: var(--units, 1) 1 0; }
 
 .rail-line > #usage > .usage.caps { gap: 10px; }
 .rail-foot .fam { flex: var(--units) 1 20px; }
@@ -308,19 +309,34 @@ body[data-layout="sidebar"] .next-card > .actions {
   position: relative; margin: 12px 0 0; padding: 0; background: none; box-shadow: none;
 }
 body[data-layout="sidebar"] .next-card > .actions::before { content: none; }
-/* The reply box: the free space in the card (at least 12 px) goes above it, so it ends the card, and it holds at
-   the screen's bottom while the card runs below it. The ring of card colour round it covers the text that scrolls
-   under it. */
-body[data-layout="sidebar"] .next-card::after { content: ""; order: 1; flex: 1 0 12px; }
+/* The reply box: the free space in the card goes above it, so it ends the card, and it holds at the screen's
+   bottom while the card runs below it. A ring of page colour round it covers the text that scrolls under it, and
+   above the ring that text fades out over --fade. The free space is at least the ring and the fade, so at the
+   card's end the step's last line, often its answer keys, sits clear of both. */
+body[data-layout="sidebar"] .next-card { --ring: 12px; --fade: 12px; }
+body[data-layout="sidebar"] .next-card::after { content: ""; order: 1; flex: 1 0 calc(var(--ring) + var(--fade)); }
 body[data-layout="sidebar"] .next-card > .composer { order: 2; }
-body[data-layout="sidebar"] .next-card > .composer { --ring: 12px; position: sticky; bottom: var(--ring); z-index: 3; margin: 0; }
+body[data-layout="sidebar"] .next-card > .composer { position: sticky; bottom: var(--ring); z-index: 3; margin: 0; }
 /* On the page's colour the reply box is a plain white field in a hairline frame. */
 body[data-layout="sidebar"] :is(.next-card, .session-composer) > .composer:not(.drafted) {
   border-radius: var(--radius-sm); background: var(--surface); box-shadow: inset 0 0 0 1px var(--line);
 }
+/* The fade and the ring: page colour everywhere in this box outside the reply box itself. */
 body[data-layout="sidebar"] .next-card > .composer::before {
-  content: ""; position: absolute; inset: calc(-1 * var(--ring)); z-index: -1;
-  border: var(--ring) solid var(--bg); pointer-events: none;
+  content: ""; position: absolute; z-index: -1; pointer-events: none;
+  inset: calc(-1 * (var(--ring) + var(--fade))) calc(-1 * var(--ring)) calc(-1 * var(--ring));
+  background:
+    linear-gradient(transparent, var(--bg)) left top / 100% var(--fade),
+    linear-gradient(var(--bg), var(--bg)) left 0 top var(--fade) / 100% var(--ring),
+    linear-gradient(var(--bg), var(--bg)) left bottom / 100% var(--ring),
+    linear-gradient(var(--bg), var(--bg)) left bottom / var(--ring) 100%,
+    linear-gradient(var(--bg), var(--bg)) right bottom / var(--ring) 100%;
+  background-repeat: no-repeat;
+}
+/* The reply box's rounded corners leave small gaps inside the ring's square edge; this fills them. */
+body[data-layout="sidebar"] .next-card > .composer::after {
+  content: ""; position: absolute; inset: 0; z-index: -1; pointer-events: none;
+  border-radius: inherit; box-shadow: 0 0 0 var(--ring) var(--bg);
 }
 body[data-layout="sidebar"] .next-card > .details { margin: 12px 0; border-top: 0; }
 body[data-layout="sidebar"] .next-card > .details > .detail { border-bottom: 0; }
@@ -446,7 +462,7 @@ body[data-layout="sidebar"] .session-card > .session-log { flex: 1 0 auto; }
   .rail .sidebar { flex: none; max-height: 24vh; }
   body[data-layout="sidebar"] .layout > .primary { padding: 8px 16px; }
   body[data-layout="sidebar"] .next-card { padding: 16px 16px 8px; }
-  body[data-layout="sidebar"] .next-card > .composer { --ring: 8px; }
+  body[data-layout="sidebar"] .next-card { --ring: 8px; }
   /* The top bar's phone rules order and stretch these; in the rail's foot they keep their places. */
   .rail-line > #usage, .rail-keys > * { order: 0; }
   .rail-line > #usage { flex: 1 1 140px; margin: 0; }
@@ -616,7 +632,7 @@ body[data-layout="sidebar"] .session-card > .session-log { flex: 1 0 auto; }
 :root .resorted-pin > .reorder.warn-key > .icon { width: 16px; height: 16px; color: currentColor; }
 :root .resorted-pin > .reorder.warn-key:focus-visible { outline: 2px solid var(--warn-bright); outline-offset: 2px; }
 .warn-pin > .warn-peek {
-  position: absolute; top: 14px; right: 22px; z-index: 8; display: none;
+  position: absolute; top: calc(var(--drop) + 12px); right: 0; z-index: 8; display: none;
   width: max-content; max-width: min(320px, calc(100vw - 32px)); padding: 10px 12px;
   border-radius: var(--radius-lg); background: var(--surface-pop);
   box-shadow: var(--shadow-pop), inset 0 0 0 1px var(--fail-line);
@@ -626,27 +642,30 @@ body[data-layout="sidebar"] .session-card > .session-log { flex: 1 0 auto; }
 .warn-peek-title > .icon { flex: none; width: 14px; height: 14px; color: var(--fail); }
 .warn-peek-actions { display: flex; gap: 6px; margin-top: 8px; }
 .warn-peek-more { margin: 6px 0 0; color: var(--text-3); font-size: var(--fs-meta); }
-/* On Next up the Resorted key and these arrows line up with the card's ⋯ key. On a wide page the ⋯
-   stands 24 px inside the card and 20 px under its top edge, so the 28 px key on the edge stands 22 px in, over the
-   ⋯ and sharing its middle. Up to 1000 px the card's marks stand on its top edge, ⋯ last and 16 px inside the card,
-   with no room above them: the key takes the marks' 24 px at the row's end, its middle on theirs, and the row
-   leaves it that place, the ⋯ 20 px off it so their 44 px tap areas meet without overlapping, as the marks' do
-   (the slot is 44 px less the row's gap). Up to 640 px the card reaches 16 px past #next on each side, so the key
-   stands at #next's edge. Scrolled, the key rides 8 px under the 48 px phone bar, clear of its Add key. The small
-   card hangs from the key's lower edge, its right edge on the key's. */
-body[data-layout="sidebar"] #next > .resorted-pin { padding-right: 22px; }
+/* On Next up the Resorted key and these arrows stand beside the card's ⋯ key, at its right and its 24 px size,
+   their middles on one line. The pin is the card's own line just above its heading (app.js renderNext), so an
+   expiry banner or a context line above the heading moves the key with the ⋯. The marks' row leaves the key its
+   place at the row's end (the slot is the key's 24 px and the space before it, less the row's gap), which is the
+   card's content edge, the pin's right. --drop is the marks' middle under the heading's top; the pin's top is the
+   key middle's scrolled place less that drop, so the key stays level with the ⋯ until the heading scrolls under the
+   header, and the card's box bounds how far it rides.
+   On a wide page the marks' 5 px margin and half their 24 px make the drop, and the ⋯ stands 8 px off the key.
+   Scrolled, the key's middle rides 16 px under the header. Up to 1000 px the ⋯ stands 20 px off the key so their
+   44 px tap areas meet without overlapping, as the marks' do. Up to 640 px the marks' 3 px margin and half their
+   height make the drop. Up to 1000 px, scrolled, the key rides 8 px under the 48 px phone bar, clear of its Add
+   key. The small card hangs from the key's lower edge, its right edge on the key's. */
+body[data-layout="sidebar"] .next-card > .resorted-pin { --drop: 17px; top: calc(var(--top-h, var(--header-h)) + 16px - var(--drop)); padding-right: 0; }
+body[data-layout="sidebar"] .next-card > .resorted-pin > .reorder { width: 24px; height: 24px; transform: translateY(calc(-50% + var(--drop))); }
+body[data-layout="sidebar"] .next-card:has(> .resorted-pin) .context-marks::after { content: ""; flex: none; width: 28px; }
 @media (max-width: 1000px) {
-  body[data-layout="sidebar"] #next > .resorted-pin { top: 56px; padding-right: 16px; }
-  body[data-layout="sidebar"] #next > .resorted-pin > .reorder { width: 24px; height: 24px; transform: translateY(calc(-50% + 16px)); }
-  body[data-layout="sidebar"] #next:has(> .resorted-pin) > .next-card .context-marks::after { content: ""; flex: none; width: 40px; }
-  .warn-pin > .warn-peek { right: 16px; top: 28px; }
+  body[data-layout="sidebar"] .next-card > .resorted-pin { top: calc(72px - var(--drop)); }
+  body[data-layout="sidebar"] .next-card:has(> .resorted-pin) .context-marks::after { width: 40px; }
 }
 @media (max-width: 640px) {
   /* The marks' 44 px tap areas rise into the card's top padding (look.css), so the phone card keeps its 20 px. */
   :root body[data-layout="sidebar"] #next > .next-card { padding-top: 20px; }
-  body[data-layout="sidebar"] #next > .resorted-pin { padding-right: 0; }
-  body[data-layout="sidebar"] #next:has(> .resorted-pin) > .next-card .context-marks::after { width: 38px; }
-  .warn-pin > .warn-peek { right: 0; }
+  body[data-layout="sidebar"] .next-card > .resorted-pin { --drop: 14px; }
+  body[data-layout="sidebar"] .next-card:has(> .resorted-pin) .context-marks::after { width: 38px; }
 }
 
 /* An opened warning is a step card; its mark before the words pulses as its row does. */

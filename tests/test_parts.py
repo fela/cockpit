@@ -212,7 +212,7 @@ def test_a_part_adds_tags_to_the_usage_page(world: World) -> None:
 
 def test_the_base_app_has_only_its_own_state_fields(world: World) -> None:
     state = client(world, []).get("/api/state").json()
-    assert set(state["usage"]) == {"accounts", "error", "codex", "machine"}
+    assert set(state["usage"]) == {"accounts", "error", "codex", "gemini", "machine"}
 
 
 def test_base_install_sends_native_model_names() -> None:

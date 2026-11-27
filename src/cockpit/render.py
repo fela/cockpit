@@ -22,6 +22,7 @@ closed by `</details>`. The summary and the body are rendered as markdown.
 
 from __future__ import annotations
 
+import posixpath
 import re
 from dataclasses import dataclass
 from functools import lru_cache
@@ -58,6 +59,9 @@ MENTION = re.compile(
 )
 NUMBER = re.compile(r"\d+")
 SMALLEST_MENTION = 10
+# A relative link from one Markdown file to another, as a skill's SKILL.md links its references: a path with no
+# scheme and no leading slash, ending in .md, and an optional #anchor.
+DOC_LINK = re.compile(r"(?!/)([\w.-]+(?:/[\w.-]+)*\.md)(#[\w-]*)?")
 
 
 @dataclass(frozen=True)
@@ -70,6 +74,14 @@ class Refs:
 
 NO_REFS = Refs({}, {})
 
+
+@dataclass(frozen=True)
+class DocLinks:
+    """Where a document's relative links lead: `here` is the folder of the file the links are written in, and
+    `pages` holds each file a link can name, by its path from the same root, with the page that shows it."""
+
+    here: str
+    pages: tuple[tuple[str, str], ...]
 
 
 def _markdown() -> MarkdownIt:
@@ -90,12 +102,19 @@ _step_md = _markdown()
 _step_md.validateLink = lambda url: (  # ty: ignore[invalid-assignment]
     url.strip().lower().startswith(ALLOWED_LINK_PREFIXES) or FIGURE.fullmatch(url.strip()) is not None
 )
+# A document on the spec and skills pages: its relative links to other Markdown files are read too (`_doc_links`).
+_doc_md = _markdown()
+_doc_md.disable("image")
+_doc_md.validateLink = lambda url: (  # ty: ignore[invalid-assignment]
+    url.strip().lower().startswith(ALLOWED_LINK_PREFIXES) or DOC_LINK.fullmatch(url.strip()) is not None
+)
 
 
 def _link_open(renderer, tokens, index, options, env):  # type: ignore[no-untyped-def]
     # add_render_rule binds the rule to the renderer, so it receives it first.
-    if tokens[index].attrGet("class") == "item-ref":
-        # A mention opens its item on Cockpit's own page, in the same tab.
+    if tokens[index].attrGet("class") == "item-ref" or tokens[index].meta.get("doc"):
+        # A mention opens its item on Cockpit's own page, and a link to another file of a document opens that file's
+        # page, in the same tab.
         return renderer.renderToken(tokens, index, options, env)
     figure = FIGURE.fullmatch(str(tokens[index].attrGet("href") or ""))
     if figure:
@@ -114,6 +133,36 @@ def _source(href: str) -> str | None:
 
 _md.add_render_rule("link_open", _link_open)
 _step_md.add_render_rule("link_open", _link_open)
+_doc_md.add_render_rule("link_open", _link_open)
+
+
+def _doc_links(state: StateCore) -> None:
+    """Points each relative link at the page of the file it names; a link to a file `links` does not know keeps
+    only its words."""
+    links: DocLinks = state.env["links"]
+    pages = dict(links.pages)
+    for block in state.tokens:
+        if block.type != "inline" or not block.children:
+            continue
+        children: list[Token] = []
+        kept: list[bool] = []  # for each open link, whether it stays a link
+        for token in block.children:
+            if token.type == "link_open":
+                target = DOC_LINK.fullmatch(str(token.attrGet("href") or ""))
+                page = pages.get(posixpath.normpath(posixpath.join(links.here, target.group(1)))) if target else None
+                if target and page:
+                    token.attrSet("href", page + (target.group(2) or ""))
+                    token.meta["doc"] = True
+                kept.append(not target or page is not None)
+                if not kept[-1]:
+                    continue
+            elif token.type == "link_close" and not kept.pop():
+                continue
+            children.append(token)
+        block.children = children
+
+
+_doc_md.core.ruler.push("doc_links", _doc_links)
 
 
 def _mentions(state: StateCore) -> None:
@@ -224,7 +273,7 @@ def _cell_open(renderer, tokens, index, options, env):  # type: ignore[no-untype
     return renderer.renderToken(tokens, index, options, env)
 
 
-for _renderer in (_md, _step_md):
+for _renderer in (_md, _step_md, _doc_md):
     _renderer.add_render_rule("th_open", _cell_open)
     _renderer.add_render_rule("td_open", _cell_open)
 
@@ -354,6 +403,25 @@ def _render(text: str, md: MarkdownIt, env: dict) -> str:
         index = end + 1
     parts.append(md.render("\n".join(plain), env))
     return "".join(parts)
+
+
+def doc_html(text: str, links: DocLinks) -> str:
+    """A part of the spec or a skill as HTML: Markdown as `markdown_html` renders it, with no mentions of items, and
+    each relative link to a file `links` knows leading to that file's page."""
+    return _cached_doc_html(text, "block", links)
+
+
+def doc_inline_html(text: str, links: DocLinks) -> str:
+    """One line of the spec or a skill, such as a table cell, as `doc_html` renders it, with no paragraph wrapper."""
+    return _cached_doc_html(text, "inline", links)
+
+
+@lru_cache(maxsize=512)
+def _cached_doc_html(text: str, kind: str, links: DocLinks) -> str:
+    env = {"refs": NO_REFS, "links": links}
+    if kind == "inline":
+        return _doc_md.renderInline(text, env) if text.strip() else ""
+    return _render(text, _doc_md, env)
 
 
 def markdown_inline_html(text: str, refs: Refs) -> str:
