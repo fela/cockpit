@@ -1,11 +1,17 @@
 """Parts: features an install adds to Cockpit's public code.
 
-An install's parts live in the package `cockpit.private`, which a copy of Cockpit may lack. Its `PARTS` lists the
+The model hub is a public part (hub_part.py), on when the setup file has a [hub] table (config.HubSetup) whose key
+file exists when the server starts. Its hooks here (provider_availability, codex_weeks, model_capacity) answer as
+without a hub unless the server built the hub's part for that database (hub.reader_for), so a setup read again later
+changes nothing until a restart.
+
+An install's own parts live in the package `cockpit.private`, which a copy of Cockpit may lack. Its `PARTS` lists the
 part factories, its `SETUP_TABLES` the setup-file tables the parts read, its `create_tables` the database tables the
 parts keep, its `HIDDEN_ITEMS` the items they keep off the main page, its `COMMANDS` the commands the parts add to
-the CLI, and its `MODEL_ROUTES` any provider/model/speed aliases. `CODEX_WEEKS` reads the hub's Codex limits. `STANDING` supplies an externally supervised
-session, `PAGE_OPTIONS` its page additions, `PROCESS_LABELS` labels for the resource view, and `CALENDAR` the
-user's coming events, which a typed snooze time may name. `create_app` calls
+the CLI, and its `MODEL_ROUTES` any provider/model/speed aliases. `STANDING` supplies an externally supervised
+session, `PAGE_OPTIONS` its page additions, `PROCESS_LABELS` labels for the resource view, `ACTIVITY_CATEGORIES` its
+own categories for apps and sites (activity.py), and `CALENDAR` the user's coming events, which a typed snooze time
+may name. `create_app` calls
 each factory with a Context, and adds what the Part it gets back brings: routes, tags on pages, scripts every page
 loads first and fields of /api/state.
 """
@@ -15,6 +21,7 @@ from __future__ import annotations
 import argparse
 import importlib
 import importlib.util
+import logging
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -34,6 +41,7 @@ if TYPE_CHECKING:
     from cockpit.spend import SpendIndex
 
 PACKAGE: str = "cockpit.private"
+log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -158,11 +166,30 @@ Factory = Callable[[Context], Part]
 TableReader = Callable[[Path, Any], Any]
 
 
+def _has_hub() -> bool:
+    """Whether this install runs the hub's part: the setup file has a [hub] table, and its key file exists."""
+    from cockpit import config
+
+    hub = config.setup().hub
+    if hub is None:
+        return False
+    if not hub.key_file.is_file():
+        log.warning("the setup's [hub] key_file %s is missing, so Cockpit runs without the hub", hub.key_file)
+        return False
+    return True
+
+
 def installed() -> list[Factory]:
-    """The part factories of this install: none in a copy without the private package."""
+    """The part factories of this install: the hub's when the setup has a [hub] table whose key file exists, then the
+    private package's."""
+    public: list[Factory] = []
+    if _has_hub():
+        from cockpit import hub_part
+
+        public.append(hub_part.part)
     if importlib.util.find_spec(PACKAGE) is None:
-        return []
-    return importlib.import_module(PACKAGE).PARTS
+        return public
+    return public + importlib.import_module(PACKAGE).PARTS
 
 
 def setup_tables() -> dict[str, TableReader]:
@@ -174,8 +201,8 @@ def setup_tables() -> dict[str, TableReader]:
 
 def create_tables(conn: sqlite3.Connection) -> None:
     """Create the tables this install's parts keep in Cockpit's database that are missing, and bring older ones to
-    their current shape: db.migrate runs it after Cockpit's migrations. Nothing in a copy without the private
-    package."""
+    their current shape: db.migrate runs it after Cockpit's migrations. Nothing in a copy without the private package.
+    The hub's table is the hub's own (hub.Hub creates it), so a migration reads no setup file."""
     if importlib.util.find_spec(PACKAGE) is None:
         return
     importlib.import_module(PACKAGE).create_tables(conn)
@@ -203,28 +230,30 @@ def model_routes() -> dict[tuple[str, str, str], str]:
 
 
 def provider_availability(conn: sqlite3.Connection, now: datetime) -> dict[str, bool] | None:
-    """The install's current provider availability: None without a hub, and missing keys when unknown."""
-    if importlib.util.find_spec(PACKAGE) is None:
-        return None
-    hook = getattr(importlib.import_module(PACKAGE), "PROVIDER_AVAILABILITY", None)
-    return None if hook is None else hook(conn, now)
+    """The hub's current provider availability (hub.provider_availability): None without a hub, and missing keys when
+    unknown."""
+    from cockpit import hub
+
+    return hub.provider_availability(conn, now)
 
 
 def codex_weeks(conn: sqlite3.Connection) -> list[HubReading]:
-    """Every change the install's hub kept in its Codex accounts' weekly limits, for the Codex use of a folder on the
-    hub (codex.py): none in a copy without the private package or an install without a hub."""
-    if importlib.util.find_spec(PACKAGE) is None:
+    """Every change the hub kept in its Codex accounts' weekly limits, for the Codex use of a folder on the hub
+    (codex.py): none in an install without a hub."""
+    from cockpit import hub, hub_left
+
+    if hub.reader_for(conn) is None:
         return []
-    hook = getattr(importlib.import_module(PACKAGE), "CODEX_WEEKS", None)
-    return [] if hook is None else hook(conn)
+
+    return hub_left.codex_weeks(conn)
 
 
 def model_capacity(conn: sqlite3.Connection, now: datetime) -> dict[str, dict[str, Any]] | None:
-    """An install's saved model capacity, read without starting provider requests."""
-    if importlib.util.find_spec(PACKAGE) is None:
-        return None
-    hook = getattr(importlib.import_module(PACKAGE), "MODEL_CAPACITY", None)
-    return None if hook is None else hook(conn, now)
+    """The hub's saved model capacity (hub.model_capacity), read without starting provider requests: None without a
+    hub."""
+    from cockpit import hub
+
+    return hub.model_capacity(conn, now)
 
 
 def standing() -> Standing | None:
@@ -264,6 +293,13 @@ def process_labels() -> dict[str, str]:
     if importlib.util.find_spec(PACKAGE) is None:
         return {}
     return importlib.import_module(PACKAGE).PROCESS_LABELS
+
+
+def activity_categories() -> dict[str, str]:
+    """The install's own category for each app or site it names, over Cockpit's defaults: none in the public base."""
+    if importlib.util.find_spec(PACKAGE) is None:
+        return {}
+    return importlib.import_module(PACKAGE).ACTIVITY_CATEGORIES
 
 
 def calendar(now: datetime) -> list[Event]:

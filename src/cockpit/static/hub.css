@@ -1,0 +1,81 @@
+/* The hub's part of the Usage page (SPEC UI-85). The page's frame, its section heads and cards come from usage.css,
+   the account cards from hub-accounts.css; this file holds the hub's state line, its controls and its service. */
+
+/* The hub's state in a line, and at its end when Cockpit last read the hub, or the change on its way. */
+.spend-layout > .hub-top:not([hidden]) { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; margin-top: 8px; }
+.hub-top > section { min-width: 0; }
+.spend-layout > #hub-accounts { margin-top: 8px; }
+/* A part of the hub's fold with nothing to show takes no room. */
+.hub-fold > section:empty { display: none; }
+.hub-fold { margin-top: 0; }
+.hub-read { margin-left: auto; color: var(--text-3); font-size: var(--fs-meta); line-height: 16px; }
+.hub-read.busy { color: var(--working); }
+
+/* The line at the top: green when all is well, the trouble on a red ground otherwise. */
+.hub-status { display: flex; align-items: center; gap: 8px; margin: 0; color: var(--text-2); font-size: var(--fs-meta); line-height: 16px; overflow-wrap: anywhere; }
+.hub-status.ok .hub-lamp { background: var(--lamp-green); }
+.hub-status.trouble { padding: 8px 12px; border: 1px solid var(--fail-line); border-radius: var(--radius); background: var(--fail-bg); color: var(--fail); }
+.hub-status.trouble .hub-lamp { background: var(--lamp-red); }
+.hub-status-words { min-width: 0; }
+
+/* Add account and each card's ⋯ open their lists to the left, under their right edge. The ⋯ sits at the end of the
+   card's head and adds nothing to the head's height. */
+:is(.hub-add, .hub-more) > .menu-list { left: auto; right: 0; }
+:root .hub-add[open] > summary.button { background: var(--accent); }
+.hub-more { align-self: center; margin: 0; }
+
+.hub-account:is(.disabled, .signed_out) .hub-traffic { opacity: .55; }
+
+/* Requests in each ten minutes: one column a span, failed ones in red on top. */
+.hub-traffic { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 6px; min-width: 0; min-height: 28px; }
+/* The line under the bars is the window's whole length, so a quiet stretch reads as time without requests. */
+/* Columns share whatever width is left beside the failed count, however long the window; the space between them
+   is part of each column (2px, or a quarter of a narrow column), so the chart never pushes past its cell. */
+.hub-spans { display: flex; align-items: flex-end; min-width: 0; height: 24px; box-shadow: 0 1px var(--line-strong); }
+.hub-span { flex: 1 1 0; display: flex; flex-direction: column; justify-content: flex-end; height: 100%; min-width: 0; }
+.hub-span > * { margin-right: min(2px, 25%); }
+.hub-span-succeeded { background: var(--text-3); border-radius: 1px 1px 0 0; }
+.hub-span-failed { background: var(--lamp-red); border-radius: 1px 1px 0 0; }
+.hub-span-failed + .hub-span-succeeded { border-radius: 0; }
+.hub-fact { color: var(--text-3); font-size: var(--fs-meta); line-height: 16px; }
+.hub-traffic-failed { color: var(--fail); font-size: var(--fs-meta); line-height: 16px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.hub-keys { display: flex; gap: 8px; }
+.hub-keys > button { white-space: nowrap; }
+
+/* Signing in. */
+#hub-add-account { margin-left: auto; }
+.spend-layout > #hub-sign-ins:empty { display: none; }
+/* A sign-in card holds a code, a wide button and a typed address, so it takes at least 360px, two to a row at most. */
+.cards.hub-sign-ins { margin-top: 8px; grid-template-columns: repeat(auto-fill, minmax(min(100%, 360px), 1fr)); }
+.hub-sign-in, :root .hub-sign-in { gap: 8px; padding: 12px; }
+.hub-sign-in .codex-sign-in-note { margin: 0; }
+.hub-address { width: 100%; font-family: var(--mono); }
+
+/* The hub's service: a name and its value on each row. */
+.hub-service { display: grid; gap: 12px; margin: 0; }
+.hub-service-row { display: grid; grid-template-columns: 140px minmax(0, 1fr); align-items: baseline; gap: 4px 12px; }
+.hub-service dt { color: var(--text-2); font-size: var(--fs-meta); line-height: 16px; }
+.hub-service dd { min-width: 0; margin: 0; }
+.hub-version-new { margin-left: 8px; color: var(--text-3); font-size: var(--fs-meta); }
+.hub-routing { flex-wrap: wrap; }
+.hub-routing-about { max-width: 80ch; margin: 8px 0 0; }
+.hub-restart { display: flex; flex-wrap: wrap; gap: 8px; }
+
+/* The requests the hub answered with an error. */
+.hub-failed { width: 100%; border-collapse: collapse; font-size: var(--fs-meta); line-height: 16px; }
+.hub-failed :is(th, td) { padding: 6px 12px 6px 0; border-bottom: 1px solid var(--line-strong); text-align: left; vertical-align: top; }
+.hub-failed th { color: var(--text-3); font-weight: 500; }
+.hub-failed td { white-space: nowrap; }
+.hub-failed .hub-times { font-variant-numeric: tabular-nums; }
+.hub-failed .hub-answer { color: var(--lamp-red); font-weight: 600; font-variant-numeric: tabular-nums; }
+.hub-failed .hub-path { width: 100%; font-family: var(--mono); white-space: normal; overflow-wrap: anywhere; }
+
+/* Section headings: an emblem per section (icons.js). */
+#hub-accounts .section-head h2::before { --glyph: var(--mark-people); }
+#hub-failed .section-head h2::before { --glyph: var(--mark-radar); }
+
+@media (max-width: 640px) {
+  .hub-add > summary, .hub-add .menu-list button { min-height: 44px; }
+  .hub-read { margin-left: 0; }
+  .hub-service-row { grid-template-columns: minmax(0, 1fr); }
+}

@@ -230,8 +230,32 @@ def base_install(monkeypatch):
 
 @pytest.fixture
 def app_parts():
-    """The base app, with installation features supplied by their own tests."""
-    return []
+    """The install's parts: none in the base install, whose setup has no [hub] table and which lacks the private
+    package; tests of a part supply what turns it on."""
+    return parts.installed()
+
+
+def use_hub(monkeypatch: pytest.MonkeyPatch, hub: config.HubSetup) -> None:
+    """The setup, as read, gains this [hub] table."""
+    setup = config.setup()
+    monkeypatch.setattr(config, "setup", lambda: dataclasses.replace(setup, hub=hub))
+
+
+@pytest.fixture
+def hub_on(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """The setup has a [hub] table whose key file exists: the hub part is on and reaches no hub, until a test supplies a
+    stand-in (tests/fake_hub.py)."""
+    key_file = tmp_path / "hub" / "management-key"
+    key_file.parent.mkdir()
+    key_file.write_text("k" * 32 + "\n")
+    use_hub(monkeypatch, config.HubSetup(
+        url="http://127.0.0.1:9", key_file=key_file, sign_in={}, restarts={}, tunnel_state=None,
+    ))
+
+
+def lose_the_hub_key() -> None:
+    """The hub's key file goes missing after the server started with the hub's part: the part shows no hub."""
+    config.setup().hub.key_file.unlink()
 
 
 @pytest.fixture(autouse=True)

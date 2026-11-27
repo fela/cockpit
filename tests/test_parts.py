@@ -260,7 +260,7 @@ def test_a_part_supplies_its_tables_and_hidden_items(monkeypatch: pytest.MonkeyP
         return {row[0] for row in conn.execute("SELECT item_id FROM hidden_items")}
 
     monkeypatch.setattr(parts.importlib.util, "find_spec", lambda package: True)
-    package = SimpleNamespace(create_tables=create_tables, HIDDEN_ITEMS=hidden)
+    package = SimpleNamespace(SETUP_TABLES={}, create_tables=create_tables, HIDDEN_ITEMS=hidden)
     monkeypatch.setattr(parts.importlib, "import_module", lambda name: package)
     conn = sqlite3.connect(":memory:")
     try:

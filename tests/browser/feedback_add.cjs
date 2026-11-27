@@ -59,8 +59,9 @@ async function main() {
       if (width < 640) await page.evaluate(() => setPhoneScreen(true, false));
       await page.locator("#sidebar .side-row").first().waitFor({ timeout: 30e3 });
 
-      // Reload leads these keys only while a newer Cockpit runs (UI-13).
-      const keys = await page.evaluate(() => [...document.querySelector(".rail-actions").children].filter((el) => !el.hidden).map((el) => {
+      // Reload leads these keys only while a newer Cockpit runs (UI-13); the offline note's key takes no room until a
+      // lasting state lights it (UI-91).
+      const keys = await page.evaluate(() => [...document.querySelector(".rail-actions").children].filter((el) => el.getBoundingClientRect().width > 0 && getComputedStyle(el).visibility === "visible").map((el) => {
         const box = el.getBoundingClientRect();
         return { id: el.id || el.className, w: Math.round(box.width), h: Math.round(box.height), icon: el.querySelector("svg")?.getAttribute("class") };
       }));
@@ -125,6 +126,28 @@ async function main() {
       await sleep(200);
       check(`${width} px: opened with A, Escape gives + the focus back`,
         await page.evaluate(() => document.activeElement?.classList.contains("sidebar-add")), await page.evaluate(() => document.activeElement?.outerHTML.slice(0, 80)));
+
+      // The phone's item screen bar holds Feedback right before +, and Feedback starts the pick.
+      if (width < 640) {
+        await page.evaluate(() => setPhoneScreen(false, false));
+        await page.locator(".phone-bar .phone-feedback").waitFor();
+        const bar = await page.evaluate(() => [...document.querySelector(".phone-bar").children].filter((el) => el.getBoundingClientRect().width > 0 && getComputedStyle(el).visibility === "visible").map((el) => {
+          const box = el.getBoundingClientRect();
+          return { key: el.className, w: Math.round(box.width), h: Math.round(box.height), icon: el.querySelector("svg")?.getAttribute("class") };
+        }));
+        const at = bar.findIndex((key) => key.key.includes("phone-feedback"));
+        check(`${width} px item screen: the bar ends with Feedback, then +, the same size`,
+          at >= 0 && at === bar.length - 2 && bar[at + 1].key.includes("phone-add") && bar[at].icon === "icon icon-pick"
+          && bar[at].w === bar[at + 1].w && bar[at].h === bar[at + 1].h, JSON.stringify(bar));
+        await page.locator(".phone-bar .phone-feedback").click();
+        const lit = await page.evaluate(() => ({ picking: ui.picking, lit: document.querySelector(".phone-bar .phone-feedback").classList.contains("on") }));
+        check(`${width} px item screen: Feedback starts picking and lights up`, lit.picking === "add" && lit.lit, JSON.stringify(lit));
+        await page.locator(".phone-bar").screenshot({ path: path.join(work, `phone-bar-picking-${width}.png`) });
+        await page.keyboard.press("Escape");
+        await sleep(200);
+        const unlit = await page.evaluate(() => ({ picking: ui.picking, lit: document.querySelector(".phone-bar .phone-feedback").classList.contains("on") }));
+        check(`${width} px item screen: Escape ends the pick and the light`, !unlit.picking && !unlit.lit, JSON.stringify(unlit));
+      }
       check(`${width} px: no page errors`, errors.length === 0, errors.join(" | "));
       await context.close();
     }

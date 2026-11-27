@@ -1,0 +1,23 @@
+/* The hub's limits are a link to the Usage page: it looks like the lanes it holds, and lights up under the pointer. */
+a.usage.caps { cursor: pointer; text-decoration: none; }
+a.usage.caps:hover { background: var(--shield-hover); box-shadow: 0 0 0 4px var(--shield-hover); }
+.hub-fail { display: inline-flex; flex: none; color: var(--lamp-red); }
+/* The hub's limits (hub-foot.js hubCard): each limit's mark and name on a heading line of their own, then one line per
+   account under it with its short name, its bar, the share used and how long until it resets, under two small column
+   heads. Each limit after the first stands a little apart from the one above. */
+.hub-card { gap: 10px; }
+.hc-rows { display: grid; grid-template-columns: 16px auto 72px auto auto; align-items: center; column-gap: 10px; row-gap: 5px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.hc-mark { grid-column: 1; display: flex; }
+.hc-name { grid-column: 2 / span 2; font-weight: 600; }
+.hc-group { margin-top: 9px; }
+.hc-account { grid-column: 2; max-width: 155px; color: var(--toast-text); overflow: hidden; text-overflow: ellipsis; }
+.hc-head { color: var(--uc-dim); font-size: 11px; line-height: 12px; text-align: right; }
+.hc-head-used { grid-column: 4; }
+.hc-rows .fam-mark:not(.claude) { color: var(--toast-text); }
+.hc-used { color: var(--pace); font-weight: 600; text-align: right; }
+.hc-resets { text-align: right; }
+.hc-none { grid-column: 4 / -1; color: var(--uc-dim); text-align: right; }
+
+.hub-card .hc-used.under { --pace: oklch(0.76 0.14 150); }
+.hub-card .hc-used.near { --pace: oklch(0.76 0.16 60); }
+.hub-card .hc-used:is(.over, .full) { --pace: oklch(0.72 0.16 25); }

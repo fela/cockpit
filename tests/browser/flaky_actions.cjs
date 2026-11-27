@@ -22,6 +22,7 @@
 
 "use strict";
 
+const assert = require("node:assert/strict");
 const { spawn, spawnSync } = require("node:child_process");
 const fs = require("node:fs");
 const path = require("node:path");
@@ -58,6 +59,7 @@ async function main() {
 
     // The fixture database's open steps are snoozed, so this run's steps take the user's places.
     const initial = await user("GET", "/api/state");
+    if (initial.timer) await user("POST", `/api/steps/${initial.timer.step_id}/timer/pause`);
     await Promise.all([...initial.queue, ...initial.ready_next, ...initial.snoozed].map((step) => user("POST", `/api/steps/${step.id}/snooze`, { until: "2099-01-01T08:00:00Z" })));
     const run = Date.now();
     const steps = {};
@@ -74,17 +76,20 @@ async function main() {
 
     browser = await chromium.launch({ executablePath: CHROMIUM });
     const context = await browser.newContext({ viewport: { width: 390, height: 844 } });
-    await context.setExtraHTTPHeaders({ cookie: `${info.name}=${info.value}` });
+    await context.addCookies([{ name: info.name, value: info.value, url: info.origin.replace("http:", "https:"), secure: true }]);
     await context.addInitScript(() => {
       window.__toasts = [];
       addEventListener("DOMContentLoaded", () => {
+        // An automatic timer start can ask the user to stay even after the outbox has safely saved the reply.
+        window.startOpened = () => {};
         const el = document.getElementById("toast");
         new MutationObserver(() => { if (!el.hidden) window.__toasts.push(el.textContent); }).observe(el, { childList: true, subtree: true, attributes: true });
       });
     });
     const page = await context.newPage();
     page.setDefaultTimeout(5000);
-    await page.goto(`${info.origin}/`);
+    page.setDefaultNavigationTimeout(30000);
+    await page.goto(`${info.origin}/`, { waitUntil: "domcontentloaded" });
     const card = (id) => page.locator(`#next [data-step="${id}"]`).first();
     // Puts the step on the card, unless it is there already: its item picked in the list at the left, which holds a
     // queued step's place (NEXT-16).
@@ -95,16 +100,26 @@ async function main() {
     };
     const press = async (id, text) => {
       await show(page, id);
-      await card(id).locator(".answers .answer", { hasText: text }).click();
+      // An answer redraws Next up. The checks below wait for what the page and server do after the click.
+      await card(id).locator(".answers .answer", { hasText: text }).click({ noWaitAfter: true });
     };
-    const unsent = () => page.locator("#unsent").evaluate((el) => (el.hidden ? "" : el.textContent));
+    const unsent = () => page.evaluate(() => document.querySelector("#unsent:not([hidden])")?.textContent || "");
     // Whether the note reads `text` within 25 s: it shows 15 s after the press, and a loaded machine makes tries late.
     const unsentReads = async (text) => {
-      for (const end = Date.now() + 25000; Date.now() < end; await sleep(200)) if ((await unsent()) === text) return true;
-      return false;
+      try {
+        await page.waitForFunction((text) => document.querySelector("#unsent:not([hidden])")?.textContent === text, text, { timeout: 25000 });
+        return true;
+      } catch (error) {
+        if (error.name !== "TimeoutError") throw error;
+        return false;
+      }
     };
     const dialogs = [];
-    page.on("dialog", (dialog) => { dialogs.push(dialog.type()); dialog.dismiss(); });
+    page.on("dialog", (dialog) => {
+      dialogs.push(dialog.type());
+      // Let a reload finish so the assertion can report any prompt that shouldn't have appeared.
+      return dialog.type() === "beforeunload" ? dialog.accept() : dialog.dismiss();
+    });
     const failures = async () => (await page.evaluate(() => window.__toasts.slice())).filter((text) => /Not sent|Failed to fetch/.test(text));
     const handOffs = [];
     page.on("request", (request) => { if (/\/hand-off$/.test(request.url())) handOffs.push(request.headers()["x-cockpit-action"]); });
@@ -118,10 +133,10 @@ async function main() {
     // 1. Offline: the press shows at once, waits, and goes once the connection is back.
     // The user picked the step while online, which holds its place (NEXT-16). Offline the answer waits to send, and
     // so does the hold of the step shown in its place (holdFollowing).
-    await page.locator("#sidebar li[data-item]").first().waitFor({ state: "attached" });
-    const holding = page.waitForResponse((response) => response.url().endsWith(`/api/steps/${steps.offline}/hold`));
+    await page.waitForFunction((id) => ui.state?.queue.some((step) => step.id === id) && ui.order.includes(id), steps.offline, { timeout: 30000 });
     await page.evaluate((item) => showInSidebar(item), items[steps.offline]);
-    await holding;
+    assert.ok(await until(() => readOne(work, "SELECT held_at IS NOT NULL FROM steps WHERE id = ?", steps.offline) === "1", 30e3),
+      "Cockpit did not hold the step before the test went offline");
     await card(steps.offline).waitFor();
     await context.setOffline(true);
     await press(steps.offline, "Go ahead offline");
@@ -227,8 +242,7 @@ async function main() {
     });
     await reply(steps.reload, "Words from before the reload", false);
     check("a reply on its way is kept in the browser", await until(async () => (await kept()) === 1, 5e3), `${await kept()} kept`);
-    await page.reload();
-    check("the reload asks nothing", dialogs.length === 0, dialogs.join(", "));
+    await page.reload({ waitUntil: "domcontentloaded" });
     check("the reloaded page shows the reply waiting to send", await unsentReads("1 waiting to send"), `the header says "${await unsent()}"`);
     check("nothing reaches Cockpit while it is out of reach", messagesFor(work, steps.reload) === 0, `${messagesFor(work, steps.reload)} messages`);
     reach = "up";
@@ -240,7 +254,8 @@ async function main() {
     reach = "down";
     await reply(steps.refused, "Words that come back", true);
     await until(async () => (await kept()) === 1, 5e3);
-    await page.reload();
+    await page.reload({ waitUntil: "domcontentloaded" });
+    check("reloading either saved reply asks nothing", dialogs.length === 0, dialogs.join(", "));
     reach = "refusing";
     const back = await until(async () => (await draft(steps.refused)) === "Words that come back", 30e3);
     check("a refused reply from the page before puts its words back in the box", back, `the box holds "${await draft(steps.refused)}"`);
@@ -258,17 +273,13 @@ async function main() {
 
     // 8. A reply waits in this tab while a second tab opens: the second leaves it to this one, and sends it once
     // this tab is closed (the second tab looks every minute).
-    // No timer runs while the second tab goes without input: a running one would veil that tab after a minute and ask
-    // about the time away after two (TRACK-5), over the reply box section 9 clicks.
-    const timed = await user("GET", "/api/state");
-    if (timed.timer) await user("POST", `/api/steps/${timed.timer.step_id}/timer/pause`);
     reach = "down";
     await reply(steps.closed, "Words from a closed tab", false);
     await until(async () => (await kept()) === 1, 5e3);
     const owner = () => page.evaluate(() => Object.entries(localStorage).find(([key]) => key.startsWith("cockpit.outbox."))?.[1]);
     const first = JSON.parse(await owner()).page;
     const other = await context.newPage();
-    await other.goto(`${info.origin}/`);
+    await other.goto(`${info.origin}/`, { waitUntil: "domcontentloaded" });
     await sleep(3000);
     check("a second tab leaves the first tab's reply alone", JSON.parse(await owner()).page === first && messagesFor(work, steps.closed) === 0,
       `${messagesFor(work, steps.closed)} messages`);
@@ -285,7 +296,7 @@ async function main() {
     await box.click();
     await other.keyboard.type("still typing ");
     const third = await context.newPage();
-    await third.goto(`${info.origin}/`);
+    await third.goto(`${info.origin}/`, { waitUntil: "domcontentloaded" });
     // Another tab sees a page's writes a moment later: the third tab puts words back once it sees the box's latest text.
     const putBack = async (text) => {
       const latest = await box.inputValue();

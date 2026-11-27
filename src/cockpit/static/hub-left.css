@@ -1,0 +1,98 @@
+/* The allowance left (SPEC UI-87, hub-left.js): a row for each provider's week, its name, share and next event at
+   the left and its plot beside them, every plot from seven days back to seven days ahead on the one time scale under
+   the rows. The line so far is solid over a wash; ahead, the dashed line says what is left when nothing more is used
+   and the dotted one what is left at the recent pace. Lines and dots wear --left-ink, the provider's colour; words
+   wear the text's. A plot has no scale of its own: its top edge is the whole allowance and its bottom edge none. */
+#hub-left .section-head h2::before, #spend-left .section-head h2::before { --glyph: var(--mark-clock); }
+.hub-left { --left-label: 232px;--left-gap: 24px; --left-row: 64px; --left-between: 20px; }
+/* Claude's rows are orange, Fable's week a darker orange than the week all models share, and Codex's row grey. The
+   two oranges stay apart by lightness and the grey by having no hue, in light and dark. */
+.left-row { --left-ink: oklch(0.6 0.008 70); }
+.left-row.claude { --left-ink: oklch(0.69 0.16 52); }
+.left-row.claude.fable { --left-ink: oklch(0.5 0.14 40); }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .left-row { --left-ink: oklch(0.64 0.006 70); }
+  :root:not([data-theme="light"]) .left-row.claude { --left-ink: oklch(0.77 0.15 58); }
+  :root:not([data-theme="light"]) .left-row.claude.fable { --left-ink: oklch(0.6 0.15 42); }
+}
+
+/* The legend stands in the heading's line, in the text's colour: the rows' colours say whose line it is. */
+.left-legend { --left-ink: var(--text-3); display: inline-flex; flex-wrap: wrap; gap: 2px 16px; }
+.left-key { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+.left-sample { flex-shrink: 0; width: 24px; height: 4px; overflow: visible; }
+
+.left-rows { position: relative; display: grid; row-gap: var(--left-between); cursor: crosshair; touch-action: pan-y; }
+.left-rows:focus-visible { outline-offset: 6px; }
+.left-row { display: grid; grid-template-columns: var(--left-label) minmax(0, 1fr); column-gap: var(--left-gap); }
+.left-label { display: flex; flex-direction: column; justify-content: center; min-width: 0; height: var(--left-row); cursor: default; }
+.left-name { color: var(--text-2); font-size: var(--fs-meta); line-height: 16px; white-space: nowrap; }
+.left-name b { color: var(--text); font-weight: 600; }
+.left-figure { color: var(--text-3); font-size: var(--fs-meta); line-height: 30px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.left-figure b { margin-right: 2px; color: var(--text); font-size: 24px; font-weight: 600; letter-spacing: -.01em; }
+.left-verdict { min-height: 16px; overflow: hidden; color: var(--text-3); font-size: var(--fs-meta); line-height: 16px; font-variant-numeric: tabular-nums; white-space: nowrap; text-overflow: ellipsis; }
+/* A week that runs out says so in the text's colour behind the page's lamp for it. */
+.left-verdict.warn { color: var(--text); }
+.left-verdict.warn::before { content: ""; display: inline-block; width: 6px; height: 6px; margin-right: 6px; border-radius: 50%; background: var(--lamp-orange); vertical-align: 1px; }
+
+.left-plot { position: relative; height: var(--left-row); box-shadow: 0 -1px var(--line), 0 1px var(--line-strong); }
+.left-lines { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; }
+.left-line { fill: none; stroke: var(--left-ink); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; vector-effect: non-scaling-stroke; }
+.left-line.idle { stroke-dasharray: 5 4; stroke-linecap: butt; }
+.left-line.pace { stroke-width: 1.5; stroke-dasharray: 0.1 4; }
+.left-wash { fill: var(--left-ink); opacity: .1; }
+/* The rule at now and the reading's rule run through the rows as one line. */
+.left-now-rule, .left-rule { position: absolute; top: 0; bottom: calc(-1 * var(--left-between)); width: 1px; margin-left: -.5px; background: var(--line-strong); pointer-events: none; }
+.left-row.last :is(.left-now-rule, .left-rule) { bottom: -4px; }
+.left-rule { background: var(--text-3); }
+.left-dot, .left-at {
+  position: absolute; z-index: 1; width: 8px; height: 8px; margin: -6px 0 0 -6px; border: 2px solid var(--bg); border-radius: 50%;
+  background: var(--left-ink); pointer-events: none;
+}
+.left-at.pace { width: 6px; height: 6px; margin: -5px 0 0 -5px; }
+
+.left-axis { position: relative; height: 16px; margin: 6px 0 0 calc(var(--left-label) + var(--left-gap)); color: var(--text-3); font-size: 11px; line-height: 16px; font-variant-numeric: tabular-nums; }
+.left-tick { position: absolute; top: 0; transform: translateX(-50%); white-space: nowrap; }
+.left-tick.now { color: var(--text-2); font-weight: 600; }
+.left-tick.by-now { display: none; }
+
+/* The reading's tooltip (.chart-tip, usage.css): a name and its shares to a row, the shares in columns. */
+.chart-tip.left-tip { top: 0; left: 0; max-width: min(400px, 100%); }
+.left-tip-grid { display: grid; grid-template-columns: minmax(0, 1fr) auto; column-gap: 14px; align-items: baseline; }
+.left-tip-grid.ahead { grid-template-columns: minmax(0, 1fr) auto auto; }
+.left-tip-head { --left-ink: var(--text-3); display: inline-flex; align-items: center; justify-content: flex-end; gap: 5px; color: var(--text-3); white-space: nowrap; }
+.left-tip-head .left-sample { width: 14px; }
+.left-tip-name { color: var(--text-2); white-space: nowrap; }
+.left-tip-name.on { color: var(--text); font-weight: 600; }
+.left-tip-account { overflow: hidden; padding-left: 10px; color: var(--text-3); white-space: nowrap; text-overflow: ellipsis; }
+.left-tip-figure { color: var(--text-2); text-align: right; }
+.left-tip-figure.on { color: var(--text); font-weight: 600; }
+.left-tip-figure.account { color: var(--text-3); }
+
+.left-old { margin: 0 0 8px; color: var(--fail); font-size: var(--fs-meta); line-height: 16px; overflow-wrap: anywhere; }
+.left-said { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+/* The same in figures, under "All the tables": a row group per line. */
+.left-table .left-part th { padding-top: 10px; color: var(--text); font-weight: 600; text-align: left; }
+
+/* A narrower page keeps every other date. */
+@media (max-width: 900px) {
+  .left-tick:is(.odd, .near-now) { display: none; }
+}
+/* A phone stacks a row: its name and share in a line, what comes next under them, then the plot at the page's whole
+   width; each plot keeps its own rules. */
+@media (max-width: 640px) {
+  .hub-left { --left-label: 0px; --left-gap: 0px; --left-row: 56px; --left-between: 16px; }
+  .left-row { grid-template-columns: minmax(0, 1fr); row-gap: 6px; }
+  .left-label { flex-flow: row wrap; align-items: baseline; justify-content: flex-start; column-gap: 8px; height: auto; }
+  .left-name { font-size: var(--fs-body); line-height: 20px; }
+  .left-figure { margin-left: auto; line-height: 20px; }
+  .left-figure b { font-size: 18px; }
+  .left-verdict { flex-basis: 100%; }
+  .left-now-rule, .left-rule, .left-row.last :is(.left-now-rule, .left-rule) { bottom: 0; }
+}
+
+/* Each provider's tightness (hub-left.js leftTightLine), a quiet line apiece under the dates, level with the names. */
+.left-tights { margin-top: 12px; }
+.left-tight { margin: 0; color: var(--text-3); font-size: var(--fs-meta); line-height: 20px; font-variant-numeric: tabular-nums; }
+.left-tight b { margin-right: 2px; color: var(--text-2); font-weight: 600; }
+.left-tight.warn { color: var(--text); }
+.left-tight.warn::before { content: ""; display: inline-block; width: 6px; height: 6px; margin-right: 6px; border-radius: 50%; background: var(--lamp-orange); vertical-align: 1px; }

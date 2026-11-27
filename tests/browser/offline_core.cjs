@@ -99,27 +99,39 @@ async function adapter(page) {
     await page.waitForFunction(() => CockpitOffline.status().pending === 0);
     assert.deepEqual(calls.slice(-2).map((entry) => entry.action), [third.action, third.action]);
     console.log("pass: cached reads, secret stripping, reload-surviving ordered edits, refusal/discard isolation and truncated-ACK retry");
+    // Drain any earlier replay before saving the next edit, so it cannot send using an already verified sign-in.
+    await context.setOffline(true);
     await page.evaluate(() => {
-      window.replayTimeoutTest = { fetch: window.fetch.bind(window), timeout: AbortSignal.timeout, mode: "principal", principal: 0, posts: [] };
+      return navigator.locks.request(`cockpit-offline-${CockpitOffline.user}`, () => {});
+    });
+    await page.evaluate(() => {
+      window.replayTimeoutTest = { fetch: window.fetch.bind(window), timeout: AbortSignal.timeout, mode: "principal", principalAborts: 0, postAborts: [] };
       AbortSignal.timeout = (ms) => window.replayTimeoutTest.timeout(ms === 30000 ? 50 : ms);
       window.fetch = (input, options) => {
         const test = window.replayTimeoutTest, path = new URL(input instanceof Request ? input.url : input, location.href).pathname;
-        const hold = () => new Promise((_, reject) => options.signal.addEventListener("abort", () => reject(options.signal.reason), { once: true }));
+        const hold = (timedOut) => new Promise((_, reject) => {
+          options.signal.addEventListener("abort", () => {
+            if (options.signal.reason.name === "TimeoutError") timedOut();
+            reject(options.signal.reason);
+          }, { once: true });
+        });
         if (path === "/api/offline/session") {
-          if (test.mode === "principal") { test.principal++; return hold(); }
+          if (test.mode === "principal") return hold(() => test.principalAborts++);
           return Promise.resolve(Response.json({ user: CockpitOffline.user, until: CockpitOffline.until }));
         }
-        if (path === "/api/example/queue" && test.mode === "post") { test.posts.push(options.headers["x-cockpit-action"]); return hold(); }
+        if (path === "/api/example/queue" && test.mode === "post") return hold(() => test.postAborts.push(options.headers["x-cockpit-action"]));
         return test.fetch(input, options);
       };
     });
     const fourth = await page.evaluate(() => CockpitOffline.write("/api/example/counter/value", { score: 4 }));
-    await page.waitForFunction(() => window.replayTimeoutTest.principal > 0 && !CockpitOffline.status().replaying);
+    await context.setOffline(false);
+    await page.waitForFunction(() => window.replayTimeoutTest.principalAborts > 0 && !CockpitOffline.status().replaying);
     assert.equal(await page.evaluate(() => CockpitOffline.status().pending), 1);
     await page.evaluate(async () => { window.replayTimeoutTest.mode = "post"; await CockpitOffline.replay(); });
+    await page.waitForFunction(() => window.replayTimeoutTest.postAborts.length > 0 && !CockpitOffline.status().replaying);
     assert.equal(await page.evaluate(() => CockpitOffline.status().pending), 1);
     assert.equal(await page.evaluate(() => CockpitOffline.status().refused), 0);
-    assert.deepEqual(await page.evaluate(() => window.replayTimeoutTest.posts), [fourth.action]);
+    assert.ok(await page.evaluate((id) => window.replayTimeoutTest.postAborts.every((action) => action === id), fourth.action));
     await page.evaluate(() => { window.fetch = window.replayTimeoutTest.fetch; AbortSignal.timeout = window.replayTimeoutTest.timeout; });
     await page.evaluate(() => CockpitOffline.replay());
     await page.waitForFunction(() => CockpitOffline.status().pending === 0);

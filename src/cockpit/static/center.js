@@ -128,11 +128,12 @@ function renderNavigation() {
   if (!ui.state) return;
   initializeNavigation();
   // Back and Forward step through every task and view, so they sit in the top bar: beside the logo in the rail, and
-  // beside Add in the phone bar. The center layer's head holds a pair of its own for the phone, where it covers the bar.
+  // before Feedback and Add in the phone bar. The center layer's head holds a pair of its own for the phone, where it
+  // covers the bar.
   const brand = document.querySelector(".rail-top > .brand-menu");
   if (brand && !brand.nextElementSibling?.matches(".destination-navigation")) brand.after(navigationControls());
-  const add = document.querySelector(".phone-bar > .phone-add");
-  if (add && !add.previousElementSibling?.matches(".destination-navigation")) add.before(navigationControls());
+  const feedback = document.querySelector(".phone-bar > .phone-feedback");
+  if (feedback && !feedback.previousElementSibling?.matches(".destination-navigation")) feedback.before(navigationControls());
   const index = cockpitNavigation.current?.index || 0;
   for (const button of document.querySelectorAll(".navigation-back")) button.disabled = index === 0;
   for (const button of document.querySelectorAll(".navigation-forward")) button.disabled = index >= cockpitNavigation.end;

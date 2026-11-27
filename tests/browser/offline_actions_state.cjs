@@ -75,6 +75,48 @@ async function until(check) { for (let n = 0; n < 30 && !check(); n++) await tic
   assert.equal(asleep.calls.length, 0);
   console.log("pass: no replay authentication requests for an empty queue or an offline page");
 
+  for (const onlineAtLoad of [false, true]) {
+    const disconnected = world({ online: onlineAtLoad });
+    disconnected.navigator.onLine = false;
+    if (onlineAtLoad) disconnected.events.dispatchEvent(new Event("offline"));
+    const handoff = disconnected.send("/api/steps/9/hand-off");
+    let settled = false;
+    handoff.then(() => { settled = true; }, () => { settled = true; });
+    await tick();
+    assert.equal(settled, false);
+    assert.equal(disconnected.calls.length, 0);
+    const [key] = disconnected.values.keys();
+    const action = JSON.parse(disconnected.values.get(key)).headers["x-cockpit-action"];
+    disconnected.navigator.onLine = true;
+    disconnected.events.dispatchEvent(new Event("online"));
+    await handoff;
+    assert.deepEqual(disconnected.calls.map(({ url }) => url), ["/api/offline/session", "/api/steps/9/hand-off"]);
+    assert.equal(disconnected.calls[1].options.headers["x-cockpit-action"], action);
+    assert.equal(disconnected.values.size, 0);
+  }
+  console.log("pass: an action pressed offline waits for sign-in verification and sends once on reconnect");
+
+  let finishVerification, verifications = 0;
+  const interrupted = world({ online: false, session: () => {
+    if (++verifications === 1) return new Promise((resolve) => { finishVerification = resolve; });
+    return reply({ user: OTHER, until: UNTIL });
+  } });
+  const interruptedAction = interrupted.send("/api/steps/9/hand-off");
+  interrupted.navigator.onLine = true;
+  interrupted.events.dispatchEvent(new Event("online"));
+  await until(() => finishVerification);
+  interrupted.navigator.onLine = false;
+  interrupted.events.dispatchEvent(new Event("offline"));
+  finishVerification(reply({ user: USER, until: UNTIL }));
+  await tick();
+  const refused = assert.rejects(interruptedAction, /sign-in ended/);
+  interrupted.navigator.onLine = true;
+  interrupted.events.dispatchEvent(new Event("online"));
+  await refused;
+  assert.deepEqual(interrupted.calls.map(({ url }) => url), ["/api/offline/session", "/api/offline/session"]);
+  assert.equal(interrupted.values.size, 0);
+  console.log("pass: a second disconnect during verification requires a new check before sending");
+
   const foreign = new Map([["cockpit.outbox.legacy", saved(1)], [prefix(OTHER) + "other", saved(2, { user: OTHER })], [prefix(USER, UNTIL + 1) + "new-login", saved(3, { until: UNTIL + 1 })]]);
   const isolated = world({ values: foreign }); isolated.start(); await tick();
   assert.equal(isolated.calls.length, 0); assert.equal(foreign.size, 3);

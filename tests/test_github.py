@@ -174,7 +174,10 @@ def test_githubs_answer_is_read_even_when_gh_exits_nonzero(monkeypatch) -> None:
 
     def run(args, **kwargs):
         queries.append(args[-1])
-        return subprocess.CompletedProcess(args, 1, stdout=json.dumps(answer), stderr="gh: some errors")
+        return subprocess.CompletedProcess(
+            args, 1, stdout="HTTP/2.0 200 OK\nContent-Type: application/json\n\n" + json.dumps(answer),
+            stderr="gh: some errors",
+        )
 
     monkeypatch.setattr("cockpit.github.subprocess.run", run)
     refs = ["a/b#1", "a/b#2", "a/b#3", "gone/repo#4", "a/b#5"]
@@ -182,6 +185,7 @@ def test_githubs_answer_is_read_even_when_gh_exits_nonzero(monkeypatch) -> None:
         found={"a/b#1": "draft", "a/b#2": "merged", "a/b#5": "closed"},
         missing={"a/b#3": "it is an issue", "gone/repo#4": "Could not resolve to a Repository"},
     )
+    assert len(queries) == 1
     assert 'p3: repository(owner: "gone", name: "repo") { issueOrPullRequest(number: 4)' in queries[0]
     monkeypatch.setattr(
         "cockpit.github.subprocess.run",
@@ -191,8 +195,19 @@ def test_githubs_answer_is_read_even_when_gh_exits_nonzero(monkeypatch) -> None:
         github.ask_states(refs)
 
 
-@pytest.mark.parametrize("recovers", [True, False])
-def test_a_pr_state_batch_gets_one_more_try_after_gh_times_out(world: World, monkeypatch, caplog, recovers: bool) -> None:
+@pytest.mark.parametrize(("failures", "error"), [
+    (["timeout"], None),
+    (["timeout", "timeout"], "gh took over 30 s twice"),
+    ([504], None),
+    ([504, 504], "gh: HTTP 504"),
+    ([503], None),
+    ([504, "timeout"], "gh took over 30 s on the retry"),
+    ([403], "gh: HTTP 403"),
+    ([400], "gh answered no JSON"),
+])
+def test_a_pr_state_batch_retries_temporary_failures_once(
+    world: World, monkeypatch, caplog, failures: list[int | str], error: str | None,
+) -> None:
     conn = db.connect(world.db_path)
     refs = ["example-org/app#1", "example-org/app#2"]
     failed: dict[str, datetime] = {}
@@ -201,19 +216,31 @@ def test_a_pr_state_batch_gets_one_more_try_after_gh_times_out(world: World, mon
 
     def run(args, *, timeout, **kwargs):
         queries.append(args)
-        if len(queries) == 1 or not recovers:
-            raise subprocess.TimeoutExpired(args, timeout)
-        return subprocess.CompletedProcess(args, 0, stdout=json.dumps({"data": {"p0": pull, "p1": pull}}))
+        if len(queries) <= len(failures):
+            failure = failures[len(queries) - 1]
+            if failure == "timeout":
+                raise subprocess.TimeoutExpired(args, timeout)
+            body = '{"message": "Service unavailable"}' if failure == 503 else ""
+            # The response status is authoritative even if the CLI diagnostic is absent or misleading.
+            diagnostic = {403: "gh: HTTP 403\ngh: HTTP 504", 504: "gh: HTTP 504"}.get(failure, "")
+            response = f"HTTP/2.0 {failure}\nSet-Cookie: private-header-marker\n\n{body}"
+            return subprocess.CompletedProcess(args, 1, stdout=response, stderr=diagnostic)
+        return subprocess.CompletedProcess(
+            args, 0, stdout="HTTP/2.0 200 OK\n\n" + json.dumps({"data": {"p0": pull, "p1": pull}}),
+        )
 
     monkeypatch.setattr("cockpit.github.subprocess.run", run)
-    assert github.check_states(conn, github.ask_states, refs, failed, NOW) == (refs if recovers else [])
-    assert len(queries) == 2 and queries[0] == queries[1]
-    if recovers:
+    assert github.check_states(conn, github.ask_states, refs, failed, NOW) == ([] if error else refs)
+    attempts = len(failures) + (error is None)
+    assert queries == [queries[0]] * attempts
+    assert "--include" in queries[0]
+    if error is None:
         assert failed == {}
         assert github.pull_states(conn) == dict.fromkeys(refs, "open")
         assert "asking GitHub the state" not in caplog.text
     else:
         assert failed == dict.fromkeys(refs, NOW)
-        assert "gh took over 30 s twice" in caplog.text
+        assert error in caplog.text
+        assert "private-header-marker" not in caplog.text
         assert github.check_states(conn, github.ask_states, refs, failed, NOW + timedelta(minutes=1)) == []
-        assert len(queries) == 2
+        assert len(queries) == attempts

@@ -1806,6 +1806,38 @@ MIGRATIONS: list[str] = [
     );
     CREATE INDEX acp_log_session ON acp_log(session_id, id);
     """,
+    # The words waiting unsent in the page's boxes, so they follow the user between devices (drafts.py). An emptied
+    # box keeps its row with an empty value: its version tells a device that last saw the words that they went.
+    """
+    CREATE TABLE drafts (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL,
+        version INTEGER NOT NULL,
+        updated_at TEXT NOT NULL
+    );
+    CREATE INDEX drafts_version ON drafts(version);
+    """,
+    # What Cockpit answered each request of drafts (drafts.py `put`): a page that never heard the answer sends the
+    # request again and learns which of its words were taken.
+    """
+    CREATE TABLE draft_answers (
+        id TEXT PRIMARY KEY,
+        taken TEXT NOT NULL,
+        created_at TEXT NOT NULL
+    );
+    CREATE INDEX draft_answers_created ON draft_answers(created_at);
+    """,
+    # The keys a later request of the same page wrote before Cockpit received the earlier request it follows
+    # (drafts.py `put`): that earlier request's words for the key are older and are not taken.
+    """
+    CREATE TABLE draft_followed (
+        request TEXT NOT NULL,
+        key TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (request, key)
+    );
+    CREATE INDEX draft_followed_created ON draft_followed(created_at);
+    """,
 ]
 
 JSON_COLUMNS = frozenset(

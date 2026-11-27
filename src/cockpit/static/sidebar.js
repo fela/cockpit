@@ -205,8 +205,9 @@ function phoneOpen(focuses) {
 }
 
 // The bar at the top of the item screen: the list's key, which counts the steps waiting for the user, Reload while a
-// newer Cockpit runs (UI-13), and Add (CONTROL-8). Hidden above phone width and on the list screen. It is built once
-// app.js, whose helpers it uses, has loaded.
+// newer Cockpit runs (UI-13), Feedback (FEEDBACK-3) and Add (CONTROL-8). Hidden above phone width and on the list
+// screen. It is built once app.js, whose helpers it uses, has loaded. Its Feedback presses the rail's own key, which
+// the item screen hides, and lights up with it while that key's pick runs.
 // The list's key stands in for the list's folded headings (UI-24): while an Add's, a close's or a hand-off's Undo is
 // on offer, it lights up as Busy's or Finished this week's heading does, in the close's plum for a close, keeps its
 // name and count, and the Undo with the bar that runs down over its time sits at its right (`phoneHeld`).
@@ -219,7 +220,11 @@ function buildPhoneBar() {
     onclick: () => document.getElementById("reload").click() }, icon("retry"), h("span", { class: "label", text: "Reload" }));
   const add = h("button", { class: "button small ghost icon-only phone-add", type: "button", "aria-label": "Add to your work",
     title: "Add a to-do; a session starts on it", onclick: () => (ui.adding ? closeAddBox() : openAddBox()) }, icon("plus"));
-  const bar = h("div", { class: "phone-bar" }, items, reload, offlineNoteKey(), add);
+  const rail = document.getElementById("feedback-mode");
+  const feedback = h("button", { class: "button small ghost icon-only phone-feedback", type: "button", "aria-label": "Feedback",
+    title: "Feedback: pick a part of the page, then add a to-do about it", onclick: () => rail.click() }, icon("pick"));
+  new MutationObserver(() => feedback.classList.toggle("on", rail.classList.contains("on"))).observe(rail, { attributes: true, attributeFilter: ["class"] });
+  const bar = h("div", { class: "phone-bar" }, items, reload, offlineNoteKey(), feedback, add);
   document.querySelector(".layout > .primary").prepend(bar);
   // The hold shown, so a redraw keeps its Undo, and the focus on it, while the same hold lasts.
   let shown = null;

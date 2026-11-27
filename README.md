@@ -153,20 +153,28 @@ still needs a live check.
 
 ### Gemini and Grok
 
-Cockpit can also run sessions on the [Gemini CLI](https://github.com/google-gemini/gemini-cli)
-and on [Grok Build](https://github.com/xai-org/grok-build), xAI's coding agent CLI. It drives
-both over the [Agent Client Protocol](https://agentclientprotocol.com) (ACP): `gemini --acp`
-and `grok agent stdio`. Install the CLI, sign in once by running it in a terminal, and add
-`"gemini"` or `"grok"` to `providers` in `setup.toml`; Cockpit runs `gemini` and `grok` from
-PATH, and a provider left out of `providers` starts nothing and shows nothing. Google has
-[retired Gemini CLI access for individual Google accounts](https://github.com/google-gemini/gemini-cli/discussions/28017),
-so sign in with an account or API key that still has it. The new-session menu then offers them:
-Gemini's models are the CLI's own aliases (Auto, Pro, Flash, Flash-Lite), and Grok runs on
-the CLI's default model. A session keeps the agent and model it started with.
+Cockpit can also run Gemini sessions on Google's
+[Antigravity](https://antigravity.google) CLI, `agy`, and sessions on
+[Grok Build](https://github.com/xai-org/grok-build), xAI's coding agent CLI. It drives both
+over the [Agent Client Protocol](https://agentclientprotocol.com) (ACP): `agy acp` and
+`grok agent stdio`. Install the CLI on the machine Cockpit runs on, sign in once in a
+terminal, and add `"gemini"` or `"grok"` to `providers` in `setup.toml`; Cockpit runs `agy`
+and `grok` from PATH, and a provider left out of `providers` starts nothing and shows nothing.
 
-Gemini approves file edits by itself and asks before anything else; Grok asks before each
-tool call. A request either one makes appears as a card on Cockpit, as Codex's do, with the
-command, files and diff the agent sent. Cockpit runs one agent process per model and working
+Antigravity's sign-in is `SSH_CONNECTION="127.0.0.1 0 127.0.0.1 0" agy acp --login`, which
+prints Google's link and waits for the code Google's page shows. The `SSH_CONNECTION` setting
+makes it keep the sign-in in `~/.gemini` rather than a desktop keyring. Cockpit starts
+Antigravity the way [T3 Code](https://github.com/pingdotgg/t3code) does: without Google API
+keys or cloud project settings from its own environment, so Antigravity uses that stored
+sign-in, and with Antigravity's automatic updates off.
+
+The new-session menu then offers them. Both run on their CLI's default model: Antigravity's
+is the one its settings choose from those the Google account offers. A session keeps the
+agent and model it started with.
+
+Both agents ask before the tool calls their settings leave to the user. A request either one
+makes appears as a card on Cockpit, as Codex's do, with the command, files and diff the agent
+sent. Cockpit runs one agent process per model and working
 folder, so a checkout's `.env` reaches only that checkout's sessions. The session view shows
 each session's messages and each tool call's kind and status; Cockpit keeps no call title,
 input or output.
