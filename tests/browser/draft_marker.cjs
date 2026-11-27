@@ -72,11 +72,12 @@ async function main() {
       });
       return answer.step.id;
     };
-    const first = await put("draft-first", "Pick the reminder time", 100);
-    const second = await put("draft-second", "Merge the fix", 90);
-
     browser = await chromium.launch({ executablePath: CHROMIUM });
     for (const [width, height, scheme] of [[390, 844, "light"], [1280, 900, "light"], [1280, 900, "dark"]]) {
+      // Cockpit keeps drafts for every device, so each size gets two steps of its own, with no words kept from the
+      // size before.
+      const first = await put(`draft-first-${width}-${scheme}`, "Pick the reminder time", 100);
+      const second = await put(`draft-second-${width}-${scheme}`, "Merge the fix", 90);
       const context = await browser.newContext({ viewport: { width, height }, colorScheme: scheme });
       const at = `${width} px, ${scheme}`;
       await context.setExtraHTTPHeaders({ cookie: `${info.name}=${info.value}` });
@@ -236,6 +237,8 @@ async function main() {
           && plain(emptied) && distance(emptied.bg, empty.bg) < 2 && emptiedPencil === null, JSON.stringify({ emptied, emptiedPencil }));
       check(`${at}: no page errors`, errors.length === 0, errors.join(" | "));
       await context.close();
+      // The next size's steps lead Your queue.
+      await Promise.all([first, second].map((id) => user("POST", `/api/steps/${id}/snooze`, { until: "2099-01-01T08:00:00Z" })));
     }
   } finally {
     if (browser) await browser.close();
@@ -302,8 +305,10 @@ function boxLook(area) {
       text: over([drawn[0].color]),
       weight: drawn[0].fontWeight,
       same: drawn.every((style) => style.color === drawn[0].color && style.fontWeight === drawn[0].fontWeight),
-      // The box draws no corner mark of its own.
-      ownCorner: getComputedStyle(box, "::after").content !== "none",
+      // The box draws no corner mark of its own. The sidebar's layer that fills the ring behind the box's rounded
+      // corners paints only a shadow, so it is no mark.
+      ownCorner: ((after) => after.content !== "none"
+        && (after.backgroundImage !== "none" || after.backgroundColor !== "rgba(0, 0, 0, 0)"))(getComputedStyle(box, "::after")),
       // The 3 px bar in the user's amber down its left edge, as on the user's own latest message.
       bar: ((shadow) => shadow ? over([shadow[1]]) : null)(getComputedStyle(box).boxShadow.match(/^((?:rgba?|oklch|color)\([^)]*\)) 3px 0px 0px 0px inset/)),
     };

@@ -81,13 +81,13 @@ async function startServer(script, prefix) {
 }
 
 // A screenshot of the node `locator` finds. A poll can redraw the node while the shot is taken (Playwright then says it is
-// not attached); the next try finds the node drawn anew.
+// not attached, or not visible); the next try finds the node drawn anew.
 async function screenshotRedrawn(locator, options) {
   for (let tries = 1; ; tries++) {
     try {
       return await locator.screenshot(options);
     } catch (error) {
-      if (tries === 3 || !/not attached/.test(error.message)) throw error;
+      if (tries === 3 || !/not attached|not visible/.test(error.message)) throw error;
     }
   }
 }

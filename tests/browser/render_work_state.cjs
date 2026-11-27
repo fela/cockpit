@@ -23,7 +23,7 @@ async function usageChecks() {
   const calls = { usage: 0, render: 0 };
   const ui = { tick: 0, pending: new Map(), snoozing: new Map(), handing: new Map(), busy: new Set(),
     renderedAt: Date.now(), error: "", catchUpFrom: null, openedHidden: new Set() };
-  const w = world({ ui, document: { hidden: false, querySelector: () => null }, window: {},
+  const w = world({ ui, document: { hidden: false, querySelector: () => null }, window: { CockpitDraftSync: { take: () => false, changed: noop } },
     readState: async () => state, URLSearchParams, ADDS_WAIT_MS: 1000, ARRIVED_MS: 10000, RERENDER_MS: 60000,
     SAVED_PAGE_NOTE: "Showing the saved page; checking for updates",
     commentDeletions: new Map(), noticeCodexSignIns: noop,

@@ -173,10 +173,14 @@
     const route = match[1];
     // A task or session route is followed once and then leaves the address, as #item/N does: a reload, such as
     // Reload after a deploy, then shows the queue's card or the user's own pick, not the task the link once named.
+    // The device's saved board, drawn before the fresh one, may not hold a task created since: the route then waits
+    // in the address for the fresh board's redraw.
     if (route.startsWith("item/")) {
-      if (!bridge.state?.() || !bridge.openItem) return;
+      const id = Number(route.slice(5));
+      const state = bridge.state?.();
+      if (!state || !bridge.openItem || (bridge.saved() && !state.items.some((item) => item.id === id))) return;
       leaveAddress();
-      bridge.openItem(Number(route.slice(5)));
+      bridge.openItem(id);
     } else if (route.startsWith("session/")) {
       if (!bridge.state?.() || !bridge.openSession) return;
       leaveAddress();

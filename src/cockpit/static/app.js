@@ -64,6 +64,8 @@ const TARGETS_KEY = "cockpit.draft-targets";
 const STARTS_KEY = "cockpit.draft-starts";
 // The rule each rule draft changes in place (PERM-11), kept with the drafts.
 const REPLACING_KEY = "cockpit.rule-replacing";
+// Answers picked on a card and not sent yet, by question, kept with the drafts.
+const PICKS_KEY = "cockpit.picks";
 const SENT_KEY = "cockpit.sent";
 // What the page had open when the user pressed Reload (see reloadKeepingPlace).
 const REOPEN_KEY = "cockpit.reopen";
@@ -160,6 +162,9 @@ const ui = {
   // Per box: what a new session from it starts with (startPicks), kept with the box's draft. A send takes the
   // picks with it, and a refused send puts them back with its words.
   starts: new Map(readStored(STARTS_KEY, [])),
+  // Per question of a card that sends its answers together, such as one an install's part adds: the answer picked and how it
+  // goes, kept until sent so a reload or another device shows it.
+  picks: new Map(readStored(PICKS_KEY, [])),
   // The side chat questions the last state showed still asking, null before the first state (MSG-11).
   sideAsking: null,
   busy: new Set(),
@@ -439,19 +444,34 @@ function takeReopened() {
   }
 }
 
-function saveDrafts() {
-  writeStored(DRAFTS_KEY, [...ui.drafts].filter(([, text]) => text));
-  // The list at the left marks an item holding a draft; typing, sending and a refused send's words coming back all pass here.
-  if (typeof showItemDraftMarks === "function") showItemDraftMarks();
-  // A blocked call's card keeps its list choice under the card, its drafts under the card and list.
-  writeStored(TARGETS_KEY, [...ui.choices].filter(([key, choice]) =>
-    ui.drafts.get(key) || ui.drafts.get(`${key}:${choice}`) || ui.replacing.has(`${key}:${choice}`)));
-  // Model and effort choices stay with a draft, also before typing; sending drops them (takeDraft).
-  writeStored(STARTS_KEY, [...ui.starts]);
+// What the drafts keep, as storage and Cockpit (draft-sync.js) hold them: each kind as [key, value] pairs.
+function storedDrafts() {
   // A rule edit's target stays while its call is open: an answer sent and left by a reload that then fails puts
   // the words back, and they still change that rule.
   const open = ui.state && new Set([...ui.state.permission_requests, ...(ui.state.moved_past || [])].map((request) => request.id));
-  writeStored(REPLACING_KEY, [...ui.replacing].filter(([key]) => ui.drafts.get(key) || !open || open.has(Number(key.split(":")[2]))));
+  return {
+    drafts: [...ui.drafts].filter(([, text]) => text),
+    // A blocked call's card keeps its list choice under the card, its drafts under the card and list.
+    choices: [...ui.choices].filter(([key, choice]) =>
+      ui.drafts.get(key) || ui.drafts.get(`${key}:${choice}`) || ui.replacing.has(`${key}:${choice}`)),
+    // Model and effort choices stay with a draft, also before typing; sending drops them (takeDraft).
+    starts: [...ui.starts],
+    replacing: [...ui.replacing].filter(([key]) => ui.drafts.get(key) || !open || open.has(Number(key.split(":")[2]))),
+    picks: [...ui.picks],
+  };
+}
+
+function saveDrafts() {
+  const stored = storedDrafts();
+  writeStored(DRAFTS_KEY, stored.drafts);
+  // The list at the left marks an item holding a draft; typing, sending and a refused send's words coming back all pass here.
+  if (typeof showItemDraftMarks === "function") showItemDraftMarks();
+  writeStored(TARGETS_KEY, stored.choices);
+  writeStored(STARTS_KEY, stored.starts);
+  writeStored(REPLACING_KEY, stored.replacing);
+  writeStored(PICKS_KEY, stored.picks);
+  // The drafts follow the user to their other devices.
+  window.CockpitDraftSync.changed();
 }
 
 // After a send, clear the draft only if the user has not typed more since: what
@@ -921,6 +941,8 @@ async function refresh(saved = null) {
     const usageChanged = usagePrint !== ui.usagePrint;
     ui.state = state;
     ui.savedState = Boolean(saved);
+    // Drafts typed on another device come into their boxes (draft-sync.js); a state kept from before has none newer.
+    const draftsTaken = !saved && window.CockpitDraftSync.take(state.drafts, askedAt);
     noticeCodexSignIns(state);
     noticeSnoozeReads(state);
     window.cockpitPart?.notice?.(state);
@@ -954,7 +976,7 @@ async function refresh(saved = null) {
       ui.actionRender = false;
       ui.order = shownOrder(state.queue);
       renderStatus();
-    } else if (changed || !fresh || ui.pendingRender || ui.actionRender
+    } else if (changed || draftsTaken || !fresh || ui.pendingRender || ui.actionRender
       || (dropped && drawnPrint(drawn(state)) !== ui.drawnPrint)) safeRender();
     else renderStatus();
     if (usageChanged && usageGeneration === usageGenerationBefore) renderUsage(state);
@@ -8534,7 +8556,7 @@ function wrongModelWarning(wrong) {
     key, tone: "fail", mark: "alert", tip: `Session ${wrong.session_id}, from ${when(new Date(wrong.first))}`,
     short: `“${name}” ran on ${wrong.model}`,
     title: `Session “${name}” ran on ${wrong.model} instead of ${intended}: ${calls}, the last at ${when(new Date(wrong.last))}.`,
-    more: wrong.back ? `It is back on ${intended}.` : `/model ${intended} in that session moves it back.`,
+    more: wrong.back ? `It is back on ${wrong.latest}.` : `/model ${intended} in that session moves it back.`,
     fix: { words: ui.busy.has(key) ? "Starting…" : "Investigate", busy: ui.busy.has(key),
       onclick: () => investigateWrongModel(wrong) },
     close: { title: "Stays closed while the session stays on this model", busy: ui.busy.has(key), confirm: true,
@@ -13991,10 +14013,16 @@ function takeStoredDrafts(typing) {
 }
 
 window.addEventListener("storage", (event) => {
-  // A "To" choice another tab stored (words put back with the choice they were sent with, errors.js) joins
-  // this tab's choices for boxes it has none for; a choice made here stays.
+  // A "To" choice another tab stored (one made there, one Cockpit brought from another device, or words put back
+  // with the choice they were sent with, errors.js) replaces this tab's, so Send goes where the stored words were
+  // meant to; the box the user types in here keeps its own, as its words do.
   if (event.key === TARGETS_KEY) {
-    for (const [key, choice] of readStored(TARGETS_KEY, [])) if (!ui.choices.has(key)) ui.choices.set(key, choice);
+    const typing = typingKey();
+    for (const [key, choice] of readStored(TARGETS_KEY, [])) {
+      if (!typing || (typing !== key && !typing.startsWith(`${key}:`))) ui.choices.set(key, choice);
+    }
+    // The selector shows what Send uses.
+    if (ui.state) safeRender();
     return;
   }
   if (event.key === DRAFTS_KEY) {
@@ -14018,6 +14046,12 @@ window.addEventListener("storage", (event) => {
     ui.replacing = new Map(readStored(REPLACING_KEY, []));
     if (mine) ui.replacing.set(typing, mine);
     else ui.replacing.delete(typing);
+    if (ui.state) safeRender();
+    return;
+  }
+  // Picks another tab made, took back or sent: the stored ones, which every save writes, are the latest.
+  if (event.key === PICKS_KEY) {
+    ui.picks = new Map(readStored(PICKS_KEY, []));
     if (ui.state) safeRender();
     return;
   }
@@ -14172,6 +14206,8 @@ function startKeyboardSession() {
 
 window.CockpitKeys?.connect({
   state: () => ui.state,
+  // The board drawn is the device's saved copy, shown until the fresh one arrives.
+  saved: () => ui.savedState,
   busy: () => Boolean(ui.picking || ui.pick),
   add: openAddBox,
   openItem: openKeyboardItem,

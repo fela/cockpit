@@ -311,7 +311,7 @@
   else window.CockpitShell = api;
 })();
 
-// The board and every open view reserve this key's space before the first status arrives.
+// The board and every open view hold this key; it takes no room until a lasting state lights it.
 function offlineNoteKey() {
   const key = document.createElement("button");
   key.className = "button small ghost icon-only offline-note-key";

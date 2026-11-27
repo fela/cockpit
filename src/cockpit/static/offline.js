@@ -83,7 +83,10 @@ window.CockpitOffline = (() => {
       try {
         const result = adapter.prepare(entry.originalPath, structuredClone(entry.originalBody), view, entry.at);
         if (result) for (const [path, data] of result.reads) view.set(path, data);
-      } catch (error) { if (!entry.error) problem(error); }
+      } catch (error) {
+        // A fresh read in any tab can drop the record an edit needs while the server decides whether to accept it.
+        if (!entry.error && error?.offlineEditUnavailable !== true) problem(error);
+      }
     }
     materialized = view;
     return view;
@@ -345,7 +348,11 @@ window.CockpitOffline = (() => {
           }
           // Keep the accepted local projection until an authenticated read replaces it.
           const view = new Map([...reads].map(([path, saved]) => [path, saved.data]));
-          const affected = adapter?.prepare(entry.originalPath, entry.originalBody, view, entry.at)?.reads || new Map();
+          // A newer read can lack the record the server accepted, so there may be nothing to project.
+          let affected;
+          try { affected = adapter?.prepare(entry.originalPath, entry.originalBody, view, entry.at)?.reads; }
+          catch (error) { if (error?.offlineEditUnavailable !== true) problem(error); }
+          affected ??= new Map();
           touched(affected.keys());
           await transaction(["reads", "writes"], (tx) => {
             for (const [path, data] of affected) tx.objectStore("reads").put({ path, data, savedAt: Date.now() });
@@ -457,7 +464,8 @@ window.CockpitOffline = (() => {
   // read: `name` names it in messages, `label(path)` names the kind of record an edit to `path` changes, the GETs under
   // `root` are its reads, `saves(pathname)` says which of them this device keeps, `send` is the route that takes its
   // queued edits, and `prepare(path, body, reads, at)` turns an edit into `{ path: send, body, reads }`, with the reads
-  // the edit changes, or into null for an edit that goes online.
+  // the edit changes, or into null for an edit that goes online. Expected local validation errors have
+  // offlineEditUnavailable set to true. They reject new edits; already queued edits wait for the server's decision.
   function register(part) { adapter = part; ready.then(() => { changed([...reads.keys()]); replay(); }); }
   // Whether a GET is the registered part's read, which goes through read().
   const owns = (path) => Boolean(adapter && path.startsWith(adapter.root));

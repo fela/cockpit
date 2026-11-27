@@ -76,3 +76,17 @@ last_use = {}
 # [offload]
 # host = "build-box"
 # repos = ["~/dev/cockpit"]
+
+# A CLIProxyAPI hub that lends subscription accounts to this machine's agents: the Usage page shows its accounts and
+# limits, and the Inbox warns when one signs out. url is the hub's address from this machine; key_file holds its
+# management key, and the page shows no hub while that file is missing. Each command is a list of words: sign_in
+# commands (codex, claude) start a hub login that prints the sign-in link, restarts (hub, tunnel) back the
+# Usage page's restart buttons, and tunnel_state prints "active" while the tunnel to a remote hub is up. A command left
+# out leaves its button out. The hub-setup skill sets a hub up. Leave this table out for no hub.
+# [hub]
+# url = "http://127.0.0.1:8317"
+# key_file = "~/.config/cockpit/hub-management-key"
+# [hub.sign_in]
+# codex = ["/full/path/cli-proxy-api", "--config", "/full/path/config.yaml", "--codex-device-login", "--no-browser"]
+# [hub.restarts]
+# hub = ["systemctl", "--user", "restart", "cliproxyapi.service"]

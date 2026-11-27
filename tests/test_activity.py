@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from cockpit import activity, db
+from cockpit import activity, db, parts
 from tests.conftest import ORIGIN, World
 
 AT = "2026-01-06T08:00:00Z"
@@ -133,6 +133,23 @@ def test_a_subdomain_takes_its_parents_category_and_the_users_choice_wins(conn: 
     assert activity.category(known, "Safari", "docs.github.com") == "work"
     with pytest.raises(ValueError, match="category"):
         activity.set_category(conn, "Spotify", "fun")
+
+
+def test_an_installs_own_categories_go_over_the_defaults_and_the_users_choice_over_both(
+    conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(parts, "activity_categories", lambda: {"docs.example.test": "work", "github.com": "neutral"})
+    known = activity._known(conn, "cockpit.example.test")
+    assert activity.category(known, "Safari", "docs.example.test") == "work"
+    assert activity.category(known, "Safari", "example.test") == "unsorted"
+    assert activity.category(known, "Safari", "github.com") == "neutral"
+    activity.set_category(conn, "github.com", "distraction")
+    known = activity._known(conn, "cockpit.example.test")
+    assert activity.category(known, "Safari", "github.com") == "distraction"
+
+
+def test_the_public_base_has_no_categories_of_its_own() -> None:
+    assert parts.activity_categories() == {}
 
 
 def test_a_minute_counts_for_a_step_when_its_middle_is_inside_the_timer(conn: sqlite3.Connection) -> None:

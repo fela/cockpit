@@ -1058,9 +1058,14 @@ def test_a_model_a_session_was_restarted_on_is_intended(tmp_path: Path) -> None:
     ])
     index.refresh(NOW)
     assert [row["model"] for row in index.wrong_models(NOW, {})] == ["claude-sonnet-5-5"]
+    # Back on the model it was restarted on, the row says it is back there, not on the model it started on.
+    transcript(tmp_path, SESSION, [call("msg_4", 7, usage(output=100), model="claude-fable-5-2")])
+    index.refresh(NOW)
+    [row] = index.wrong_models(NOW, {})
+    assert (row["intended"], row["back"], row["latest"]) == ("claude-opus-5-5", True, "claude-fable-5-2")
     # For a session Cockpit started, the model chosen in Cockpit stays the intended one.
     launched = {SESSION: spend.ModelChoices(["claude-opus-5-5"], True)}
-    assert [row["model"] for row in index.wrong_models(NOW, launched)] == ["claude-sonnet-5-5", "claude-fable-5-2"]
+    assert [row["model"] for row in index.wrong_models(NOW, launched)] == ["claude-fable-5-2", "claude-sonnet-5-5"]
 
 
 def test_a_model_named_in_the_folders_claude_settings_is_intended(tmp_path: Path) -> None:

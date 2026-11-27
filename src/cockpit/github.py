@@ -35,6 +35,7 @@ CHECK_SECONDS = 60
 TIMEOUT_SECONDS = 30
 RETRY_AFTER = timedelta(hours=1)
 STATE_BATCH = 50
+GH_SERVER_ERROR = re.compile(r"\AHTTP/[0-9.]+ 5[0-9]{2}(?: |\n|$)")
 GH_KEY = re.compile(r"^gh:([\w.-]+/[\w.-]+)#(\d+)$")
 # A PR number has no leading zero, so it goes into a GraphQL query as written.
 PULL_URL = re.compile(r"^https://github\.com/([\w.-]+/[\w.-]+)/pull/([1-9]\d*)(?:[/?#]|$)")
@@ -184,7 +185,8 @@ def ask_states(refs: list[str]) -> States:
         repo, number = ref.split("#")
         owner, name = repo.split("/")
         parts.append(STATE_PART.format(index=index, owner=owner, name=name, number=number))
-    args = ["gh", "api", "graphql", "-f", "query={ " + " ".join(parts) + " }"]
+    args = ["gh", "api", "graphql", "--include", "-f", "query={ " + " ".join(parts) + " }"]
+    timed_out = False
     for attempt in range(2):
         try:
             result = subprocess.run(
@@ -192,17 +194,27 @@ def ask_states(refs: list[str]) -> States:
             )
         except subprocess.TimeoutExpired as exc:
             if attempt:
-                raise GitHubError(f"gh took over {TIMEOUT_SECONDS} s twice") from exc
+                when = "twice" if timed_out else "on the retry"
+                raise GitHubError(f"gh took over {TIMEOUT_SECONDS} s {when}") from exc
+            timed_out = True
+            continue
         except OSError as exc:
             raise GitHubError(f"gh did not start: {exc}") from exc
+        # gh --include prints the HTTP status and headers before the response body.
+        body = result.stdout.partition("\n\n")[2] if result.stdout.startswith("HTTP/") else result.stdout
+        decode_error = None
+        try:
+            answer = json.loads(body)
+        except json.JSONDecodeError as exc:
+            decode_error = exc
         else:
-            break
-    try:
-        answer = json.loads(result.stdout)
-    except json.JSONDecodeError as exc:
-        raise GitHubError(" ".join(result.stderr.split()) or f"gh answered no JSON: {result.stdout[:200]!r}") from exc
-    if not isinstance(answer, dict) or not isinstance(answer.get("data"), dict):
-        raise GitHubError(" ".join(result.stderr.split()) or f"gh answered no data: {result.stdout[:200]!r}")
+            if isinstance(answer, dict) and isinstance(answer.get("data"), dict):
+                break
+        if not attempt and GH_SERVER_ERROR.match(result.stdout):
+            continue
+        missing = "JSON" if decode_error else "data"
+        message = " ".join(result.stderr.split()) or f"gh answered no {missing}: {body[:200]!r}"
+        raise GitHubError(message) from decode_error
     errors = {
         error["path"][0]: error.get("message", "")
         for error in answer.get("errors", []) if isinstance(error, dict) and error.get("path")

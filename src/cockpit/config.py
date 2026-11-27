@@ -121,10 +121,10 @@ SESSION_OPTIONS: dict[str, dict[str, Any]] = {
             {"name": "ultrafast", "label": "Ultrafast", "hint": "8× included usage · Pro $500"},
         ],
     },
-    # The ACP agents (acp_agent.py, SPEC SESSION-30) pick no effort. Gemini's models are the CLI's own aliases, which it
-    # points at its current models, "auto" letting it choose per request; Grok's "default" is the CLI's own default.
+    # The ACP agents (acp_agent.py, SPEC SESSION-30) pick no effort, and each runs on its CLI's own default model:
+    # Antigravity's ("gemini") is the one its settings choose, from those the signed-in Google account offers.
     "gemini": {
-        "models": [("auto", "Auto"), ("pro", "Pro"), ("flash", "Flash"), ("flash-lite", "Flash-Lite")],
+        "models": [("default", "Default")],
         "efforts": [],
         "effort": None,
     },
@@ -245,6 +245,31 @@ class Offload:
 
 
 @dataclass(frozen=True)
+class HubSetup:
+    """The model hub (CLIProxyAPI) this machine's sessions send their model traffic through, which the Usage page shows
+    and runs ([hub], SPEC UI-81)."""
+
+    # The hub's address as this machine reaches it, such as http://127.0.0.1:8317, without a trailing /.
+    url: str
+    # The file holding the hub's management key. Cockpit runs without the hub when the file is missing as it starts.
+    key_file: Path
+    # The command that signs a new account of each provider into the hub and prints the provider's sign-in link, by
+    # provider from HUB_SIGN_INS; a provider without one gets no Add account button.
+    sign_in: dict[str, tuple[str, ...]]
+    # The command behind each restart button, by name from HUB_RESTARTS ("hub" restarts the hub's service, "tunnel"
+    # the connection this machine reaches it through); a restart without one gets no button.
+    restarts: dict[str, tuple[str, ...]]
+    # The command that prints the state of the connection to the hub in systemd's word ("active" when it is up), for
+    # a hub reached through a tunnel; None when nothing is checked.
+    tunnel_state: tuple[str, ...] | None
+
+
+# The providers whose accounts the hub signs in, and the restarts the Usage page offers.
+HUB_SIGN_INS = ("codex", "claude")
+HUB_RESTARTS = ("hub", "tunnel")
+
+
+@dataclass(frozen=True)
 class Setup:
     """One install's user and folders, read from the setup file."""
 
@@ -287,6 +312,8 @@ class Setup:
     retired_accounts: tuple[str, ...] = ()
     # The machine that runs sessions' slow commands ([offload], SPEC BG-29); None runs them here.
     offload: Offload | None = None
+    # The model hub the Usage page shows ([hub], SPEC UI-81); None leaves every hub view out.
+    hub: HubSetup | None = None
     # The loopback port the server listens on; a second instance needs one of its own (SPEC SCOPE-7).
     port: int = DEFAULT_PORT
 
@@ -331,7 +358,7 @@ def read_setup(path: Path, tables: dict[str, TableReader]) -> Setup:
         )
     optional = {
         "auth_mode", "providers", "default_provider", "codex_command", "claude_sockets_dir", "deploy_branch",
-        "public_origin", "last_use", "retired_accounts", "offload", "features", "port",
+        "public_origin", "last_use", "retired_accounts", "offload", "hub", "features", "port",
     }
     missing = [key for key in keys if key not in values and key not in optional]
     unknown = sorted(set(values) - set(keys) - set(tables))
@@ -341,11 +368,11 @@ def read_setup(path: Path, tables: dict[str, TableReader]) -> Setup:
     part_tables = {name: read(path, values.pop(name, None)) for name, read in tables.items()}
     values = {"auth_mode": "google", "providers": ["claude"], "default_provider": "claude",
               "codex_command": "codex", "claude_sockets_dir": "", "deploy_branch": "", "public_origin": "",
-              "last_use": {}, "retired_accounts": [], "offload": None, "features": [], "port": DEFAULT_PORT,
+              "last_use": {}, "retired_accounts": [], "offload": None, "hub": None, "features": [], "port": DEFAULT_PORT,
               **values}
     may_be_empty = {"claude_sockets_dir", "deploy_branch", "public_origin"}
     wrong = [key for key in keys
-             if key not in {"providers", "last_use", "retired_accounts", "offload", "features", "port"}
+             if key not in {"providers", "last_use", "retired_accounts", "offload", "hub", "features", "port"}
              and (not isinstance(values[key], str) or (not values[key].strip() and key not in may_be_empty))]
     if wrong:
         raise SetupError(f"{path}: {', '.join(wrong)} must be text that is not empty")
@@ -400,6 +427,7 @@ def read_setup(path: Path, tables: dict[str, TableReader]) -> Setup:
     checked: dict[str, Any] = {**values, **paths, "timezone": timezone, "parts": part_tables, "providers": tuple(providers),
                                "features": tuple(features),
                                "offload": _read_offload(path, values["offload"]),
+                               "hub": _read_hub(path, values["hub"]),
                                "retired_accounts": tuple(retired_accounts),
                                "last_use": {address: end.timestamp() for address, end in last_use.items()}}
     return Setup(**checked)
@@ -417,6 +445,42 @@ def _read_offload(path: Path, table: Any) -> Offload | None:
     if any(not repo.is_absolute() for repo in repos):
         raise SetupError(f"{path}: [offload] repos must be absolute paths or start with ~/")
     return Offload(host=table["host"], repos=repos)
+
+
+def _read_hub(path: Path, table: Any) -> HubSetup | None:
+    """The [hub] table, checked; None when the setup has none."""
+    if table is None:
+        return None
+    keys = {"url", "key_file", "sign_in", "restarts", "tunnel_state"}
+    if not isinstance(table, dict) or not {"url", "key_file"} <= set(table) <= keys:
+        raise SetupError(f"{path}: [hub] takes url and key_file, and optionally sign_in, restarts and tunnel_state")
+    url = table["url"]
+    if not isinstance(url, str) or not re.fullmatch(r"https?://[^/?#\s]+", url):
+        raise SetupError(f"{path}: [hub].url must be the hub's http:// or https:// address without a path, a query, a "
+                         "fragment or a trailing /")
+    given_key_file = table["key_file"]
+    try:
+        key_file = Path(given_key_file).expanduser() if isinstance(given_key_file, str) else None
+    except RuntimeError:  # an unknown ~user
+        key_file = None
+    if key_file is None or not key_file.is_absolute():
+        raise SetupError(f"{path}: [hub].key_file must be an absolute path or start with ~/")
+
+    def command(name: str, value: Any) -> tuple[str, ...]:
+        if not isinstance(value, list) or not value or any(not isinstance(word, str) or not word for word in value):
+            raise SetupError(f"{path}: [hub] {name} must be a command as a list of words, such as [\"systemctl\", \"--user\", ...]")
+        return tuple(value)
+
+    def commands(name: str, allowed: tuple[str, ...]) -> dict[str, tuple[str, ...]]:
+        given = table.get(name, {})
+        if not isinstance(given, dict) or any(key not in allowed for key in given):
+            raise SetupError(f"{path}: [hub.{name}] takes a command for each of {', '.join(allowed)}")
+        return {key: command(f"{name}.{key}", value) for key, value in given.items()}
+
+    tunnel_state = table.get("tunnel_state")
+    return HubSetup(url=url, key_file=key_file, sign_in=commands("sign_in", HUB_SIGN_INS),
+                    restarts=commands("restarts", HUB_RESTARTS),
+                    tunnel_state=None if tunnel_state is None else command("tunnel_state", tunnel_state))
 
 
 def validate_local_origin(origin: str, port: int) -> None:

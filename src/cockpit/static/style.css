@@ -3388,9 +3388,9 @@ details.menu[open] > .start-button > .icon-chevron { transform: rotate(180deg); 
 .snooze-unread { display: flex; align-items: center; gap: 6px; margin: 0 0 12px; color: var(--text-2); font-size: var(--fs-meta); line-height: 16px; }
 .snooze-unread .icon { width: 12px; height: 12px; flex: none; }
 
-/* The connection key keeps its place as saved data and queued edits come and go. */
+/* The connection key takes no room until a lasting state lights it (UI-91), so no empty gap sits among the keys. */
 .offline-note-key { flex: none; min-width: 24px; }
-.offline-note-key:not(.available) { visibility: hidden; }
+:root .offline-note-key:not(.available) { display: none; }
 .offline-note-key.available { color: var(--accent-text); }
 .offline-note {
   --offline-note-width: min(360px, calc(100vw - 16px));

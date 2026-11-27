@@ -66,6 +66,7 @@ from cockpit import (
     control_uses,
     db,
     delivery,
+    drafts,
     emergency,
     flashes,
     gateway_store,
@@ -1239,6 +1240,45 @@ class InboxSettingsIn(Body):
     sources: str
 
 
+def _refuse_constant(name: str) -> None:
+    raise ValueError(f"{name} is not JSON")
+
+
+class DraftChange(Body):
+    key: Annotated[str, StringConstraints(min_length=1, max_length=drafts.KEY_CHARS)]
+    # The page's JSON text for the key; empty when the box was emptied.
+    value: Annotated[str, StringConstraints(max_length=drafts.VALUE_CHARS)]
+    # The stored version the change was made on, 0 for a key the page never saw stored.
+    base: Annotated[int, Field(ge=0)]
+
+    @field_validator("value")
+    @classmethod
+    def _json_text(cls, value: str) -> str:
+        if value:
+            try:
+                # NaN and Infinity are Python's, not JSON's: the page's JSON.parse refuses them.
+                json.loads(value, parse_constant=_refuse_constant)
+            except ValueError as error:
+                raise ValueError("send the draft as JSON text, or empty for an emptied box") from error
+        return value
+
+
+RequestId = Annotated[str, StringConstraints(min_length=1, max_length=drafts.REQUEST_CHARS)]
+
+
+class DraftsIn(Body):
+    # A tab left open across an update keeps its drafts going to Cockpit: a page from the second version of drafts
+    # sends one request it follows as `after` (null for none), or a request it kept from then, and one from the first
+    # version sends neither `after` nor `id`.
+    nullable = frozenset({"after"})
+    # The page's id for this request, the same when it sends the request again.
+    id: RequestId | None = None
+    # The requests sent before this one whose answer had not come, oldest first.
+    follows: Annotated[list[RequestId], Field(max_length=drafts.FOLLOWS)] = []
+    after: RequestId | None = None
+    changes: Annotated[list[DraftChange], Field(min_length=1, max_length=drafts.CHANGES)]
+
+
 class EmergencyIn(Body):
     # A Codex turn names no account (SPEC SESSION-22). An emergency page loaded before SESSION-22 sends no provider,
     # model or effort: its turn runs Claude at the defaults, so a tab left open across a deploy keeps working.
@@ -1999,6 +2039,12 @@ def create_app(
         except emergency.Unreachable as exc:
             return emergency_unreachable(exc)
 
+    # The page sends each change to its drafts here, so they follow the user to another device (drafts.py).
+    @app.post("/api/drafts", dependencies=[Depends(user_only)])
+    def put_drafts(body: DraftsIn, conn: Conn) -> dict:
+        follows = [body.after, *body.follows] if body.after else body.follows
+        return drafts.put(conn, body.id, follows, [(change.key, change.value, change.base) for change in body.changes])
+
     @app.post("/api/emergency/send", dependencies=[Depends(user_only)])
     def emergency_send(body: EmergencyIn) -> Response:
         picks = (body.provider, body.model, body.effort)
@@ -2309,6 +2355,9 @@ def create_app(
             log.exception("emergency session: could not read it for the main page")
             result["emergency"] = None
         result["version"] = version
+        # The user's unsent words, which only the user's page reads (drafts.py); agents see none.
+        if request.state.me == "user":
+            result["drafts"] = drafts.state(conn)
         for part in built:
             fields = part.state(now, request.state.me == "user")
             taken = sorted(fields.keys() & result.keys())

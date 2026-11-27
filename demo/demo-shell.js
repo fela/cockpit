@@ -818,8 +818,18 @@
     if ((m = /^\/api\/page-comments\/(\d+)$/.exec(path))) return commentRoute(+m[1], body, method);
     if ((m = /^\/api\/briefings\/(\d+)\/read$/.exec(path))) return briefingRead(+m[1]);
     if (path === "/api/update" && method === "POST") return startUpdate();
+    if (path === "/api/drafts" && method === "POST") return keepDrafts(body);
     if (QUIET.test(path)) return { j: {} };
     return genericWrite(source);
+  }
+
+  // The page keeps its drafts on Cockpit to carry them to other devices (draft-sync.js); the demo has one device, so
+  // it takes every change, as Cockpit takes one nobody else wrote.
+  let draftsAt = 0;
+  function keepDrafts(body) {
+    const entries = {};
+    for (const change of body.changes) entries[change.key] = [change.value, ++draftsAt];
+    return { j: { at: draftsAt, entries, taken: body.changes.map((change) => change.key) } };
   }
 
   // A write the demo has no story for: the page shows its own change, and a note says nothing was kept.

@@ -290,6 +290,8 @@ with sqlite3.connect(Path(sys.argv[1]).as_uri() + "?mode=ro", uri=True) as conn:
     for (const done of ["requestfinished", "requestfailed"]) dead.on(done, (request) => waiting.delete(request));
     await dead.goto(`${info.origin}/`);
     await dead.waitForFunction(() => typeof window.awayClock === "function" && document.visibilityState === "visible");
+    // The key press tests reporting counts during a dead network. An automatic timer has its own timeout and error.
+    await dead.evaluate(() => { window.startOpened = () => {}; });
     await dead.clock.runFor(10e3);
     await dead.clock.pauseAt(await dead.evaluate(() => Date.now() + 1000));
     for (const end = Date.now() + 10e3; !cut; await sleep(100)) {

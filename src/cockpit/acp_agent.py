@@ -1,13 +1,14 @@
-"""Sessions on agents Cockpit drives over the Agent Client Protocol: the Gemini CLI and Grok Build (SPEC SESSION-30).
+"""Sessions on agents Cockpit drives over the Agent Client Protocol: Google's Antigravity CLI (`agy`), which is
+Cockpit's "gemini" provider, and Grok Build (SPEC SESSION-30).
 
 ACP is JSON-RPC 2.0 on the agent's stdin and stdout. Cockpit starts one agent process per model and session folder,
-started in that folder, so what an agent loads from a checkout (Gemini reads its .env) stays with that checkout's
+started in that folder, so what an agent loads from a checkout (an agent can read its .env) stays with that checkout's
 sessions: `initialize`, then `session/new`, then a `session/prompt` per message, which answers when the turn ends.
 While it runs, `session/update` notifications stream the agent's words and tool calls, which Cockpit keeps in acp_log
 because ACP has no call that lists a session's past items; a call is kept by its kind and title, without its input or
 output. `session/request_permission` asks before a tool runs, which reaches the page as a request card shaped like a
 Codex one (CodexAgent.requests), showing the command, paths and diffs the request names. The agents reuse their CLI's
-own login and settings. Gemini approves file edits by itself and asks for the rest; Grok asks for every call.
+own login and settings (agent_env), and ask before the tool calls those settings leave to the user.
 
 The processes are the web server's children, unlike Codex threads, which an independent worker keeps through web
 restarts: a restart ends their turns (mark_interrupted fails them), and the session's next message loads it again with
@@ -40,8 +41,8 @@ log = logging.getLogger(__name__)
 PROTOCOL_VERSION = 1
 # How long a request other than a prompt may take before Cockpit gives up on it.
 REQUEST_SECONDS = 60
-# What the session log says of a call in place of its title, which can hold the command and its secrets (Gemini titles
-# a shell call with its command): the call's ACP status in words.
+# What the session log says of a call in place of its title, which can hold the command and its secrets (the Gemini CLI
+# titles a shell call with its command): the call's ACP status in words.
 STATUS_LABELS = {"pending": "pending", "in_progress": "running", "completed": "done", "failed": "failed"}
 # The most of one diff a permission card shows; a longer one says how much is left out.
 DIFF_MAX = 20000
@@ -57,19 +58,45 @@ class AcpError(CodexError):
 def agent_args(provider: str, model: str) -> list[str]:
     """The command that starts `provider`'s agent in ACP mode on `model`, found on the service's PATH."""
     if provider == "gemini":
-        return ["gemini", "--acp", "--approval-mode", "auto_edit", "--model", model]
+        if model != "default":
+            raise ValueError(f"Antigravity runs on its own default model, not {model}")
+        return ["agy", "acp"]
     if provider == "grok":
         return ["grok", "agent", *(["--model", model] if model != "default" else []), "stdio"]
     raise ValueError(f"{provider} is not an ACP provider")
+
+
+# Google credentials and Antigravity settings a launch drops from the service's environment, so Antigravity signs in
+# with the account its own sign-in stored, as T3 Code launches it (apps/server/src/provider/antigravityAuthSupport.ts).
+AGY_DROPPED_ENV = frozenset({
+    "GEMINI_API_KEY", "GOOGLE_API_KEY", "GOOGLE_APPLICATION_CREDENTIALS", "GOOGLE_CLOUD_PROJECT",
+    "GOOGLE_CLOUD_LOCATION", "GOOGLE_CLOUD_QUOTA_PROJECT", "GOOGLE_GENAI_USE_VERTEXAI", "GCLOUD_PROJECT",
+    "CLOUDSDK_CORE_PROJECT", "AGY_ACP_CCPA_PROJECT", "AGY_ACP_ENABLE_OAUTH", "GEMINI_HOME",
+    "AGY_ACP_FORCE_FILE_STORAGE", "AGY_CLI_DISABLE_AUTO_UPDATE", "BROWSER", "PYTHONUNBUFFERED", "ELECTRON_RUN_AS_NODE",
+    "CHROME_CRASHPAD_PIPE_NAME",
+})
+
+
+def agent_env(provider: str, environ: dict[str, str]) -> dict[str, str]:
+    """The environment `provider`'s agent starts with: the service's, with Cockpit's Python first on PATH. Antigravity
+    also gets T3 Code's launch settings. Without a keyring it keeps its Google sign-in in ~/.gemini, which the 1.5 CLI
+    does only when it believes it runs over SSH, hence SSH_CONNECTION; it stays at its installed version."""
+    env = {**environ, "PATH": str(Path(sys.executable).parent) + os.pathsep + environ.get("PATH", "")}
+    if provider != "gemini":
+        return env
+    env = {key: value for key, value in env.items() if key.upper() not in AGY_DROPPED_ENV}
+    return {**env, "SSH_CONNECTION": environ.get("SSH_CONNECTION") or "127.0.0.1 0 127.0.0.1 0",
+            "AGY_ACP_FORCE_FILE_STORAGE": "1", "AGY_CLI_DISABLE_AUTO_UPDATE": "1", "PYTHONUNBUFFERED": "1",
+            "ELECTRON_RUN_AS_NODE": "1"}
 
 
 class Connection:
     """One agent process: requests and their answers, the agent's own requests and its notifications, read on a
     thread of its own so a slow handler never stalls the pipe."""
 
-    def __init__(self, args: list[str], cwd: Path, on_message: Callable[[Connection, dict[str, Any]], None],
-                 name: str) -> None:
-        self.args, self.cwd, self.on_message, self.name = args, cwd, on_message, name
+    def __init__(self, args: list[str], env: dict[str, str], cwd: Path,
+                 on_message: Callable[[Connection, dict[str, Any]], None], name: str) -> None:
+        self.args, self.env, self.cwd, self.on_message, self.name = args, env, cwd, on_message, name
         self._lock = threading.Lock()
         self._write_lock = threading.Lock()
         self._next_id = 0
@@ -84,7 +111,7 @@ class Connection:
             self.process = subprocess.Popen(
                 self.args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
                 bufsize=1, cwd=str(self.cwd), start_new_session=True,
-                env={**os.environ, "PATH": str(Path(sys.executable).parent) + os.pathsep + os.environ.get("PATH", "")},
+                env=self.env,
             )
         except OSError as exc:
             raise AcpError(f"cannot start {self.name}: {exc}; check that it is installed and signed in") from exc
@@ -209,8 +236,8 @@ def _tool_name(call: dict[str, Any]) -> str:
 
 
 def _command(call: dict[str, Any]) -> str:
-    """What a tool call does, in its own words: the command it runs, else its input as JSON. Gemini sends a shell call
-    with no input, kind `execute` and the command as its title (its ShellToolInvocation.getDisplayTitle)."""
+    """What a tool call does, in its own words: the command it runs, else its input as JSON. The Gemini CLI sends a
+    shell call with no input, kind `execute` and the command as its title (its ShellToolInvocation.getDisplayTitle)."""
     raw = call.get("rawInput")
     if isinstance(raw, dict) and isinstance(raw.get("command"), str):
         return raw["command"]
@@ -344,7 +371,8 @@ class AcpAgent:
                 return connection
             if connection is not None:
                 connection.close()  # closed its stdout but may live on
-            connection = Connection(agent_args(self.provider, model), cwd, self._message, f"{self.label} ({model})")
+            connection = Connection(agent_args(self.provider, model), agent_env(self.provider, dict(os.environ)), cwd,
+                                    self._message, f"{self.label} ({model})")
             try:
                 connection.start()
             except Exception:

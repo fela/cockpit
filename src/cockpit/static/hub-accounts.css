@@ -1,0 +1,65 @@
+/* Shared columns keep accounts comparable; the phone repeats the column names. */
+#hub-account-list { container: hub-accounts / inline-size; }
+.hub-accounts { display: grid; grid-template-columns: var(--hub-columns); column-gap: 12px; }
+.hub-account-columns, .hub-account { grid-column: 1 / -1; display: grid; grid-template-columns: subgrid; }
+.hub-account-columns { padding: 4px 0; color: var(--text-3); font-size: var(--fs-meta); line-height: 20px; white-space: nowrap; }
+.hub-column-account { visibility: hidden; }
+.hub-account, :root .hub-account { position: relative; align-items: start; row-gap: 0; min-width: 0; padding: 10px 0; border: 0; border-radius: 0; background: none; box-shadow: none; }
+.hub-account + .hub-account { border-top: 1px solid var(--line); }
+/* A row is as tall as it has lines. Its first line of words stands 4 pixels down, level with the middle of the
+   28-pixel request chart and keys beside it. */
+.hub-account-head { display: grid; grid-template-columns: 8px minmax(0, max-content) minmax(0, 1fr); align-items: baseline; gap: 0 6px; min-width: 0; padding-top: 4px; }
+.hub-account .hub-account-head { grid-column: 1; grid-row: 1; }
+.hub-lamp { flex: none; align-self: center; width: 8px; height: 8px; border-radius: 50%; background: var(--lamp-grey); }
+.hub-account.working .hub-lamp { background: var(--lamp-green); }
+.hub-account.cooling .hub-lamp { background: var(--lamp-orange); }
+.hub-account.signed_out .hub-lamp { background: var(--lamp-red); }
+.hub-account-who { min-width: 0; color: var(--text); font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; line-height: 20px; }
+.hub-account-kind { min-width: 0; color: var(--text-3); font-size: var(--fs-meta); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hub-account-state { grid-column: 2 / -1; display: flex; flex-direction: column; margin: 0; color: var(--text-2); font-size: var(--fs-meta); line-height: 16px; }
+.hub-state-words, .hub-said { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hub-said { color: var(--text-3); }
+
+.hub-limits { display: contents; }
+.hub-limit { grid-row: 1; display: grid; grid-template-columns: minmax(0, 1fr) 40px; grid-template-rows: 20px auto; align-items: center; gap: 0 6px; min-width: 0; padding-top: 4px; font-size: var(--fs-meta); line-height: 16px; }
+.hub-limit.under { --pace: var(--lamp-green); }
+.hub-limit.near { --pace: var(--lamp-orange); --pace-fill: var(--lamp-orange-fill); }
+.hub-limit.over { --pace: var(--lamp-red); }
+.hub-limit-name { display: none; color: var(--text-2); white-space: nowrap; }
+.hub-limit-bar { position: relative; display: block; height: 3px; border-radius: 2px; background: var(--line-strong); }
+.hub-limit-fill { position: absolute; inset: 0 auto 0 0; border-radius: 2px; background: var(--pace-fill, var(--pace, var(--text-3))); }
+.hub-limit-tick { position: absolute; top: -2px; width: 1px; height: 7px; background: var(--text); }
+.hub-limit-used { text-align: right; font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.hub-limit-line { grid-column: 1 / -1; height: 16px; color: var(--text-3); text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.hub-limit-line:empty { display: none; }
+.hub-limit-empty { grid-row: 1; }
+.hub-account:not(.disabled, .signed_out) .hub-limit.stale, .hub-account:is(.disabled, .signed_out) .hub-limit { opacity: .55; }
+.hub-limits-at { grid-column: 2 / var(--hub-limit-end); grid-row: 1; align-self: center; min-width: 0; margin: 0; color: var(--text-3); font-size: var(--fs-meta); line-height: 16px; overflow-wrap: anywhere; }
+.hub-account > .hub-traffic { grid-column: var(--hub-limit-end); grid-row: 1; }
+.hub-account-end { grid-column: -2; grid-row: 1; display: flex; align-items: center; justify-content: flex-end; gap: 6px; min-height: 28px; }
+.hub-account > .hub-fact { grid-column: 1 / -1; margin-top: 4px; }
+
+@container hub-accounts (max-width: 860px) {
+  .hub-accounts { grid-template-columns: minmax(0, 1fr) auto; column-gap: 12px; }
+  .hub-account-columns { display: none; }
+  .hub-account, :root .hub-account { row-gap: 8px; padding: 12px 0; }
+  .hub-account .hub-account-head { grid-column: 1; }
+  .hub-account-end { display: contents; }
+  .hub-account-end > .hub-more { grid-column: 2; grid-row: 1; align-self: start; justify-self: end; }
+  .hub-account-end > .hub-keys { grid-column: 2; grid-row: 3; align-self: start; }
+  .hub-limits { grid-column: 1 / -1; grid-row: 2; display: grid; row-gap: 4px; }
+  .hub-limit { grid-row: auto; grid-template-columns: 108px minmax(0, 1fr) 46px; padding-top: 0; }
+  .hub-limit-name { display: inline; }
+  .hub-limit-line { grid-column: 2 / -1; }
+  .hub-limit-empty { display: none; }
+  .hub-limits-at { grid-column: 1 / -1; grid-row: 2; }
+  .hub-account > .hub-traffic { grid-column: 1; grid-row: 3; }
+}
+
+@media (max-width: 640px) {
+  .hub-account :is(button, summary), .hub-add > summary, .hub-add .menu-list button { min-height: 44px; }
+  .hub-account .hub-more > summary { min-width: 44px; }
+  .hub-account-end > .hub-keys { grid-column: 1 / -1; grid-row: 4; justify-content: flex-end; }
+  .hub-account > .hub-traffic { grid-column: 1 / -1; }
+  .hub-account > .hub-fact { grid-row: 5; }
+}

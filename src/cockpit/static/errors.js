@@ -135,7 +135,7 @@
   const RESCAN_MS = 60e3;
   // Without Web Locks a page cannot tell entries left behind from another tab's, so it keeps none.
   const keeping = Boolean(navigator.locks) && scoped;
-  let revoked = false, checkSession = false, sessionCheck = null;
+  let revoked = false, checkSession = !navigator.onLine, sessionCheck = null;
   const activeActions = new Set();
   const recoveryByResource = new Map();
 
@@ -256,6 +256,8 @@
         if (response.status === 401 || response.status === 403) { clearScope(); requireConnection(); }
         if (!response.ok) throw new TypeError("Cockpit could not verify this sign-in yet");
         const current = await answerJson(response);
+        attempt.signal.throwIfAborted();
+        requireConnection();
         if (current.user !== scope || current.until !== scopeUntil || current.until <= Date.now() / 1000) {
           clearScope(); requireConnection();
         }
@@ -397,10 +399,10 @@
     };
   }
 
-  // fetch, and a body read, reject with a TypeError when the connection to Cockpit fails, and with an
-  // AbortError when the try's own signal ended it.
+  // Fetch and body reads reject when the connection fails or the try ends. Sign-in verification
+  // can also detect that the browser is offline before making a request.
   function lostConnection(failure, signal) {
-    return failure instanceof TypeError || signal.aborted;
+    return failure instanceof TypeError || failure?.offline === true || signal.aborted;
   }
 
   // Resolves once the browser is online and, when `visible`, the page visible.

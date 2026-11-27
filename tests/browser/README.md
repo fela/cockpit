@@ -68,6 +68,14 @@ quote must show it in the card's fold, opened by Show all and in the history wit
 the reply box's own letters must be transparent over a copy whose quote line has its bar, holding exactly the box's
 words and wrapping to the same height. It saves screenshots of both in its work folder.
 
+## Drafts between devices
+
+`draft_sync.cjs` opens a laptop (1280 px, light) and a phone (390 px, dark) on a synthetic database through
+`serve_preview.py`, each with its own storage, and checks that a reply box's unsent words cross between them through
+Cockpit (SPEC NEXT-67). The box the user types in keeps its words; words both devices changed join, the first to reach
+Cockpit first; emptying crosses; words typed offline join on reconnect; a device opened afresh shows the draft. It
+takes about a minute and saves a screenshot of each device in its work folder.
+
 ## Time zone question and picker
 
 `zone_ask.cjs` sets Cockpit to Jakarta and runs the browser in Tokyo, seen there for seven hours, on a synthetic
@@ -292,6 +300,143 @@ node tests/browser/usage_model_limits.cjs
 It prints one line per check and exits 0 when all passed. The hover card and the Usage page's meters are saved as
 `card.png`, `limits.png` and `limits-phone.png` in the work folder. It writes `model-limits.json` there once the
 harness is up, since the harness empties the folder at startup.
+
+## The hub's checks
+
+The checks below run Cockpit with a `[hub]` table in its setup (`serve_hub.py`), whose stand-in hub (`tests/fake_hub.py`)
+answers on a local port with the accounts and figures a check gives it in `hub.json`, and whose sign-ins, restarts and
+tunnel check are harmless stand-in commands.
+
+### The hub's weekly limits
+
+`usage_hub_limits.cjs` checks the weekly limits of the CLIProxyAPI hub's accounts (SPEC UI-84). It starts
+`serve_hub.py` with its stand-in hub, holding two Claude accounts with figures, a Claude account without and a
+Codex account. It opens `/usage` alone at 1280 px in both themes and at 390 px, then `/` at 1440 px in both themes:
+
+- the Usage page fits the window at each width;
+- the foot shows Claude's week for all models and Codex's week, one bar per account with a figure, and none of the
+  machine's own signed-in accounts;
+- the foot is a link to the Usage page whose spoken words give each figure;
+- the hover card names each limit once, Claude's week for all models first, then Fable's limit, Opus's week after
+  Fable's allowance and Codex's week, with one line per account under it, in
+  at most 250 characters, with each account's short name and plan, and inside its box;
+- the page tabs have Usage and no Hub tab;
+- a press opens the Usage page in the centre, whose Accounts section takes the place of the machine's own weekly
+  limits and holds one row per account: its limits, or a line saying why it has none; active limits have shared column
+  headings, with the explanation of Opus after Fable on its heading;
+- the rows have their controls: Add account, and a ⋯ menu on each row;
+- the Usage page's menu has Usage and no Hub entry;
+- once the stand-in hub refuses Cockpit's key, the foot keeps its figures and gains a red sign, and the hover card
+  says the hub is unreachable in one line;
+- a failed refresh of the Usage page keeps the rows and says so in the hub's red line above the page, which the next
+  good refresh removes;
+- no page errors.
+
+```bash
+node tests/browser/usage_hub_limits.cjs
+```
+
+It prints one line per check and exits 0 when all passed. A run takes up to four minutes, since Cockpit reads the hub
+again at most once a minute. The Usage page, the foot, the hover card and the foot with the hub down are saved as
+`usage-1280.png`, `usage-1280-dark.png`, `usage-390.png`, `foot-*.png`, `card-*.png` and `down.png` in the work
+folder.
+
+### The hub on the Usage page
+
+`hub_page.cjs` checks the hub's part of the Usage page (SPEC UI-85), which shows the CLIProxyAPI hub and controls it.
+It starts `serve_hub.py` with a stand-in hub on a local port that holds four accounts (one working, one with a
+weekly limit for one model, one resting after a limit, one turned off) and five failed requests, and opens `/usage` at
+1280 px in both themes and at 390 px, where it opens the "Hub service" fold:
+
+- the hub's status line, allowance graph and Accounts section follow the page's head, and the hub's service is a closed fold
+  named "Hub service" after the usage's tables;
+- every part is drawn and nothing is wider than the window, and at 390 px the Add account and ⋯ menus open inside it;
+- the address `/hub` opens the Usage page;
+- the menu has no Hub entry, and marks Usage as the page shown;
+- one status line says the hub is up and how the accounts stand, and leads in red with a tunnel that is down or no
+  Codex account working;
+- each account has one unboxed row: its short name with the address on hover, its provider and plan, a lamp naming its
+  working state or words for another state, the limits the provider named, requests in each ten minutes, and a ⋯ menu;
+- desktop limit cells align across accounts under shared headings, ordered five hours, week, Fable and Opus after
+  Fable; a countdown shows at 80 percent used or more, on a resting account too, and takes a line only then;
+- old limits are dimmed and say when they were read on hover; the Opus explanation and $500 plan's Ultrafast access
+  appear on their heading and plan hover text; account hover text fits two lines of 80 characters;
+- request charts are 24 pixels tall and name their counts on hover and for screen readers, with a visible failed
+  count when positive; state keys and ⋯ menus sit at the row's end;
+- a row is as tall as its lines, 48 pixels with one, and its name, figures, chart and keys share a middle;
+- a resting account says until when, with the hub's reason on hover, and an account turned off that carried no
+  request says so with what the hub said;
+- Add account in the Accounts head signs in a Claude or a Codex account, and a Codex code stays on its card;
+- the hub service says how requests are shared, the version beside the newer release, the client keys, and has the
+  restarts;
+- the failed requests show the time, how many times, the answer, the method and the path, a repeated request as one
+  line, and nothing of the caller's key or of what it asked reaches the page; without failed requests the part is gone;
+- choosing another way to share requests changes the hub, and so do Turn off, Turn on, End the rest and, once
+  confirmed in the page's dialog, Sign out and a restart; Cancel and Escape change nothing and give the focus back;
+- an open ⋯ menu or dialog stays through a poll that brings a change;
+- with the hub not answering, the rows of Cockpit's last read show without their controls, under a line saying from
+  when; with no accounts read either, the status line says why and only the restarts stay;
+- on a machine without a hub no part of the hub shows, and the machine's own weekly limits do;
+- no page errors.
+
+```bash
+node tests/browser/hub_page.cjs
+```
+
+It prints one line per check and exits 0 when all passed. The page with its Hub service fold open is saved as
+`hub-1280.png`, `hub-1280-dark.png` and `hub-390.png` in the work folder, the open menus as `hub-390-menu.png` and
+`hub-menu.png`, the question dialog as `hub-confirm.png` and `hub-confirm-dark.png`, and the page on a machine without
+a hub as `no-hub.png`. It writes `hub.json` there before it starts the harness, which reads the file at startup.
+
+### Sign in again only where the setup signs in
+
+`hub_sign_in_again.cjs` checks that a signed-out account offers Sign in again only when the setup gives its provider a
+sign-in command (SPEC UI-85). It starts `serve_hub.py` with a Codex sign-in alone and a stand-in hub holding a
+signed-out Codex account and a signed-out Claude account, and opens `/usage` at 1280 px:
+
+- the Codex account has Sign in again, and the Claude account has no key;
+- Add account lists Codex alone;
+- Sign in again starts the Codex sign-in, with no 404 and no page errors.
+- the Inbox then shows the Codex sign-in warning with no page errors, though the setup has no Claude sign-in.
+
+```bash
+node tests/browser/hub_sign_in_again.cjs
+```
+
+It prints one line per check and exits 0 when all passed. The page is saved as `sign-in-again.png` in the work folder.
+
+### The allowance left on the Usage page
+
+`usage_hub_left.cjs` checks the graph above Accounts (SPEC UI-87), which shows how much of each provider's weekly
+allowance is left. It starts `serve_hub.py` with a stand-in hub on a local port and opens `/usage` at 1280 px in
+both themes and at 390 px:
+
+- the graph is the page's first section, headed "Allowance left", with one legend that names its three lines;
+- there is one row for each provider's week, and one for Claude's Fable week: its name, the share left now and what
+  comes next (the next reset, when the recent pace uses it up, or until when it is used up), beside a plot from seven
+  days back to seven days ahead;
+- each plot draws the line so far and two lines ahead: what is left when nothing more is used, which the resets lift,
+  and what is left at the recent pace; the labels share one edge and the plots another, over one time scale whose
+  "Now" stands under the rule at now;
+- the pointer over a plot, a tap, or the arrow keys on the focused rows read every row at one time: a rule and a dot
+  in every plot, and one tooltip with the time, its distance from now, each row's share by each line, and the
+  accounts of the row being read with their next resets; up and down change that row, Home and End read the ends,
+  and Escape, the pointer leaving or the focus leaving take the reading away; a screen reader hears it;
+- the tooltip stays inside the rows beside the rule, or under the rows' dates where a phone has no room beside it,
+  and takes its place again when the page changes width; the rows keep the share left now while another time is read;
+- "All the tables" holds the same figures as a table;
+- a load that fails keeps the rows under a line that says since when they are old, and the next load that works
+  takes the line away; a redraw under the keys keeps the focus and the reading;
+- nothing is wider than the window, and at 390 px each row's words stand over its plot;
+- on a machine without a hub neither the graph nor its table shows;
+- no page errors.
+
+```bash
+node tests/browser/usage_hub_left.cjs
+```
+
+It prints one line per check and exits 0 when all passed. The graph is saved as `left-1280.png`, `left-1280-read.png`,
+`left-1280-dark.png` and `left-390.png` in the work folder.
 
 ## Page errors: every error reaches the log, and a loop stays cheap
 

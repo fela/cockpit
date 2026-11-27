@@ -7,7 +7,7 @@ installer gets the key by trading the one-time code in the line the user pastes,
 
 Cockpit keeps each minute for `KEEP_DAYS`, then folds it into a daily total per app and site that stays for good.
 Each app and site has a category: work, neutral or distraction, from the user's choices on the page, else the
-defaults below, else unsorted. A site matches its own host first, then the host without its leading labels, so
+install's own categories, else the defaults below, else unsorted. A site matches its own host first, then the host without its leading labels, so
 gist.github.com takes github.com's category. A minute counts for a task when its middle falls inside one of the
 task's timer spans.
 """
@@ -23,7 +23,7 @@ from datetime import UTC, date, datetime, time, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from cockpit import db
+from cockpit import db, parts
 from cockpit.timesheet import MINUTE_FORMAT, Interval, _merged, _time
 
 KEEP_DAYS = 30
@@ -188,9 +188,10 @@ def set_category(conn: sqlite3.Connection, name: str, category: str) -> None:
 
 
 def _known(conn: sqlite3.Connection, own_host: str) -> dict[str, str]:
-    """Every name with a category: the defaults, Cockpit's own host as work, then the user's choices."""
+    """Every name with a category: the defaults, then the install's own (parts.activity_categories), Cockpit's own
+    host as work, then the user's choices."""
     chosen = {row["name"]: row["category"] for row in conn.execute("SELECT name, category FROM activity_categories")}
-    return DEFAULT_CATEGORIES | {own_host: "work"} | chosen
+    return DEFAULT_CATEGORIES | parts.activity_categories() | {own_host: "work"} | chosen
 
 
 def category(known: dict[str, str], app: str, site: str | None) -> str:

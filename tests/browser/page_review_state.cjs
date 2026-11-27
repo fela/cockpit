@@ -28,6 +28,7 @@ function world(extra) {
       snoozing: new Map(), inFlight: new Map(), closesSkip: new Map(), sendCount: 0 },
     refresh: async () => {}, render: noop, toast: noop, logError: noop,
     PageComments: { settled: async () => {} }, Icons: { setProjects: noop },
+    CockpitDraftSync: { take: () => false, changed: noop },
     optimistic: async (_apply, work, undo) => { try { return await work(); } catch (e) { if (undo) undo(); throw e; } },
     refused: (_label, error) => error,
     addEventListener: (name, handler) => { handlers.set(name, [...(handlers.get(name) || []), handler]); },

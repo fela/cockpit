@@ -175,6 +175,25 @@ async function main() {
       await sleep(1500);
       const reloaded = await page.evaluate(() => ui.shownItem);
       check(`${width} px: a reload after moving on shows the task moved to, not the linked one`, reloaded === mine.item, JSON.stringify({ reloaded, linked: picked[2].id, mine: mine.item }));
+      // A link to a task created after the device saved its board: the saved board draws first, without the task, and
+      // the link waits in the address until the fresh board opens it (regression check). The fresh board is held back
+      // so the saved one is drawn first.
+      const created = `note:one-view-new-${width}-${run}`;
+      await call(AGENT, "PUT", "/api/items", { key: created, title: `Linked new task ${width}`, stage: "building" });
+      const newId = (await call(headers, "GET", "/api/state")).items.find((item) => item.key === created).id;
+      let held = 0;
+      await page.route("**/api/state*", async (route) => { held += 1; await sleep(1500); await route.continue(); });
+      await page.goto("about:blank");
+      await page.goto(`${info.origin}/#home/item/${newId}`);
+      const early = await waitFor(() => page.evaluate(() => (typeof ui === "undefined" ? {} : { saved: ui.savedState, drawn: Boolean(ui.state), hash: location.hash }))
+        .catch(() => ({})), (now) => now.drawn);
+      check(`${width} px: a link to a task the saved board lacks stays in the address while that board shows`,
+        early.saved && early.hash === `#home/item/${newId}`, JSON.stringify(early));
+      await page.waitForFunction((id) => ui.shownItem === id && !location.hash, newId, { timeout: 20e3 }).catch(() => {});
+      const opened = await page.evaluate(() => ({ shown: ui.shownItem, hash: location.hash, saved: ui.savedState }));
+      check(`${width} px: the fresh board then opens the linked new task and clears the address`,
+        opened.shown === newId && opened.hash === "" && held > 0, JSON.stringify({ ...opened, newId, held }));
+      await page.unroute("**/api/state*");
       if (width <= 1000) {
         // A phone that opens the link in a new tab puts the list's entry before the task's. Back reaches the list, and
         // no entry keeps the link's address, so Back does not follow the link again (regression check).

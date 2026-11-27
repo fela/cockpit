@@ -38,7 +38,7 @@ const ROWS = [
   {
     session_id: "44444444-4444-4444-8444-444444444444",
     name: "Plan Tasks exports for completed lists, recurring reminders, shared lists and CSV files",
-    model: "claude-haiku-5-5", intended: "claude-opus-5-5", claude: true, latest: "claude-opus-5-5", first: LAST, last: LAST,
+    model: "claude-haiku-5-5", intended: "claude-opus-5-5", claude: true, latest: "claude-fable-5-2", first: LAST, last: LAST,
     calls: 1, back: true,
   },
   // The hub's fallback model (SPEC SESSION-20): amber, with nothing to investigate.
@@ -123,7 +123,7 @@ async function main() {
       check(mine[0].startsWith("Session “Reminder fix” ran on claude-sonnet-5-5 instead of claude-opus-5-5: 10 calls, the last at"),
         `${at}: the first names the session, both models and the calls (${mine[0]})`);
       check(mine[0].includes("/model claude-opus-5-5 in that session moves it back."), `${at}: one still off says how to move it back`);
-      check(mine[1].includes("1 call,") && mine[1].includes("It is back on claude-opus-5-5."), `${at}: one back says so`);
+      check(mine[1].includes("1 call,") && mine[1].includes("It is back on claude-fable-5-2."), `${at}: one back names the model it is back on, a restart's here`);
       check(mine[1].includes("…") && !mine[1].includes("CSV files"), `${at}: a long name is cut`);
       const wide = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
       check(wide <= 0, `${at}: nothing wider than the window (${wide} px over)`);

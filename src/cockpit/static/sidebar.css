@@ -514,7 +514,7 @@ body[data-layout="sidebar"] .session-card > .session-log { flex: 1 0 auto; }
   }
   .phone-count[hidden] { display: none; }
   .phone-reload[hidden] { display: none; }
-  .phone-add { width: 40px; height: 40px; }
+  .phone-add, .phone-feedback { width: 40px; height: 40px; }
 
   /* The item screen: the rail is out of sight. */
   body[data-layout="sidebar"]:not(.phone-list) .rail { display: none; }
