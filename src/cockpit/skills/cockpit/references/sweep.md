@@ -266,7 +266,7 @@ A stopped session's prompt cache has usually expired after an hour, so waking it
 - **Finish without waking** when the work is done or overtaken: its PR merged, the user answered elsewhere, another item covers it, or only the user's step remains. Write the finish step or the user's step yourself, from what the item, its links and the session's transcript show.
 - **Wake** when only that session can move work the user wants soon, with one message stating what remains.
 - **Let it wait** when nothing is lost by later: low priority, or a review or release still pending. Revisit it next run or when its wait resolves.
-- **Read the tightness** of the session's provider in `.hub.tightness`. While it is `tight`, wake only work the user is waiting on now or work due before the next reset; the rest waits. While it is `room`, also bring forward work that waited.
+- **When the state has a `hub`, read the tightness** of the session's provider in `.hub.tightness`. While it is `tight`, wake only work the user is waiting on now or work due before the next reset; the rest waits. While it is `room`, also bring forward work that waited.
 - **Spread large wakes**, such as after a reboot or a sign-in: urgent work first, a few sessions per run, the rest in later runs.
 - **Ask the user** only when a large wake has unclear value, such as many long sessions while the allowance runs low. Put one decision step naming the sessions, the reason and the expected cost.
 
