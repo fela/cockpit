@@ -271,15 +271,16 @@ def _now() -> str:
     return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _diffs(call: dict[str, Any]) -> list[dict[str, str]]:
+def _diffs(call: dict[str, Any], folder: str) -> list[dict[str, str]]:
     """The file changes a tool call's content proposes, each as its path and a unified diff of it, measured on the whole
-    file where it can be read (_whole), so the diff has the file's line numbers and the lines around the change."""
+    file where it can be read inside the session's folder (_whole), so the diff has the file's line numbers and the
+    lines around the change."""
     diffs = []
     for each in call.get("content") or []:
         if not isinstance(each, dict) or each.get("type") != "diff" or not isinstance(each.get("path"), str):
             continue
         path, old, new = each["path"], each.get("oldText"), str(each.get("newText") or "")
-        whole = _whole(path, old, new)
+        whole = _whole(path, old, new, folder)
         if whole is not None:
             old, new = whole
         # Lines end at "\n" alone, as in git; str.splitlines would also end them at a form feed or a lone "\r".
@@ -296,18 +297,30 @@ def _diffs(call: dict[str, Any]) -> list[dict[str, str]]:
     return diffs
 
 
-def _whole(path: str, old: Any, new: str) -> tuple[str, str] | None:
+def _whole(path: str, old: Any, new: str, folder: str) -> tuple[str, str] | None:
     """The whole file before and after a change, where the change names only part of it: Antigravity's edit sends the
     text it replaces and its replacement, and its write sends no old text even when it overwrites a file. None when the
-    path is not absolute, the file is missing, unreadable as text or over FILE_MAX bytes, or holds the replaced text
-    other than exactly once; the diff then shows the change as the call sends it."""
+    path is not absolute, lies outside `folder`, the session's own folder, once links resolve (the card would otherwise
+    show any file the agent names, such as a key), the file is missing, unreadable as text or over FILE_MAX bytes, or
+    holds the replaced text other than exactly once; the diff then shows the change as the call sends it."""
     if not os.path.isabs(path):
         return None
+    real, base = os.path.realpath(path), os.path.realpath(folder)
+    if real == base or os.path.commonpath([real, base]) != base:
+        return None
+    *folders, name = real.split(os.sep)[1:]
     try:
-        # O_NONBLOCK, since opening a pipe waits for a writer, and O_NOCTTY, so a terminal never becomes Cockpit's;
-        # only a regular file is read. newline="" keeps the file's line endings, so a change of them shows in the diff.
-        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOCTTY)
+        # The file opens one part of its real path at a time from the root, each with O_NOFOLLOW, so a folder or file
+        # swapped for a link after the check above, `folder` itself included, ends the read. O_NONBLOCK, since opening
+        # a pipe waits for a writer, and O_NOCTTY, so a terminal never becomes Cockpit's; only a regular file is read.
+        # newline="" keeps the file's line endings, so a change of them shows in the diff.
+        fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY)
         try:
+            for part in folders:
+                parent, fd = fd, os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+                os.close(parent)
+            parent, fd = fd, os.open(name, os.O_RDONLY | os.O_NONBLOCK | os.O_NOCTTY | os.O_NOFOLLOW, dir_fd=fd)
+            os.close(parent)
             info = os.fstat(fd)
             if not stat.S_ISREG(info.st_mode) or info.st_size > FILE_MAX:
                 return None
@@ -1062,6 +1075,9 @@ class AcpAgent:
         session_id = params.get("sessionId")
         call = params.get("toolCall") or {}
         row = self._row(session_id) if isinstance(session_id, str) else None
+        if row is None:
+            connection.write({"id": request_id, "result": {"outcome": {"outcome": "cancelled"}}})
+            return
         options = [each for each in params.get("options") or [] if isinstance(each, dict) and "optionId" in each]
         key = uuid.uuid4().hex
         call_id = str(call.get("toolCallId") or "")
@@ -1072,14 +1088,15 @@ class AcpAgent:
                 return
         else:
             kinds = {each.get("kind") for each in options}
-            command, diffs = _command(call), _diffs(call)
+            command, diffs = _command(call), _diffs(call, row["cwd"])
             if _shown_by_diff(call) and any(len(each["diff"]) > DIFF_MAX for each in diffs):
                 # A diff cut at DIFF_MAX no longer shows all the call does, so the card shows its input whole.
                 command = json.dumps(call["rawInput"], ensure_ascii=False)
             paths = _paths(call, diffs)
-            cwd = _cwd(call, row["cwd"] if row else "")
-            if _tool_name(call) == "execute" and "allow_once" in kinds and command and safe_shell.safe(command, cwd, str(config.HOME)):
-                self._auto_allow(connection, request_id, session_id, row, call, options)
+            cwd = _cwd(call, row["cwd"])
+            if (_tool_name(call) == "execute" and "allow_once" in kinds and command and not _outside_sandbox(call)
+                    and safe_shell.safe(command, cwd, str(config.HOME))):
+                self._auto_allow(connection, request_id, session_id, call, options)
                 return
             offered =[*(["accept"] if "allow_once" in kinds and (command or paths) else []),
                        *(["decline"] if "reject_once" in kinds else []), "cancel"]
@@ -1092,10 +1109,9 @@ class AcpAgent:
                            "shell": _tool_name(call) == "execute", "paths": paths, "diffs": diffs,
                            "outsideSandbox": _outside_sandbox(call)},
             }
-        if row is not None:
-            self._begin_late(connection, session_id)
+        self._begin_late(connection, session_id)
         with self._lock:
-            ours = (row is not None and self._loaded.get(session_id) is connection and session_id in self._active
+            ours = (self._loaded.get(session_id) is connection and session_id in self._active
                     and session_id not in self._cancelling)
             if ours:
                 self._pending[key] = pending
@@ -1106,15 +1122,16 @@ class AcpAgent:
         self._record(f"{self.provider}.requested", self.provider, {
             "request": key, "session_id": session_id, "method": pending["method"], "tool": _tool_name(call)})
 
-    def _auto_allow(self, connection: Connection, request_id: Any, session_id: Any, row: dict[str, Any] | None,
-                    call: dict[str, Any], options: list[dict[str, Any]]) -> None:
-        """Allow once, without a card, a shell call that only reads or only touches Cockpit (safe_shell.safe), when it
-        comes on one of the session's turns; cancelled otherwise, as a card would be. The event names the session and
+    def _auto_allow(self, connection: Connection, request_id: Any, session_id: Any, call: dict[str, Any],
+                    options: list[dict[str, Any]]) -> None:
+        """Allow once, without a card, a shell call that only reads or only touches Cockpit (safe_shell.safe) and runs
+        inside Antigravity's sandbox, when it comes on one of the session's turns; cancelled otherwise, as a card would
+        be. A call outside the sandbox always shows its card, since a read such as `git status` can run programs a
+        repository's config names, which the agent can write from inside the sandbox. The event names the session and
         the kind of call, never the command."""
-        if row is not None:
-            self._begin_late(connection, session_id)
+        self._begin_late(connection, session_id)
         with self._lock:
-            ours = (row is not None and self._loaded.get(session_id) is connection and session_id in self._active
+            ours = (self._loaded.get(session_id) is connection and session_id in self._active
                     and session_id not in self._cancelling and session_id not in self._stopping)
             if ours:
                 chosen = next(each for each in options if each.get("kind") == "allow_once")
@@ -1130,7 +1147,7 @@ class AcpAgent:
         self._record(f"{self.provider}.auto_allowed", self.provider, {"session_id": session_id,
                                                                       "tool": _tool_name(call)})
 
-    def _question(self, key: str, request_id: Any, session_id: Any, row: dict[str, Any] | None, call_id: str,
+    def _question(self, key: str, request_id: Any, session_id: Any, row: dict[str, Any], call_id: str,
                   call: dict[str, Any], options: list[dict[str, Any]]) -> dict[str, Any] | None:
         """One of Antigravity's own questions, which it asks as a permission request whose call id starts
         QUESTION_PREFIX: the call's title is the question and each option an answer, shown on Codex's question card,
@@ -1147,7 +1164,7 @@ class AcpAgent:
             return None
         return {
             "id": key, "request_id": request_id, "method": QUESTION_METHOD, "provider": self.provider, "options": answers,
-            "params": {"threadId": session_id, "reason": "", "cwd": row["cwd"] if row else "", "questions": [{
+            "params": {"threadId": session_id, "reason": "", "cwd": row["cwd"], "questions": [{
                 "id": call_id, "header": "", "question": str(call.get("title") or "").strip() or "Choose an option.",
                 "options": [{"label": each["label"], "description": ""} for each in answers],
                 "isOther": False, "isSecret": False}]},

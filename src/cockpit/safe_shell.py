@@ -313,8 +313,11 @@ def _git_grep_reaches_secrets(args: list[str], folders: set[str]) -> bool:
                    for operand in _grep_files(before, _GIT_GREP_VALUED, _GIT_GREP_VALUED_LONG)):
             return True
         try:
-            listed = subprocess.run(["git", "-C", folder, "ls-files", "-z", "--full-name", ":/"], capture_output=True,
-                                    stdin=subprocess.DEVNULL, timeout=_LIST_TIMEOUT, check=False)
+            # This runs as Cockpit, outside the agent's sandbox, and the agent can write the repository's config:
+            # core.fsmonitor is the one setting `ls-files` runs as a program.
+            listed = subprocess.run(["git", "-c", "core.fsmonitor=false", "-C", folder, "ls-files", "-z", "--full-name",
+                                     ":/"], capture_output=True, stdin=subprocess.DEVNULL, timeout=_LIST_TIMEOUT,
+                                    check=False)
         except subprocess.TimeoutExpired:
             return True
         if listed.returncode != 0 or _paths_reach_secrets(listed.stdout.decode(errors="replace").split("\0")):

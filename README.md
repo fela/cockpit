@@ -181,14 +181,14 @@ sent. A question Antigravity asks appears as a question card whose options are a
 one press answers it. Antigravity can also reply after its turn ended, when work it ran in the
 background finishes: Cockpit shows that reply as a new turn until Antigravity reports its usage,
 or until it has been quiet for 15 minutes. Each Antigravity process gets its own temporary
-folder, which goes when the process ends. Cockpit runs one agent process per model and working
-folder, so a checkout's `.env` reaches only that checkout's sessions. The session view shows
-each session's messages and each tool call's kind and status; Cockpit keeps no call title,
-input or output.
+folder, which goes when the process ends. Cockpit runs one Antigravity process per working
+folder, which serves all its models, and one Grok process per model and working folder, so a
+checkout's `.env` reaches only that checkout's sessions. The session view shows each session's
+messages and each tool call's kind and status; Cockpit keeps no call title, input or output.
 
 These agents are the server's children. A Cockpit restart ends their running turns and marks
-them failed, and the session's next message loads it again. Cockpit shows no usage meters for
-them, and the emergency session runs only Claude and Codex.
+them failed, and the session's next message loads it again. The sidebar foot shows Gemini's
+usage limits but none for Grok. The emergency session runs only Claude and Codex.
 
 Claude permission prompts reach Cockpit through two hooks in your Claude Code
 settings. Add these entries to the existing `hooks` object, preserving other hooks:

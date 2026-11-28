@@ -189,11 +189,11 @@ def test_an_antigravity_edit_shows_its_diff_with_the_lines_around_it(tmp_path: P
     call = agy_edit(str(notes), "colour: red", "colour: blue")
     # The diff shows everything the edit asks, so the card shows no JSON.
     assert (acp_agent._command(call), acp_agent._reason(call, "")) == ("", "Edit notes.txt")
-    assert acp_agent._diffs(call) == [{"path": str(notes), "diff": (
+    assert acp_agent._diffs(call, str(tmp_path)) == [{"path": str(notes), "diff": (
         f"--- {notes}\n+++ {notes}\n@@ -1,4 +1,4 @@\n one\n two\n-colour: red\n+colour: blue\n four\n")}]
     # Text the file holds twice, or not at all, shows as the call sends it, each line on its own.
     notes.write_text("colour: red\ncolour: red\n")
-    assert acp_agent._diffs(call)[0]["diff"] == f"--- {notes}\n+++ {notes}\n@@ -1 +1 @@\n-colour: red\n+colour: blue\n"
+    assert acp_agent._diffs(call, str(tmp_path))[0]["diff"] == f"--- {notes}\n+++ {notes}\n@@ -1 +1 @@\n-colour: red\n+colour: blue\n"
     # A field the diff does not show keeps the whole input on the card, since Allow approves all of it.
     extra = agy_edit(str(notes), "colour: red", "colour: blue", AllowMultiple="true")
     assert json.loads(acp_agent._command(extra)) == extra["rawInput"]
@@ -211,28 +211,80 @@ def test_an_antigravity_write_shows_what_it_overwrites(tmp_path: Path) -> None:
     call = {"kind": "edit", "title": "File hello.py", "rawInput": {"Content": "print('hi')\n", "Path": str(hello)},
             "content": [{"type": "diff", "path": str(hello), "newText": "print('hi')\n"}]}
     assert (acp_agent._command(call), acp_agent._reason(call, "")) == ("", "Write hello.py")
-    assert acp_agent._diffs(call)[0]["diff"] == f"--- /dev/null\n+++ {hello}\n@@ -0,0 +1 @@\n+print('hi')\n"
+    assert acp_agent._diffs(call, str(tmp_path))[0]["diff"] == f"--- /dev/null\n+++ {hello}\n@@ -0,0 +1 @@\n+print('hi')\n"
     hello.write_text("print('hello')\n")
-    assert acp_agent._diffs(call)[0]["diff"] == f"--- {hello}\n+++ {hello}\n@@ -1 +1 @@\n-print('hello')\n+print('hi')\n"
+    assert acp_agent._diffs(call, str(tmp_path))[0]["diff"] == f"--- {hello}\n+++ {hello}\n@@ -1 +1 @@\n-print('hello')\n+print('hi')\n"
     # A change of line endings alone shows.
     hello.write_bytes(b"print('hi')\r\n")
-    assert acp_agent._diffs(call)[0]["diff"] == f"--- {hello}\n+++ {hello}\n@@ -1 +1 @@\n-print('hi')\r\n+print('hi')\n"
+    assert acp_agent._diffs(call, str(tmp_path))[0]["diff"] == f"--- {hello}\n+++ {hello}\n@@ -1 +1 @@\n-print('hi')\r\n+print('hi')\n"
     # A file it cannot read as text shows the new content alone, not as a new file.
     hello.write_bytes(b"\xff\xfe")
-    assert acp_agent._diffs(call)[0]["diff"] == f"--- {hello}\n+++ {hello}\n@@ -0,0 +1 @@\n+print('hi')\n"
+    assert acp_agent._diffs(call, str(tmp_path))[0]["diff"] == f"--- {hello}\n+++ {hello}\n@@ -0,0 +1 @@\n+print('hi')\n"
     # Nor does Cockpit read what is not a regular file, such as a pipe, which would wait for a writer.
     pipe = tmp_path / "pipe"
     os.mkfifo(pipe)
     write = {**call, "rawInput": {"Content": "x\n", "Path": str(pipe)},
              "content": [{"type": "diff", "path": str(pipe), "newText": "x\n"}]}
-    assert acp_agent._diffs(write)[0]["diff"] == f"--- {pipe}\n+++ {pipe}\n@@ -0,0 +1 @@\n+x\n"
+    assert acp_agent._diffs(write, str(tmp_path))[0]["diff"] == f"--- {pipe}\n+++ {pipe}\n@@ -0,0 +1 @@\n+x\n"
     # Or a folder, and either leaves no file open.
     opened = len(os.listdir("/proc/self/fd"))
-    assert acp_agent._whole(str(tmp_path), None, "x\n") is None
+    assert acp_agent._whole(str(tmp_path), None, "x\n", str(tmp_path)) is None
     assert len(os.listdir("/proc/self/fd")) == opened
     # Content that is not text keeps the whole input on the card.
     empty = {**call, "rawInput": {"Content": None, "Path": str(hello)}, "content": [{"type": "diff", "path": str(hello)}]}
     assert json.loads(acp_agent._command(empty)) == empty["rawInput"]
+
+
+def test_an_edit_card_reads_no_file_outside_the_session_folder(tmp_path: Path) -> None:
+    work, secret = tmp_path / "work", tmp_path / "id_ed25519"
+    work.mkdir()
+    secret.write_text("PRIVATE KEY\n")
+    (work / "link").symlink_to(secret)
+    # A file outside the folder, by its own path, a link inside the folder or a `..` out of it, shows the change as
+    # the call sends it, never what the file holds.
+    for path in (str(secret), str(work / "link"), f"{work}/../id_ed25519"):
+        write = {"rawInput": {"Content": "x\n", "Path": path}, "content": [{"type": "diff", "path": path, "newText": "x\n"}]}
+        assert acp_agent._diffs(write, str(work))[0]["diff"] == f"--- {path}\n+++ {path}\n@@ -0,0 +1 @@\n+x\n"
+        edit = agy_edit(path, "KEY", "LOCK")
+        assert acp_agent._diffs(edit, str(work))[0]["diff"] == f"--- {path}\n+++ {path}\n@@ -1 +1 @@\n-KEY\n+LOCK\n"
+        assert "PRIVATE" not in acp_agent._command(edit)
+    # A file inside the folder still shows its whole diff, also one below a folder of it.
+    (work / "docs").mkdir()
+    for notes in (work / "notes.txt", work / "docs" / "notes.txt"):
+        notes.write_text("one\ntwo\n")
+        assert acp_agent._diffs(agy_edit(str(notes), "two", "three"), str(work))[0]["diff"] == (
+            f"--- {notes}\n+++ {notes}\n@@ -1,2 +1,2 @@\n one\n-two\n+three\n")
+
+
+def test_an_edit_card_reads_nothing_through_a_folder_swapped_for_a_link(tmp_path: Path,
+                                                                        monkeypatch: pytest.MonkeyPatch) -> None:
+    work, outside = tmp_path / "work", tmp_path / "outside"
+    work.mkdir()
+    outside.mkdir()
+    (outside / "id_ed25519").write_text("PRIVATE KEY\n")
+    (work / "keys").symlink_to(outside)
+    path = str(work / "keys" / "id_ed25519")
+    # As though the link came after the check resolved the path: the check sees a path inside the folder, and the
+    # read meets the link.
+    monkeypatch.setattr(acp_agent.os.path, "realpath", lambda each: each)
+    assert acp_agent._whole(path, "KEY", "LOCK", str(work)) is None
+
+
+def test_an_edit_card_reads_nothing_through_a_session_folder_swapped_for_a_link(tmp_path: Path,
+                                                                                monkeypatch: pytest.MonkeyPatch) -> None:
+    root = Path(os.path.realpath(tmp_path))
+    work, outside = root / "work", root / "outside"
+    outside.mkdir()
+    (outside / "id_ed25519").write_text("PRIVATE KEY\n")
+    work.symlink_to(outside)
+    monkeypatch.setattr(acp_agent.os.path, "realpath", lambda each: each)
+    assert acp_agent._whole(str(work / "id_ed25519"), "KEY", "LOCK", str(work)) is None
+
+
+def test_an_edit_card_reads_nothing_at_the_session_folder_itself(tmp_path: Path) -> None:
+    work = Path(os.path.realpath(tmp_path)) / "work"
+    work.write_text("PRIVATE KEY\n")
+    assert acp_agent._whole(str(work), "KEY", "LOCK", str(work)) is None
 
 
 def test_a_write_too_long_for_its_diff_keeps_its_input_on_the_card(gemini: AcpAgent, tmp_path: Path) -> None:
@@ -732,6 +784,24 @@ def test_a_shell_call_that_only_reads_runs_without_a_card(gemini: AcpAgent, tmp_
     assert (data, asked) == ({"session_id": sid, "tool": "execute"}, 0)
 
 
+def test_a_shell_call_that_only_reads_outside_the_sandbox_shows_its_card(gemini: AcpAgent, tmp_path: Path,
+                                                                          db_path: Path) -> None:
+    sid = start(gemini, tmp_path, "[[SAFE OUTSIDE]] look around", "default")
+    wait_until(lambda: gemini.requests())
+    [request] = gemini.requests()
+    params = request["params"]
+    assert safe_shell.safe(params["command"], params["cwd"], str(config.HOME))
+    assert (params["command"], params["outsideSandbox"]) == ("cockpit get | head -n 120", True)
+    gemini.answer(request["id"], {"decision": "decline"})
+    wait_until(lambda: idle(gemini, sid))
+    conn = db.connect(db_path)
+    try:
+        allowed = conn.execute("SELECT count(*) FROM events WHERE kind = 'gemini.auto_allowed'").fetchone()[0]
+    finally:
+        conn.close()
+    assert allowed == 0
+
+
 @pytest.mark.parametrize("command", [
     "cockpit get | head -n 120", "git status", "git -C /srv/x log --oneline -5", "grep -E 'a|b' src/x.py",
     "grep -rn foo src 2>/dev/null | head", "ls -la 2>&1 | tail -5", "find . -name '*.py'", "sed -n 1,20p a.py",
@@ -868,11 +938,11 @@ def test_the_edit_card_shows_a_change_to_the_final_newline(tmp_path: Path) -> No
     notes.write_text("hello\n")
     write = {"rawInput": {"Content": "hello", "Path": str(notes)},
              "content": [{"type": "diff", "path": str(notes), "newText": "hello"}]}
-    assert acp_agent._diffs(write)[0]["diff"] == (
+    assert acp_agent._diffs(write, str(tmp_path))[0]["diff"] == (
         f"--- {notes}\n+++ {notes}\n@@ -1 +1 @@\n-hello\n+hello\n\\ No newline at end of file\n")
     # Lines end at a newline alone, so a form feed inside the file gets no marker.
     notes.write_text("a\n\x0c\nb\n")
-    assert acp_agent._diffs(agy_edit(str(notes), "b", "B"))[0]["diff"] == (
+    assert acp_agent._diffs(agy_edit(str(notes), "b", "B"), str(tmp_path))[0]["diff"] == (
         f"--- {notes}\n+++ {notes}\n@@ -1,3 +1,3 @@\n a\n \x0c\n-b\n+B\n")
 
 
@@ -933,6 +1003,23 @@ def test_git_grep_asks_when_a_tracked_file_holds_a_credentials_name(tmp_path: Pa
     subprocess.run(["git", "-C", str(repo), "add", ".env"], check=True)
     assert not safe_shell.safe("git grep foo", str(repo), home)
     assert not safe_shell.safe("git -C repo grep foo", str(tmp_path), home)
+
+
+def test_git_grep_runs_no_program_the_repository_config_names(tmp_path: Path) -> None:
+    repo, marker = tmp_path / "repo", tmp_path / "ran"
+    repo.mkdir()
+    (repo / "a.txt").write_text("x")
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(["git", "-C", str(repo), "add", "a.txt"], check=True)
+    script = tmp_path / "fsmonitor.sh"
+    script.write_text(f"#!/bin/sh\ntouch {marker}\n")
+    script.chmod(0o755)
+    subprocess.run(["git", "-C", str(repo), "config", "core.fsmonitor", str(script)], check=True)
+    subprocess.run(["git", "-C", str(repo), "ls-files"], check=True, capture_output=True)
+    assert marker.exists()  # git runs it, so the check below means something
+    marker.unlink()
+    assert safe_shell.safe("git grep x", str(repo), str(tmp_path / "home"))
+    assert not marker.exists()
 
 
 def test_git_grep_from_a_subfolder_checks_the_whole_repository(tmp_path: Path) -> None:
@@ -1193,7 +1280,7 @@ def test_a_safe_call_in_a_late_reply_starts_its_quiet_again(gemini: AcpAgent, tm
     late.last -= acp_agent.LATE_QUIET_SECONDS
     written: list[dict] = []
     connection.write = written.append
-    gemini._auto_allow(connection, 7, sid, {}, {"kind": "execute"}, [{"kind": "allow_once", "optionId": "yes"}])
+    gemini._auto_allow(connection, 7, sid, {"kind": "execute"}, [{"kind": "allow_once", "optionId": "yes"}])
     assert written == [{"id": 7, "result": {"outcome": {"outcome": "selected", "optionId": "yes"}}}]
     assert time.monotonic() - late.last < 5
 
@@ -1209,7 +1296,7 @@ def test_a_safe_call_that_comes_as_stop_lets_go_is_cancelled(gemini: AcpAgent, t
         interrupt(session_id)
         write, connection.write = connection.write, written.append
         try:
-            gemini._auto_allow(connection, 7, sid, {}, {"kind": "execute"}, [{"kind": "allow_once", "optionId": "yes"}])
+            gemini._auto_allow(connection, 7, sid, {"kind": "execute"}, [{"kind": "allow_once", "optionId": "yes"}])
         finally:
             connection.write = write
 
@@ -1225,7 +1312,7 @@ def test_a_safe_call_while_stop_runs_is_cancelled(gemini: AcpAgent, tmp_path: Pa
     written: list[dict] = []
     connection.write = written.append
     gemini._stopping.add(sid)
-    gemini._auto_allow(connection, 7, sid, {}, {"kind": "execute"}, [{"kind": "allow_once", "optionId": "yes"}])
+    gemini._auto_allow(connection, 7, sid, {"kind": "execute"}, [{"kind": "allow_once", "optionId": "yes"}])
     gemini._stopping.discard(sid)
     assert written == [{"id": 7, "result": {"outcome": {"outcome": "cancelled"}}}]
 

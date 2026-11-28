@@ -18,6 +18,7 @@ A prompt is answered by its words:
 - "[[FLAT]]": the same for a shell command as Antigravity also sends one, its input fields at the top of `rawInput`.
 - "[[SAFE]]": the same in that shape for a command that only reads, `cockpit get | head -n 120`.
 - "[[BYPASS]]": the same in that shape for a command auto mode asks to run outside Antigravity's sandbox.
+- "[[SAFE OUTSIDE]]": the same for the command of "[[SAFE]]", asked to run outside the sandbox.
 - "[[QUESTION]]": one of Antigravity's questions, a permission request whose call id starts `interaction_`; the turn
   reports the option picked. "[[TWINS]]" asks one whose two options share an id, "[[CROSSED]]" one whose option
   label is another option's id, "[[NAMESAKES]]" one whose two options share a label, and "[[LOOKALIKES]]" one
@@ -81,6 +82,9 @@ CALLS = {
         "CommandLine": "make test", "WaitMsBeforeAsync": 5000, "toolSummary": "Run the tests"}}, ONCE),
     "[[SAFE]]": ({"title": "cockpit get | head -n 120", "kind": "execute", "rawInput": {
         "CommandLine": "cockpit get | head -n 120", "WaitMsBeforeAsync": 5000,
+        "toolSummary": "Check current cockpit items for context"}}, ONCE),
+    "[[SAFE OUTSIDE]]": ({"title": "cockpit get | head -n 120", "kind": "execute", "rawInput": {
+        "BypassSandbox": True, "CommandLine": "cockpit get | head -n 120", "WaitMsBeforeAsync": 5000,
         "toolSummary": "Check current cockpit items for context"}}, ONCE),
     "[[BYPASS]]": ({"title": "rm -rf /srv/old", "kind": "execute", "rawInput": {
         "BypassSandbox": True, "CommandLine": "rm -rf /srv/old", "WaitMsBeforeAsync": 5000,
