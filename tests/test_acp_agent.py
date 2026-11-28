@@ -1182,7 +1182,7 @@ def test_stop_ends_a_late_reply(gemini: AcpAgent, tmp_path: Path) -> None:
     gemini.stop(sid)
     assert idle(gemini, sid) and gemini._late == {}
     assert gemini.lookup(sid).detail == "It finished."
-    assert [each for each in received(tmp_path) if each.get("method") == "session/cancel"] != []
+    wait_until(lambda: any(each.get("method") == "session/cancel" for each in received(tmp_path)))
 
 
 def test_a_late_reply_that_goes_quiet_ends(gemini: AcpAgent, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
