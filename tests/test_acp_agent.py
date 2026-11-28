@@ -287,6 +287,10 @@ def test_an_edit_card_reads_nothing_at_the_session_folder_itself(tmp_path: Path)
     assert acp_agent._whole(str(work), "KEY", "LOCK", str(work)) is None
 
 
+def test_an_edit_card_path_with_a_nul_byte_shows_the_change_as_sent(tmp_path: Path) -> None:
+    assert acp_agent._whole(f"{tmp_path}/a\0b", "KEY", "LOCK", str(tmp_path)) is None
+
+
 def test_a_write_too_long_for_its_diff_keeps_its_input_on_the_card(gemini: AcpAgent, tmp_path: Path) -> None:
     sid = start(gemini, tmp_path, "[[BIG WRITE]] the file", "default")
     wait_until(lambda: gemini.requests())

@@ -305,11 +305,11 @@ def _whole(path: str, old: Any, new: str, folder: str) -> tuple[str, str] | None
     holds the replaced text other than exactly once; the diff then shows the change as the call sends it."""
     if not os.path.isabs(path):
         return None
-    real, base = os.path.realpath(path), os.path.realpath(folder)
-    if real == base or os.path.commonpath([real, base]) != base:
-        return None
-    *folders, name = real.split(os.sep)[1:]
     try:
+        real, base = os.path.realpath(path), os.path.realpath(folder)
+        if real == base or os.path.commonpath([real, base]) != base:
+            return None
+        *folders, name = real.split(os.sep)[1:]
         # The file opens one part of its real path at a time from the root, each with O_NOFOLLOW, so a folder or file
         # swapped for a link after the check above, `folder` itself included, ends the read. O_NONBLOCK, since opening
         # a pipe waits for a writer, and O_NOCTTY, so a terminal never becomes Cockpit's; only a regular file is read.
