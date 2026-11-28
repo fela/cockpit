@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import plistlib
+import resource
 import shutil
 import socket
 import socketserver
@@ -43,6 +44,9 @@ START_WAIT = 15
 RETIRE_QUIET = 0.5
 # A worker leaves code copies younger than this, which a worker starting at the same time may still be using.
 COPY_MIN_AGE = 3600
+# The open files the worker and its app-server may hold. app-server keeps a lock file open for each thread it has
+# loaded, besides its database, pipes and connections, and launchd's default of 256 ran out after a few days of use.
+OPEN_FILES = 10240
 
 
 def socket_path(db_path: Path) -> Path:
@@ -412,8 +416,21 @@ def _remove_other_copies(db_path: Path) -> None:
                 log.exception("Could not remove the unused Codex worker code copy %s", other)
 
 
+def raise_open_files() -> None:
+    """Raise the soft limit on open files to OPEN_FILES, within the hard limit, before app-server starts and inherits
+    it. A soft limit already higher stays; a refusal leaves the limit as it was and says so in the worker's log."""
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    want = OPEN_FILES if hard == resource.RLIM_INFINITY else min(OPEN_FILES, hard)
+    if soft != resource.RLIM_INFINITY and soft < want:
+        try:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (want, hard))
+        except (ValueError, OSError) as error:
+            log.warning("Could not raise the open-file limit from %d to %d: %s", soft, want, error)
+
+
 def main() -> None:
     logging.basicConfig(level=logging.INFO)
+    raise_open_files()
     serve(Path(sys.argv[1]), sys.argv[2], Path(sys.argv[3]))
 
 
