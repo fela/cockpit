@@ -184,6 +184,16 @@ const ui = {
   showAllQueue: false,
   // The items a part keeps off the main page that were opened here by their id.
   openedHidden: new Set(),
+  // The archived tasks, closed before this week, that mentions opened on the card (`openMention`), by id, as the
+  // closed work holds them, so Back to one shows it again.
+  mentionedClosed: new Map(),
+  // How many mentions the user has followed, so only the latest one's answer from the closed work shows (`openMention`).
+  mentionAsked: 0,
+  // The next state for each hidden item a mention opened while it is on its way, so a second press waits for it too.
+  hiddenOpening: new Map(),
+  // The tasks the card asked the closed work for after the page lost them, such as on a reload on an archived task's
+  // card (`lookUpClosed`): the answer while it is on its way, then null.
+  closedLookups: new Map(),
   showAllSessions: false,
   seenBefore: readStored(SEEN_KEY, null),
   pendingRender: false,
@@ -352,6 +362,8 @@ const ui = {
   addPinned: false,
   // The priority picked in the Add box (CONTROL-10), or null for none: then words such as "urgent" in the text set it.
   addPriority: null,
+  // The other models Add's to-do also runs on (SPEC SESSION-31), {provider, model} each, at most ADD_ALSO_MAX.
+  addAlso: [],
   // The to-do the Add box adds more words to (CONTROL-18), {id, title}, or null when it makes a new item.
   addTo: null,
   // The to-dos sent with Add in the last JUST_ADDED_MS, or all while one is on its way, oldest first: {added, title,
@@ -774,10 +786,11 @@ async function apiCredential(path, body) {
   return answer({ response, data: await answerJson(response) });
 }
 
-const TIMER_START_TRY_MS = 8e3;
+const TIMER_START_FIRST_TRY_MS = 8e3;
 const TIMER_START_RETRY_MS = 500;
 
-// A second try uses the same press id, so a lost answer cannot start the timer twice.
+// The first try gives a dropped connection a short chance to recover. A retry with the same press id
+// waits for the original action, which can be behind other database writes, for the rest of the press deadline.
 async function apiStart(path, press, giveUpAt) {
   const headers = { "content-type": "application/json", "x-cockpit-action": press };
   const options = { method: "POST", credentials: "same-origin", headers, body: JSON.stringify({ press }) };
@@ -790,7 +803,8 @@ async function apiStart(path, press, giveUpAt) {
     try { requireConnection(); } catch (error) { throw unconfirmed ?? error; }
     let response;
     try {
-      response = await fetch(path, { ...options, signal: AbortSignal.timeout(Math.min(TIMER_START_TRY_MS, Math.ceil(remaining))) });
+      const wait = attempt ? remaining : Math.min(TIMER_START_FIRST_TRY_MS, remaining);
+      response = await fetch(path, { ...options, signal: AbortSignal.timeout(Math.ceil(wait)) });
       const data = await answerJson(response);
       if (response.status === 409 && typeof data?.detail !== "string") throw new Error("Cockpit's timer response was incomplete");
       return answer({ response, data });
@@ -941,6 +955,7 @@ async function refresh(saved = null) {
     const usageChanged = usagePrint !== ui.usagePrint;
     ui.state = state;
     ui.savedState = Boolean(saved);
+    forgetListedMentions(state);
     // Drafts typed on another device come into their boxes (draft-sync.js); a state kept from before has none newer.
     const draftsTaken = !saved && window.CockpitDraftSync.take(state.drafts, askedAt);
     noticeCodexSignIns(state);
@@ -3759,9 +3774,11 @@ function stopPicking() {
 function pickPlace(el) {
   if (el === document.body) return { target: "page:whole page", step: null, item: null, session: null };
   const area = el.closest("[id]");
-  const step = el.closest("[data-step]");
-  const item = el.closest("[data-item]");
-  const session = el.closest("[data-session]");
+  // The Resorted key or red arrows, standing in Next up's card, belong to Next up, not to its step.
+  const inCard = !el.closest(".resorted-pin");
+  const step = inCard && el.closest("[data-step]");
+  const item = inCard && el.closest("[data-item]");
+  const session = inCard && el.closest("[data-session]");
   // A part of a page framed in Cockpit's, such as Usage in the center layer, starts with that page's path.
   const framed = Pick.framedPath(el);
   const parts = framed ? [framed, area ? area.id : "page"] : [area ? area.id : "page"];
@@ -5497,6 +5514,9 @@ function quotable() {
   const el = around.nodeType === Node.ELEMENT_NODE ? around : around.parentElement;
   const step = el && !el.closest(".composer, .motion-ghost") && el.closest("[data-step]");
   if (!text || !step) return null;
+  // Words from the Resorted key's or red arrows' small card, which stands in Next up's card, are not the step's.
+  const end = (node) => (node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement);
+  if ([range.startContainer, range.endContainer].some((node) => end(node)?.closest(".resorted-pin"))) return null;
   const key = `msg:step:${step.dataset.step}`;
   return step.querySelector(`textarea[data-key="${key}"]`) ? { text, range, key } : null;
 }
@@ -5632,12 +5652,13 @@ function stepBody(step, state, group) {
   // A snoozed step the user picked in the sidebar is the card, with no queue row above it to show its ask.
   // The card heads with the task's name and the ask as its short line under it (NEXT-49, UI-68).
   const headed = isNext || group === "snoozed" || working;
-  // The task's title ends in its marks, each a small picture: Cockpit's key on Cockpit's own work, the
+  // The task's title carries its marks, each a small picture: Cockpit's key on Cockpit's own work, the
   // pencil while the reply box holds an unsent draft. The title is the card's heading, or the head's line on a row.
+  // The card's heading leads with the key, the size of the ⋯ menu's key, and ends in the pencil.
   const titleMarks = [cockpitChip(item.project), !step.left && draftMark(step, isNext)];
   const ask = headed && [
     // The heading carries no New dot: the card on top is the one to read either way (NEXT-49).
-    h("h1", { class: "task-heading" }, quickMark(step), h("span", { class: "task-heading-text", text: item.title }), titleMarks),
+    h("h1", { class: "task-heading" }, titleMarks[0], quickMark(step), h("span", { class: "task-heading-text", text: item.title }), titleMarks[1]),
     shortLine(step),
   ];
   // A page linked from the short line opens for the step too, beside its card (NEXT-38, NEXT-47).
@@ -7517,8 +7538,7 @@ function reorderButton(step, state) {
   const props = { class: "button small ghost reorder resorted",
     onclick: (event) => { event.stopPropagation(); if (waiting) takeStep(waiting); else reorder(step); } };
   const key = iconButton("sort", words, props);
-  // It sits on the card's top edge, before the card in #next, and stays in sight below the header while any of the
-  // card shows.
+  // renderNext puts it beside the card's ⋯ key; it stays in sight below the header while any of the card shows.
   return h("div", { class: "resorted-pin" }, key);
 }
 
@@ -7941,6 +7961,72 @@ const letterMark = (letter, model) => drawing(`<rect x="1.8" y="2.3" width="12.4
 
 const codexMark = () => drawing(`<rect x="1.8" y="2.3" width="12.4" height="11.4" rx="3" fill="currentColor" fill-opacity=".14" stroke="currentColor" stroke-width="1"/><path d="M4.9 5.9 7 7.8 4.9 9.7" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/><rect x="8.1" y="9.2" width="3.5" height="1.6" rx=".8" fill="currentColor"/>`, "fam-mark codex");
 
+// Gemini's mark: a four-pointed spark, in the page's ink as Codex's is; blue would read as an agent at work.
+const geminiMark = () => drawing(`<path d="M8 1.6C8.5 5.2 10.8 7.5 14.4 8 10.8 8.5 8.5 10.8 8 14.4 7.5 10.8 5.2 8.5 1.6 8 5.2 7.5 7.5 5.2 8 1.6Z" fill="currentColor" fill-opacity=".14" stroke="currentColor" stroke-width="1" stroke-linejoin="round"/>`, "fam-mark gemini");
+
+// Antigravity's limits (gemini_usage.py), while Gemini is enabled: one week per group of models it runs, Gemini's own
+// and the Claude and GPT models it also offers, each with a five-hour limit. The group's name in sentence case.
+const geminiGroupName = (group) => group.name.replace(/ Models$/, " models");
+
+// Gemini's family for the foot: a lane with a bar for each group whose week has use, dimmed once its figures are half
+// an hour old. Every group belongs to the one Antigravity sign-in, so while only one group is used the lane has one
+// bar; with none used it shows Antigravity's first group, Gemini's own models. The hover card lists every group.
+// Before the first reading, or while none has worked, the mark alone.
+function geminiFamily(gemini, scale) {
+  if (!gemini.groups.length) return h("span", { class: "fam gemini bare" }, geminiMark());
+  const stale = usageStale(gemini);
+  const used = gemini.groups.filter((group) => group.week.used > 0);
+  const shown = used.length ? used : gemini.groups.slice(0, 1);
+  return family("gemini", geminiMark(), weekLane("gemini", shown.map((group) => ({ week: group.week, stale })), scale));
+}
+
+// Gemini's weeks in words, for the foot's label: "Gemini: Gemini models 45%, Claude and GPT models 0%".
+function geminiSaid(gemini) {
+  if (!gemini.groups.length) return `Gemini: ${gemini.error ? "its limits could not be read" : "not read yet"}`;
+  return `Gemini: ${gemini.groups.map((group) => `${geminiGroupName(group)} ${group.week.used === null ? "not reported yet" : `${group.week.used}%`}`).join(", ")}`;
+}
+
+// What is wrong with Gemini's figures, as the card's notes: a failed reading, figures from a while ago, or none yet.
+function geminiNotes(gemini) {
+  const notes = [];
+  if (gemini.error) notes.push(h("span", { class: "uc-warn", text: `Antigravity's limits could not be read: ${gemini.error}` }));
+  else if (!gemini.captured_at) notes.push(h("span", { class: "uc-dim", text: "Reading Antigravity's limits…" }));
+  if (gemini.captured_at && usageStale(gemini)) notes.push(h("span", { class: "uc-dim", text: `Numbers read ${ago(gemini.captured_at)}` }));
+  return notes;
+}
+
+// Gemini's part of the hover card: per group of models its name, its week's bar and lines, and its five hours' lines.
+// A window without figures is not known to be unused: Antigravity left it out, or it reset since the last reading.
+function usageCardGemini(gemini) {
+  const notes = geminiNotes(gemini);
+  return h("div", { class: "uc-account" },
+    h("div", { class: "uc-who" },
+      h("span", { class: "uc-email", text: "Gemini" }),
+      h("span", { class: "uc-folder", text: "Antigravity" })),
+    gemini.groups.map((group) => h("div", { class: "uc-group" },
+      h("span", { class: "uc-group-name", text: geminiGroupName(group) }),
+      h("div", { class: "uc-graphic" }, usageBar(group.week)),
+      h("div", { class: "uc-windows" }, usageWindowLine(group.week, false), usageWindowLine(group.five_hour, false)))),
+    notes.length > 0 && h("div", { class: "uc-notes" }, notes));
+}
+
+// Gemini's lane as a group of its own with its own hover card, for a foot whose other lanes come from elsewhere
+// (hub-foot.js hubCaps).
+function geminiCaps(gemini, scale) {
+  const pill = h("span", { class: "usage caps", role: "group", tabindex: "0", "aria-label": `Weekly usage. ${geminiSaid(gemini)}`, "data-tip-card": "usage-gemini" },
+    geminiFamily(gemini, scale));
+  pill.tipCard = () => h("div", { class: "usage-card" }, usageCardGemini(gemini));
+  return laneUnits(pill);
+}
+
+// A group of lanes carries the sum of its lanes' spans as --units, so where several groups share the rail's foot each
+// takes room by its span and every lane keeps one length per percent (sidebar.css).
+function laneUnits(group) {
+  const units = [...group.querySelectorAll(".lane")].reduce((sum, lane) => sum + Number(lane.dataset.units), 0);
+  group.style.setProperty("--units", String(units));
+  return group;
+}
+
 // The machine load colours (SPEC UI-69, UI-73): one smooth scale from green at 0 to orange at 1. A
 // straight blend passes through a greenish yellow, so the colour's strength dips in the middle while its hue turns:
 // the scale fades through a muted warm grey. Both themes' colours go on the element and the stylesheet picks one
@@ -8051,10 +8137,11 @@ function usageCardCodex({ email, folder, week }) {
       h("button", { type: "button", "data-focus": `codex-sign-in-${folder}`, onclick: () => prepareCodexSignIn(folder) }, "Sign in again")));
 }
 
-function usageCard(lines, starting, codex) {
+function usageCard(lines, starting, codex, gemini) {
   return h("div", { class: "usage-card" },
     lines.map((account) => usageCardAccount(account, account === starting)),
     codex.map(usageCardCodex),
+    gemini && usageCardGemini(gemini),
     usageChoice(lines));
 }
 
@@ -8117,21 +8204,22 @@ function renderUsage(state) {
 }
 
 // The weekly limits (SPEC UI-57, UI-73): Claude's mark and lane, its accounts personal above work, then a hairline and Codex's mark and
-// lane, in the order of config.CODEX_HOMES (weekLane); while a Claude sign-in ends soon (UI-37) the amber key follows
+// lane, in the order of config.CODEX_HOMES (weekLane), then while Gemini is enabled its lane (geminiFamily); while a Claude sign-in ends soon (UI-37) the amber key follows
 // Claude's lane. The words, resets and the choice of where new sessions start are in the hover card.
-function usagePill({ accounts, error, codex, machine }) {
+function usagePill({ accounts, error, codex, gemini, machine }) {
   // A failed read of Claude's report shows its words in Claude's place, a path's folders left out ("usage.json
   // is unreadable: …"); the Codex weeks, read apart from it, still show.
   if (error) {
     return [h("span", { class: "usage fail", role: "img", "aria-label": `Claude usage failed: ${error}`, title: `Claude usage: ${error}` },
       icon("alert"), h("span", { class: "usage-error", text: error.replace(/(^|\s)\/\S*\//g, "$1") })),
-    usageCaps([], codex, machine)];
+    usageCaps([], codex, gemini, machine)];
   }
-  return usageCaps(accounts, codex, machine);
+  return usageCaps(accounts, codex, gemini, machine);
 }
 
-function usageCaps(accounts, codex, machine) {
-  if (!accounts.length && !codex.length && !machine) return null;
+// `gemini` is null while Gemini is not enabled.
+function usageCaps(accounts, codex, gemini, machine) {
+  if (!accounts.length && !codex.length && !gemini && !machine) return null;
   // The signed-in accounts by folder name, so no line moves when another account becomes the pick. With
   // no folder signed in with any reported address, the latest report alone.
   const signed = accounts.filter((account) => account.folder).sort((a, b) => a.folder.localeCompare(b.folder));
@@ -8148,18 +8236,22 @@ function usageCaps(accounts, codex, machine) {
   const said = [
     lines.length && `Claude: ${lines.map((account) => `${account.folder || account.email} ${shares(weekOf(account), account.model_weeks)}${signInEnding(account) ? ", sign-in ends soon" : ""}`).join(", ")}`,
     codex.length && `Codex: ${codex.map(({ email, folder, week }) => `${email || folder} ${share(week)}`).join(", ")}`,
+    gemini && geminiSaid(gemini),
   ].filter(Boolean).join("; ");
-  // Claude's family with its key, Codex's and the host's lamp, a hairline between each two shown.
+  // Claude's family with its key, Codex's, Gemini's and the host's lamp, a hairline between each two shown except
+  // before Gemini, whose mark sets it apart.
+  const geminiGroup = gemini && geminiFamily(gemini, scale);
   const groups = [
     lines.length > 0 && [family("claude", claudeMark(), weekLane("claude", lines.map((account) => ({ week: weekOf(account), stale: usageStale(account) })), scale)),
       ending && h("span", { class: "acct-key" }, icon("key"))],
     codex.length > 0 && family("codex", codexMark(), weekLane("codex", codex.map(({ week }) => ({ week, stale: !week || usageStale(week) })), scale)),
+    geminiGroup,
     machineLamp(machine),
   ].filter(Boolean);
   // A group, not an image, so a screen reader reaches the host's lamp inside it with its own words.
   const pill = h("span", { class: "usage caps", role: "group", tabindex: "0", "aria-label": `Weekly usage. ${said}`, "data-tip-card": "usage" },
-    groups.flatMap((group, i) => (i ? [h("span", { class: "fam-sep" }), group] : [group])));
-  pill.tipCard = () => usageCard(lines, starting, codex);
+    groups.flatMap((group, i) => (i && group !== geminiGroup ? [h("span", { class: "fam-sep" }), group] : [group])));
+  pill.tipCard = () => usageCard(lines, starting, codex, gemini);
   return pill;
 }
 
@@ -9265,9 +9357,14 @@ function renderNext(step, state) {
   // data-parts: a poll's redraw keeps the part the user reads in place (motion.js).
   // A to-do's step takes pasted and dropped images, as the item's row did before it showed only as its steps.
   const full = stepItem(step, state);
-  fill("next", reorderButton(step, state), h("article", { class: `card next-card${step.left ? " left" : ""}${clockClass(step)}`,
+  const card = h("article", { class: `card next-card${step.left ? " left" : ""}${clockClass(step)}`,
     "data-step": step.id, "data-parts": true, "data-drop-item": full && full.todo ? full.id : null }, mergedNote(state), stepBody(step, state, "next"),
-    !step.left && draftCorner(step)));
+    !step.left && draftCorner(step));
+  // The Resorted key or the red arrows stand just before the heading, whose line the ⋯ key ends, so a banner or
+  // context line above the heading moves them with the ⋯ (SPEC UI-52).
+  const pin = reorderButton(step, state);
+  if (pin) card.insertBefore(pin, card.querySelector(":scope > .destination-heading"));
+  fill("next", card);
 }
 
 // One line on top of Next up for the items an agent closed with no finish step: their PR merged (CONTROL-15), a
@@ -9334,8 +9431,33 @@ function closedItemRow(entry, state) {
         h("div", { class: "row-line1" }, h("span", { class: "row-title", text: entry.title })),
         h("div", { class: "row-line2" }, cockpitChip(entry.project), endedLine(endedHow(entry, state)))),
       h("div", { class: "row-side" },
-        entry.action === "archived" && iconButton("back", "Unarchive", { class: "button small ghost reopen", onclick: () => patchItem(entry, { archived: false }, null) }),
+        entry.action === "archived" && iconButton("back", "Unarchive", { class: "button small ghost reopen", onclick: () => unarchiveClosed(entry) }),
         h("span", { class: "row-age", "data-time": entry.closed_at, title: "Closed", text: age(entry.closed_at) }))));
+}
+
+// A task a mention put on the card from the closed work (`openMention`) leaves that copy once a state holds it, as
+// after Unarchive.
+function forgetListedMentions(state) {
+  for (const itemId of ui.mentionedClosed.keys()) {
+    if (state.items.some((item) => item.id === itemId)) {
+      ui.mentionedClosed.delete(itemId);
+      ui.closedLookups.delete(itemId);
+    }
+  }
+}
+
+// Unarchive on a closed task's row. A task archived before this week that a mention put on the card leaves its
+// archived copy once Cockpit took the change, so the card shows the task as it is now.
+async function unarchiveClosed(entry) {
+  if (!(await patchItem(entry, { archived: false }, null)) || !ui.mentionedClosed.has(entry.id)) return;
+  // A task that was open holds its card again once a state that holds it arrives (`refresh`); until then, also
+  // after a refresh that failed, the card keeps the archived copy, as the closed work no longer has the task.
+  ui.closedLookups.delete(entry.id);
+  await nextState();
+  if (!ui.mentionedClosed.has(entry.id)) return;
+  // A task done before this week stays off the board: the closed work has it as it is now, done. For a task that
+  // was open it has nothing, and the card keeps the archived copy.
+  lookUpClosed(entry.id);
 }
 
 // What a session holding a handed-off step is doing now, by its dot's state (`sessionState`).
@@ -9752,6 +9874,20 @@ function clampedText(key, content, title) {
   }, content);
 }
 
+// A file change as a Gemini or Grok request card shows it (SESSION-30): the file's path, "(new file)" after it when the
+// file is new, then the diff's lines without its two header lines, which only repeat the path. Removed lines are red,
+// added lines green, and the line-number lines quiet.
+function diffLines(path, diff) {
+  const lines = diff.split("\n");
+  const created = lines[0] === "--- /dev/null";
+  const body = lines[0]?.startsWith("--- ") && lines[1]?.startsWith("+++ ") ? lines.slice(2) : lines;
+  if (body.at(-1) === "") body.pop();
+  const kind = (line) => (line.startsWith("+") ? "diff-add" : line.startsWith("-") ? "diff-del"
+    : line.startsWith("@@") ? "diff-at" : null);
+  return [h("span", { class: "diff-file", text: created ? `${path} (new file)` : path }),
+    body.map((line) => ["\n", kind(line) ? h("span", { class: kind(line), text: line }) : line])];
+}
+
 // PERM-22: a shell command one part per line, its words coloured by kind (shell.js). The text is
 // the command's own, so a copy of it still runs.
 function shellCall(command) {
@@ -9841,12 +9977,14 @@ function requestIcon(request) {
 }
 
 // The folder the call runs in, under the call (PERM-26): a relative path such as `rm .venv` means
-// something only with it. The user's home folder shows as `~`.
-function callFolder(cwd) {
+// something only with it. The user's home folder shows as `~`. `outside` marks a Gemini call that asks to run
+// outside Antigravity's sandbox, where it reaches more than its folder (SESSION-30).
+function callFolder(cwd, outside) {
   if (!cwd) return null;
   const home = ui.state.home;
   const folder = home && (cwd === home || cwd.startsWith(`${home}/`)) ? `~${cwd.slice(home.length)}` : cwd;
-  return h("p", { class: "call-folder", title: cwd }, "Runs in ", h("code", { text: folder }));
+  return h("p", { class: "call-folder", title: cwd }, outside ? "Runs outside Gemini's sandbox, in " : "Runs in ",
+    h("code", { text: folder }));
 }
 
 // The open card. The top card (`top`) opens with its rule editor on the auto-mode sentences (on the tool
@@ -9961,7 +10099,7 @@ function blockedCard(request, sessions, top) {
     callExplanation(request),
     request.cause && !readingIn(request) && h("p", { class: "cause" }, codeSpans(request.cause.text)),
     call,
-    callFolder(request.cwd),
+    callFolder(request.cwd, false),
     callChanges(request),
     // A dialog shows no sentences that cover it, which never answer a dialog, and no note on why it asks: Run does
     // what the user expects, so the card needs no explanation (PERM-27).
@@ -10056,7 +10194,7 @@ function settledCard(request, sessions) {
     request.explanation?.plain && h("p", { class: "explain" }, codeSpans(request.explanation.plain)),
     clampedText(`call:${request.id}`, request.tool_name === "Bash"
       ? [shellCall(String(request.tool_input?.command ?? request.summary))] : request.summary, request.summary),
-    callFolder(request.cwd),
+    callFolder(request.cwd, false),
     h("p", { class: "request-note settled-note" }, h("span", {
       text: `The dialog closed in the session at ${clock(request.resolved_at)}, answered there or on its own, and the session went on. Nothing to do here.`,
     })));
@@ -10185,6 +10323,8 @@ function dialogGone(session) {
 
 // A secret answer to Codex while the user types it: in memory only, so a redraw keeps it and no storage holds it.
 const secretAnswers = new Map();
+// The option picked on a question card with several questions, by request and question, until the answer went through.
+const questionPicks = new Map();
 
 function secretField(key) {
   const el = h("input", { type: "password", autocomplete: "off", placeholder: "Your answer…", "data-key": key });
@@ -10218,7 +10358,9 @@ function codexRequestCard(request) {
         }
       };
       await optimistic((state) => withoutCodexRequest(state, request.id), answer, null);
-      for (const key of secretAnswers.keys()) if (key.startsWith(`codex:${request.id}:`)) secretAnswers.delete(key);
+      for (const answers of [secretAnswers, questionPicks]) {
+        for (const key of answers.keys()) if (key.startsWith(`codex:${request.id}:`)) answers.delete(key);
+      }
     });
   };
   const agent = providerName(request.provider || "codex");
@@ -10229,34 +10371,64 @@ function codexRequestCard(request) {
     p.reason && h("p", { text: p.reason }),
     error && h("p", { class: "request-error", role: "alert" }, icon("alert"), h("span", { text: error })));
   if (request.method === "item/tool/requestUserInput") {
+    const questions = p.questions || [];
+    // A question that takes only one of its options (an Antigravity question always does) shows them as answer keys.
+    // When it is the card's only question, a press sends that option; otherwise a press picks it and Send answer
+    // sends every answer at once.
+    const picking = (q) => q.options?.length && !q.isOther && !q.isSecret;
+    const oneClick = questions.length === 1 && picking(questions[0]);
     const fields = new Map();
-    for (const q of p.questions || []) {
+    for (const q of questions) {
+      const key = `codex:${request.id}:${q.id}`;
       content.append(h("p", { text: q.question }));
+      if (picking(q)) {
+        content.append(h("div", { class: "answers", role: "group", "aria-label": q.question }, q.options.map((o) => {
+          const on = !oneClick && questionPicks.get(key) === o.label;
+          return h("button", {
+            type: "button", class: `button answer${on ? " on" : ""}`, "aria-pressed": oneClick ? null : String(on),
+            onclick: () => {
+              if (oneClick) return send({ answers: { [q.id]: { answers: [o.label] } } }, false);
+              questionPicks.set(key, o.label);
+              render();
+            },
+          }, h("span", { class: "answer-words", text: o.description ? `${o.label}: ${o.description}` : o.label }));
+        })));
+        fields.set(q.id, { get value() { return questionPicks.get(key) || ""; } });
+        continue;
+      }
       if (q.options?.length) content.append(h("ul", {}, q.options.map((o) => h("li", {
         text: `${o.label}${o.description ? `: ${o.description}` : ""}`,
       }))));
-      const field = q.isSecret ? secretField(`codex:${request.id}:${q.id}`) : draftArea(`codex:${request.id}:${q.id}`, "Your answer…", 2, "");
+      const field = q.isSecret ? secretField(key) : draftArea(key, "Your answer…", 2, "");
       field.setAttribute("aria-label", q.question);
       fields.set(q.id, field);
       content.append(field);
     }
-    content.append(h("button", { type: "button", class: "button", onclick: () => send({
+    if (!oneClick) content.append(h("button", { type: "button", class: "button", onclick: () => send({
       answers: Object.fromEntries([...fields].map(([id, field]) => [id, { answers: [field.value] }])),
-    }, (p.questions || []).some((q) => q.isSecret)) }, "Send answer"));
+    }, questions.some((q) => q.isSecret)) }, "Send answer"));
   } else {
     const details = Object.fromEntries(Object.entries({
       command: p.command || p.item?.command, cwd: p.cwd, network: p.networkApprovalContext,
       permissions: p.permissions, changes: p.item?.changes, grantRoot: p.grantRoot,
       paths: p.paths?.length ? p.paths : undefined,
     }).filter(([, value]) => value !== undefined && value !== null));
-    // The whole request, clamped like a Claude call's, since Allow approves all of it (pattern 14).
-    content.append(clampedText(`codex-call:${request.id}`, JSON.stringify(details, null, 2), null));
+    // A Gemini or Grok shell call that asks nothing more than to run its command shows the command alone, one part
+    // per line as on a Claude call's card (PERM-22), with its folder below. Any other request shows whole, clamped
+    // like a Claude call's, since Allow approves all of it (pattern 14).
+    const { command, cwd, ...more } = details;
+    const shell = p.shell && typeof command === "string" && Object.keys(more).length === 0;
+    // A Gemini or Grok edit that asks nothing more than its diffs show shows the diffs alone (SESSION-30).
+    const diffed = new Set((p.diffs || []).map((each) => each.path));
+    const editOnly = !command && Object.keys(more).join() === "paths" && more.paths.every((path) => diffed.has(path));
+    if (!editOnly) content.append(clampedText(`codex-call:${request.id}`,
+      shell ? [shellCall(command)] : JSON.stringify(details, null, 2), shell ? command : null));
     // A Gemini or Grok edit's diffs, each under its file (SESSION-30).
     for (const [at, each] of (p.diffs || []).entries()) {
-      content.append(clampedText(`codex-diff:${request.id}:${at}`, `${each.path}\n${each.diff}`, null));
+      content.append(clampedText(`codex-diff:${request.id}:${at}`, diffLines(each.path, each.diff), null));
     }
     // The folder in plain sight too, as a long command can push it out of the clamped request (PERM-26).
-    const folder = callFolder(p.cwd);
+    const folder = callFolder(p.cwd, p.outsideSandbox === true);
     if (folder) content.append(folder);
     const offered = p.availableDecisions;
     if (!offered || offered.includes("accept")) content.append(h("button", {
@@ -11021,7 +11193,7 @@ function renderWork(state) {
 // with a session that holds them, also one whose step shows above, in its group by who moves next, and every
 // session on no item that holds them. With `closed` the server adds the closed work it still keeps (`found`), in a
 // Closed group. A bar at the top of the matches holds the words, the switch, the counts and Clear. The filter lives in this
-// tab until Clear.
+// tab until Clear, or until the user picks another task in the sidebar.
 function wordsOf(text) {
   const words = text.toLowerCase().split(/\s+/).filter(Boolean);
   return words.length ? words : null;
@@ -11183,7 +11355,7 @@ function findBar(tasks, sessionCount) {
   return h("div", { class: "find-bar", role: "search" },
     h("span", { class: "find-label", text: "Filter" }), field,
     h("label", { class: "find-closed" },
-      h("input", { type: "checkbox", "data-key": "find:closed", checked: ui.find.closed, onchange: (event) => setFind(ui.find.text, event.target.checked, null, false) }),
+      h("input", { type: "checkbox", "data-key": "find:closed", checked: ui.find.closed, onchange: (event) => setFind(field.value, event.target.checked, null, false) }),
       "Include closed"),
     findWords() && h("span", { class: "find-count", text: `${plural(tasks, "task", "tasks")}, ${plural(sessionCount, "session", "sessions")}` }),
     h("button", { class: "button small ghost find-clear", type: "button", onclick: clearFind }, "Clear"));
@@ -11741,7 +11913,7 @@ function renderAddBox() {
         class: `button ghost pin-key${ui.addPinned ? " on" : ""}`, "aria-pressed": String(ui.addPinned),
         onclick: () => { ui.addPinned = !ui.addPinned; renderAddBox(); },
       }),
-      !target && h("div", { class: "add-starts" }, addPriorityPick(), startOptions(ADD_KEY, null)),
+      !target && addStarts(),
       target
         ? h("button", { class: "button primary", type: "button", "data-key": "Enter", onclick: submit },
           icon("plus"), h("span", { class: "label", text: "Add to it" }))
@@ -11757,6 +11929,15 @@ function renderAddBox() {
   const again = focused && [...panel.querySelectorAll("[aria-label]")].find((el) => el.getAttribute("aria-label") === focused);
   if (again) again.focus();
   else if (focused !== null || opening) area.focus();
+}
+
+// Add's line of picks: the priority, the main session's settings and the other models it also runs on. A pick on the
+// main line draws Also again, so it marks the main model and leaves it out.
+function addStarts() {
+  const main = startOptions(ADD_KEY, null);
+  const also = addAlsoPick();
+  main.addEventListener("click", () => also.draw());
+  return h("div", { class: "add-starts" }, addPriorityPick(), main, also);
 }
 
 // The new to-do's priority (CONTROL-10): a button like the start line's, which opens the four levels. With none
@@ -11791,6 +11972,97 @@ function addPriorityPick() {
     }, h("span", { class: "menu-label" }, icon(PRIORITY_ICONS[each]), capitalize(each)),
     h("span", { class: "when" }, each === "normal" ? "default" : "", each === level && icon("check"))))));
   return el;
+}
+
+// The most other models one Add also runs on (store.ADD_ALSO_MAX).
+const ADD_ALSO_MAX = 3;
+
+// The model a new session from Add's line runs on (SPEC SESSION-31): its agent and model, each resolved from Cockpit's
+// default where the pick is null, or null before the page has its state.
+function addMainModel(start) {
+  const offered = ui.state && ui.state.session_options;
+  if (!offered) return null;
+  const provider = start.provider || ui.state.default_provider || "claude";
+  const models = offered[provider] ? offered[provider].models : [];
+  return models.length ? { provider, model: start.model || models[0].name } : null;
+}
+
+// What the page calls a model in the title of a run on it (store.model_label): an agent's own default model
+// ("default") goes by the agent's name.
+function modelName(provider, name) {
+  if (name === "default") return providerName(provider);
+  const model = (ui.state?.session_options?.[provider]?.models || []).find((each) => each.name === name);
+  return model ? model.label : name;
+}
+
+// The other models Add's to-do also runs on (SPEC SESSION-31), as offered now: a pick of an agent or model since taken
+// out, or of the main line's own model, counts as not picked, so the button shows what Add sends.
+function addAlsoPicks(start) {
+  const offered = (ui.state && ui.state.session_options) || {};
+  const main = addMainModel(start);
+  return ui.addAlso.filter((each) => (offered[each.provider]?.models || []).some((model) => model.name === each.model)
+    && !(main && main.provider === each.provider && main.model === each.model));
+}
+
+// Add's Also button (SPEC SESSION-31): its list holds every model of every agent that is on, and each one ticked makes
+// one more to-do with the same words, which a session on that model works on alone. The list stays open while the user
+// ticks; the main line's model shows as "main". The button and list draw in place, so an open list stays put.
+function addAlsoPick() {
+  const menuKey = `start:${ADD_KEY}:also`;
+  const holder = h("div", { class: "start-options add-also" });
+  const el = h("details", { class: "menu start-pick add-also-pick", "data-menu": menuKey });
+  const button = h("summary", { class: "start-button", "data-key": `${ADD_KEY}:also` });
+  const list = h("div", { class: "menu-list" });
+  el.append(button, list);
+  el.open = ui.open.has(menuKey);
+  rememberOpen(el, (isOpen) => { if (isOpen) { ui.open.add(menuKey); draw(); } else ui.open.delete(menuKey); });
+  // Escape closes the open list alone, back on its button; the Add dialog stays open.
+  el.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape" || !el.open) return;
+    event.preventDefault();
+    event.stopPropagation();
+    ui.open.delete(menuKey);
+    el.open = false;
+    button.focus();
+  });
+  const draw = () => {
+    const offered = ui.state && ui.state.session_options;
+    holder.dataset.offers = ui.state ? startOffers(ui.state) : "";
+    if (!offered) { holder.replaceChildren(); return; }
+    if (el.parentElement !== holder) holder.replaceChildren(el);
+    const start = startPicks(ADD_KEY, null);
+    const main = addMainModel(start);
+    const picks = addAlsoPicks(start);
+    const full = picks.length >= ADD_ALSO_MAX;
+    const words = picks.length ? `Also ${modelName(picks[0].provider, picks[0].model)}${picks.length > 1 ? ` +${picks.length - 1}` : ""}` : "";
+    const title = picks.length
+      ? `Also runs on ${picks.map((each) => modelName(each.provider, each.model)).join(", ")}`
+      : "Also run on other models, to compare";
+    button.title = title;
+    button.setAttribute("aria-label", title);
+    button.replaceChildren(icon("layers"), ...(words ? [h("span", { class: "start-words", text: words })] : []), icon("chevron"));
+    const focused = list.contains(document.activeElement) ? document.activeElement.dataset.value : null;
+    list.replaceChildren(...Object.entries(offered).flatMap(([provider, choices]) => choices.models.map((model) => {
+      const value = `${provider}:${model.name}`;
+      const isMain = Boolean(main && main.provider === provider && main.model === model.name);
+      const picked = picks.some((each) => each.provider === provider && each.model === model.name);
+      return h("button", {
+        type: "button", class: picked ? "picked" : "", "data-value": value, "aria-pressed": String(picked),
+        disabled: isMain || (full && !picked),
+        onclick: () => {
+          ui.addAlso = picked
+            ? picks.filter((each) => each.provider !== provider || each.model !== model.name)
+            : [...picks, { provider, model: model.name }];
+          draw();
+        },
+      }, h("span", { class: "menu-label" }, icon(provider), modelName(provider, model.name)),
+      h("span", { class: "when" }, isMain ? "main" : "", picked && icon("check")));
+    })));
+    if (focused) list.querySelector(`[data-value="${CSS.escape(focused)}"]`)?.focus();
+  };
+  holder.draw = draw;
+  draw();
+  return holder;
 }
 
 // Add with its arrow attached, as Send has one (CONTROL-24): the arrow opens Fire and forget, which adds the item for
@@ -11874,9 +12146,13 @@ function addItem(fireAndForget) {
   const pinned = ui.addPinned;
   const picked = ui.addPriority;
   const start = startPicks(ADD_KEY, null);
+  // With other models picked, each to-do's title starts with its model's name, as the server writes it (SESSION-31).
+  const also = addAlsoPicks(start);
+  const main = addMainModel(start);
+  const named = also.length && main ? `${modelName(main.provider, main.model)} · ` : "";
   const now = new Date().toISOString();
   const local = {
-    id: `local-${++ui.sendCount}`, key: "todo-…", todo: 1, title: clip(text.split("\n")[0].trim(), 300), summary: clip(text, 2000),
+    id: `local-${++ui.sendCount}`, key: "todo-…", todo: 1, title: clip(`${named}${text.split("\n")[0].trim()}`, 300), summary: clip(text, 2000),
     project: "", stage: null, waiting_on: [], priority: picked || "normal", goal_id: null, blocks: "", sessions: [], step_sessions: [], links: [],
     pinged_at: null, touched_at: null, created_at: now, updated_at: now, updated_by: "user", archived: 0,
     user_fields: picked ? ["summary", "priority"] : ["summary"], agent_summary: "",
@@ -11890,6 +12166,7 @@ function addItem(fireAndForget) {
   ui.addPart = null;
   ui.addPinned = false;
   ui.addPriority = null;
+  ui.addAlso = [];
   if (staged.length) ui.uploading.set(local.id, staged);
   // Where the Add box was, for its flight into the new row.
   const box = document.querySelector("#add-box .add-panel, #add-box textarea");
@@ -11898,7 +12175,7 @@ function addItem(fireAndForget) {
   // `made` settles with the server's id once it made the item, or with null after Undo or a refusal; `item` is the
   // server's item from its answer.
   let madeAs;
-  const added = { id: local.id, title: local.title, localId: local.id, item: null, made: new Promise((resolve) => { madeAs = resolve; }) };
+  const added = { id: local.id, title: local.title, localId: local.id, item: null, also: [], made: new Promise((resolve) => { madeAs = resolve; }) };
   const outgoing = { added, title: local.title.slice(0, 200), known: new Set(ui.state ? drawn(ui.state).items.map((one) => one.id) : []), at: Date.now() };
   // While an Add is on its way, all are kept, however old: a poll may bring its item before the answer, and the answered
   // ids of the others keep it from taking theirs (addedItemIn).
@@ -11907,7 +12184,12 @@ function addItem(fireAndForget) {
   // A state that already holds the new item, also one that came before the server's answer, draws it in place of the
   // local one. Once the server answered, its item shows until a state holds it, so the row opens at once rather than
   // after the next poll, which a busy server can take seconds to bring.
-  const withLocal = (state) => (addedItemIn(state, outgoing) ? state : { ...state, items: [...state.items, added.item || local] });
+  // The to-dos on the other models (SESSION-31) show the same way once the server answered with them.
+  const withLocal = (state) => {
+    const shown = addedItemIn(state, outgoing) ? state : { ...state, items: [...state.items, added.item || local] };
+    const missing = added.also.filter((other) => !shown.items.some((each) => each.id === other.id));
+    return missing.length ? { ...shown, items: [...shown.items, ...missing] } : shown;
+  };
   // Undo, or a refusal: the words, images and part go back into the Add box, which opens.
   const putBack = () => {
     madeAs(null);
@@ -11921,6 +12203,7 @@ function addItem(fireAndForget) {
     if (part && !ui.addPart) ui.addPart = part;
     ui.addPinned = ui.addPinned || pinned;
     ui.addPriority = ui.addPriority || picked;
+    if (!ui.addAlso.length) ui.addAlso = also;
     // The words go back to a new to-do, also when the box is open on another to-do's Add more meanwhile.
     ui.addTo = null;
     ui.adding = true;
@@ -11931,7 +12214,7 @@ function addItem(fireAndForget) {
       let item;
       try {
         item = await optimistic(withLocal,
-          () => apiWritten("POST", "/api/items/add", { text, part: part && { target: part.target, quote: part.quote, detail: part.detail }, pinned, fire_and_forget: fireAndForget, priority: picked, ...start },
+          () => apiWritten("POST", "/api/items/add", { text, part: part && { target: part.target, quote: part.quote, detail: part.detail }, pinned, fire_and_forget: fireAndForget, priority: picked, ...start, ...(also.length ? { also } : {}) },
             { key: ADD_KEY, text: sent, picks: start }),
           putBack);
       } catch (error) {
@@ -11939,21 +12222,40 @@ function addItem(fireAndForget) {
       }
       added.id = item.id;
       added.item = item;
+      added.also = item.also || [];
       madeAs(item.id);
       ui.addsRunning.set(item.id, adding);
+      for (const other of added.also) ui.addsRunning.set(other.id, adding);
       safeRender();
-      // The images go up now that the item exists.
+      // The images go up now that the item exists; each other model's to-do gets its own copy.
       ui.uploading.delete(local.id);
       if (staged.length) ui.uploading.set(item.id, staged);
-      await Promise.all(staged.map((entry) => sendImage(item.id, entry)));
-      try {
-        await api("POST", "/api/messages", {
-          text: item.summary,
-          target: { item_id: item.id, step_id: null, session_id: null, new_cwd: defaultCheckout(item.project || null, ui.state) },
-        });
-      } catch (error) {
-        throw refused("Added, but its session did not start; the sweeper starts it", error);
-      }
+      const startOn = async (one) => {
+        try {
+          await api("POST", "/api/messages", {
+            text: one.summary,
+            target: { item_id: one.id, step_id: null, session_id: null, new_cwd: defaultCheckout(one.project || null, ui.state) },
+          });
+        } catch (error) {
+          throw refused("Added, but its session did not start; the sweeper starts it", error);
+        }
+      };
+      const runs = [
+        (async () => { await Promise.all(staged.map((entry) => sendImage(item.id, entry))); await startOn(item); })(),
+        ...added.also.map(async (other) => {
+          for (const entry of staged) {
+            try {
+              await upload(`/api/items/${other.id}/images`, entry.file);
+            } catch (error) {
+              throw refused(`Image not added to ${clip(other.title, 60)}`, error);
+            }
+          }
+          await startOn(other);
+        }),
+      ];
+      // Every run starts, also when another's start is refused; the first refusal is the one shown.
+      const failed = (await Promise.allSettled(runs)).find((result) => result.status === "rejected");
+      if (failed) throw failed.reason;
     }, null);
     // Images go up only once the item exists and the browser keeps none of them, so leaving asks first until then.
     if (staged.length) holdLeave(adding);
@@ -11980,7 +12282,10 @@ function addItem(fireAndForget) {
     undo: () => { if (!release()) return; settle(null); putBack(); render(false); },
   };
   ui.addsHeld.set(local.id, hold);
-  settled.then((sent) => sent && sent.adding.then(() => { ui.addsRunning.delete(added.id); }));
+  settled.then((sent) => sent && sent.adding.then(() => {
+    ui.addsRunning.delete(added.id);
+    for (const other of added.also) ui.addsRunning.delete(other.id);
+  }));
   // Leaving the page while the Undo is on offer asks first, as the Add has not gone out yet.
   holdLeave(settled.then((sent) => sent && sent.adding));
   ui.arrived = { sent: outgoing, id: local.id, scrolled: false };
@@ -13125,19 +13430,24 @@ function captureFocus() {
   return { control: el, home, name: controlName(el), place: homeControls(home).indexOf(el) };
 }
 
-// A selector for the part of the page a control sits in: its section and, inside it, its row or card.
+// A selector for the part of the page a control sits in: its section and, inside it, its row or card. The Resorted
+// key or red arrows on Next up, and their small card, belong to the section, though they stand in the step's card.
 function controlHome(el) {
   const section = el.closest("[id]");
   if (!section) return null;
-  const row = el.closest(HOMES.map((name) => `[${name}]`).join(", "));
+  const row = !el.closest(".resorted-pin") && el.closest(HOMES.map((name) => `[${name}]`).join(", "));
   const name = row && section.contains(row) && HOMES.find((attribute) => row.hasAttribute(attribute));
   const inside = name ? ` [${name}="${CSS.escape(row.getAttribute(name))}"]` : "";
   return `#${CSS.escape(section.id)}${inside}`;
 }
 
+// A row's or card's own controls; the Resorted key or red arrows standing in Next up's card belong to the section, so
+// their coming or going leaves the card's controls in their places.
 function homeControls(home) {
   const el = document.querySelector(home);
-  return el ? [...el.querySelectorAll(CONTROLS)] : [];
+  if (!el) return [];
+  const own = el.matches(HOMES.map((name) => `[${name}]`).join(", "));
+  return [...el.querySelectorAll(CONTROLS)].filter((control) => !own || !control.closest(".resorted-pin"));
 }
 
 function controlName(el) {
@@ -13531,9 +13841,10 @@ for (const type of ["pointerdown", "focusin"]) {
   document.addEventListener(type, () => { ui.focusLost = false; });
 }
 
-// A press or keyboard focus on a step in the user's lists clears its Updated mark.
+// A press or keyboard focus on a step in the user's lists clears its Updated mark. The Resorted key or red arrows
+// standing in Next up's card are about the order, not the step's text.
 function pressedStep(event) {
-  if (ui.picking || ui.refocusing || !event.target.closest) return null;
+  if (ui.picking || ui.refocusing || !event.target.closest || event.target.closest(".resorted-pin")) return null;
   const card = event.target.closest("#next [data-step]");
   return card ? Number(card.dataset.step) : null;
 }
@@ -13561,11 +13872,12 @@ function leaveTimedStep(timer) {
 
 // Pressing, opening (Enter or Space) or typing in a step of the queue, Next up or an open row, or focusing its
 // reply box, holds its place (NEXT-16); moving the highlight over rows with the keyboard does not. Resorted and
-// Take it are the user asking for the rank's order instead.
+// Take it are the user asking for the rank's order instead; the red arrows and their small card, which stand in
+// Next up's card, are about the warnings.
 for (const type of ["pointerdown", "keydown", "focusin", "input"]) {
   document.addEventListener(type, (event) => {
     // A pick (app.js's picker) only points at the step; it does not work on it.
-    if (ui.refocusing || ui.picking || !event.isTrusted || !event.target.closest || event.target.closest(".reorder, .take")) return;
+    if (ui.refocusing || ui.picking || !event.isTrusted || !event.target.closest || event.target.closest(".resorted-pin, .reorder, .take")) return;
     if (type === "keydown" && event.key !== "Enter" && event.key !== " ") return;
     if (type === "focusin" && !event.target.matches("textarea, input, select, [contenteditable]")) return;
     const card = event.target.closest("#next [data-step]");
@@ -14170,10 +14482,14 @@ function keyboardReply(row) {
   if (row.dataset.session) { openKeyboardSession(row.dataset.session); return; }
   // A warning takes no reply: it has only its fix and close buttons.
   if (row.dataset.warning) return;
-  // A line in the sidebar: its item's card takes the reply.
+  // A line in the sidebar: its item's card takes the reply. Picking another task ends Search's filter, as a click
+  // on the line does (sidebar.js).
   if (row.closest("#sidebar")) {
+    // The filter ends before a phone's item screen opens, so no history entry the key makes carries it.
+    const itemId = Number(row.dataset.item);
+    if (ui.find && Number.isInteger(itemId) && itemId !== ui.shownItem) dropFind();
     phoneOpen(true);
-    selectItem(Number(row.dataset.item));
+    selectItem(itemId);
     const card = document.querySelector("#next .next-card");
     if (card) keyboardReply(card);
     return;
@@ -14247,22 +14563,61 @@ window.CockpitKeys?.connect({
 });
 
 // A mention of another item in a step's or a session's words opens that item (SPEC UI-74): its step or its row, as
-// Search opens it; an item the page does not list, closed a while ago, shows through the filter with closed work,
-// found by its id ("#10"). A press with a modifier key opens the page anew in a tab of its own, as any link does.
+// Search opens it; a task closed before this week, which the sidebar does not list, shows on the card, as a task in
+// Finished this week does. A press with a modifier key opens the page anew in a tab of its own, as any link does.
 async function openMention(itemId) {
+  const asked = ++ui.mentionAsked;
+  // A navigation the user made while the server answers, such as a pick in the sidebar or Your time, wins: a late
+  // answer changes nothing.
+  const navigation = ui.navigations;
+  const destination = window.CockpitNavigation?.capture();
+  const stale = () => asked !== ui.mentionAsked || ui.navigations !== navigation
+    || Boolean(destination && !window.CockpitNavigation.current(destination));
   let listed = ui.state && ui.state.items.find((item) => item.id === itemId);
-  // An item a part keeps off the page is opened by its id: the next state holds it.
-  if (!listed && ui.state && !ui.openedHidden.has(itemId)) {
-    ui.openedHidden.add(itemId);
-    const asked = ui.tick;
-    refresh();
-    while (ui.tick === asked || ui.refreshing) await new Promise((resolve) => setTimeout(resolve, 50));
+  // An item a part keeps off the page is opened by its id: the next state holds it. A second press while that state
+  // is on its way waits for the same state.
+  if (!listed && ui.state && (!ui.openedHidden.has(itemId) || ui.hiddenOpening.has(itemId))) {
+    if (!ui.hiddenOpening.has(itemId)) {
+      ui.openedHidden.add(itemId);
+      ui.hiddenOpening.set(itemId, nextState().finally(() => ui.hiddenOpening.delete(itemId)));
+    }
+    await ui.hiddenOpening.get(itemId);
+    if (stale()) return;
     listed = ui.state.items.find((item) => item.id === itemId);
   }
   if (center.view && listed) { selectItem(itemId); return; }
   const shown = await openInWork(itemId, listed?.group);
   if (shown) { window.CockpitKeys?.highlight(shown); return; }
-  setFind(`#${itemId}`, true, itemId, true);
+  if (stale()) return;
+  // A task done before this week is on the board, off the sidebar; an archived one comes from the closed work by its
+  // id. Either shows on the card, which closes a view over it, so Back returns to that view.
+  if (!listed) {
+    let entry;
+    try {
+      entry = await closedTask(itemId);
+    } catch (error) {
+      if (!stale()) toast(`Could not open task ${itemId}: ${error.message}`, true);
+      return;
+    }
+    if (stale()) return;
+    if (!entry) { toast(`Task ${itemId} is not on Cockpit`, true); return; }
+    ui.mentionedClosed.set(itemId, entry);
+  }
+  if (ui.find) dropFind();
+  selectItem(itemId);
+}
+
+// The next state from the server, from a refresh this starts.
+async function nextState() {
+  const tick = ui.tick;
+  refresh();
+  while (ui.tick === tick || ui.refreshing) await new Promise((resolve) => setTimeout(resolve, 50));
+}
+
+// A task closed before this week as the closed work holds it, found by its id, or null when it holds none by that id.
+async function closedTask(itemId) {
+  const { items } = await api("GET", `/api/items/closed?q=${encodeURIComponent(`#${itemId}`)}`);
+  return items.find((one) => one.id === itemId) || null;
 }
 
 // An item's summary or its session's latest status (`field`), with its mentions of other items as links (UI-74):

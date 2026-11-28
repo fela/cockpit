@@ -30,6 +30,11 @@ async function assetSlot(background, run) {
   finally { assetDownloads--; fillAssetSlots(); }
 }
 
+async function readDownload(read) {
+  try { return await read(); }
+  catch (error) { throw Object.assign(error, { download: true }); }
+}
+
 async function saveWithRetry(what, progress, retrySpacing, save) {
   for (let attempt = 0; ; attempt++) {
     const startedAt = performance.now();
@@ -37,7 +42,9 @@ async function saveWithRetry(what, progress, retrySpacing, save) {
     catch (error) {
       const unavailable = [502, 503, 504].includes(error.status);
       const transient = unavailable || ["TypeError", "TimeoutError", "AbortError", "NetworkError"].includes(error.name);
-      if (attempt || !transient) throw new Error(`${what}: ${error.message}`, { cause: error });
+      if (attempt || !transient) {
+        throw Object.assign(new Error(`${what}: ${error.message}`, { cause: error }), { download: error.download });
+      }
       progress();
       const wait = unavailable ? DOWNLOAD_RETRY_MS : retrySpacing - (performance.now() - startedAt);
       if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait));
@@ -99,36 +106,48 @@ self.addEventListener("message", (event) => {
   const key = `${generation}:${data.user}-${data.until}`;
   let job = preparing.get(key);
   if (!job) {
-    job = { ports: new Map() };
+    job = { ports: new Map(), version: data.version };
     const started = generation;
     job.promise = prepare(data, started, () => {
-      for (const [port, supportsProgress] of job.ports) if (supportsProgress) port.postMessage({ progress: true });
-    }).finally(() => preparing.delete(key));
+      for (const [port, page] of job.ports) if (page.supportsProgress) port.postMessage({ progress: true });
+    }, (version) => {
+      job.version = version;
+      return !job.ports.size || [...job.ports.values()].some((page) => !page.version || page.version === version);
+    })
+      .finally(() => preparing.delete(key));
     preparing.set(key, job);
   }
   const port = event.ports[0];
   // Older pages treat every reply as final; each port explicitly opts in to progress.
-  if (port) job.ports.set(port, data.supportsProgress === true);
-  event.waitUntil(job.promise.then(() => port?.postMessage({ ok: true }),
-    (error) => port?.postMessage({ error: error.message })).finally(() => job.ports.delete(port)));
+  if (port) job.ports.set(port, { supportsProgress: data.supportsProgress === true, version: data.version });
+  event.waitUntil(job.promise.then((result) => port?.postMessage(result),
+    (error) => port?.postMessage({ error: error.message, download: error.download === true, version: job.version }))
+    .finally(() => job.ports.delete(port)));
 });
 
-async function prepare(data, started, progress) {
+async function prepare(data, started, progress, requested) {
   const scope = `${data.user}-${data.until}`;
   if (generation !== started) throw new Error("The sign-in changed while saving the offline shell");
   // Re-fetch the shell with cookies. Its authenticated response must name this page's owner before caching it.
   const { body, init } = await saveWithRetry("Could not download the offline page", progress, DOWNLOAD_RETRY_MS, async () => {
     if (generation !== started) throw new Error("The sign-in changed while saving the offline shell");
-    const shell = await fetch("/", { cache: "no-store", redirect: "manual", signal: AbortSignal.timeout(20000) });
-    if ([502, 503, 504].includes(shell.status)) throw Object.assign(new Error(`HTTP ${shell.status}`), { status: shell.status });
+    const shell = await readDownload(() => fetch("/", { cache: "no-store", redirect: "manual", signal: AbortSignal.timeout(20000) }));
+    if ([502, 503, 504].includes(shell.status)) {
+      throw Object.assign(new Error(`HTTP ${shell.status}`), { status: shell.status, download: true });
+    }
     if (!shell.ok || shell.headers.get("X-Cockpit-Offline-User") !== data.user
         || Number(shell.headers.get("X-Cockpit-Offline-Until")) !== data.until
         || !(data.until * 1000 > Date.now())) throw new Error("Offline shell needs the current sign-in");
     const headers = new Headers(shell.headers);
     for (const name of ["Content-Encoding", "Content-Length", "Transfer-Encoding"]) headers.delete(name);
-    return { body: await shell.blob(), init: { headers, status: shell.status, statusText: shell.statusText } };
+    const body = await readDownload(() => shell.blob());
+    return { body, init: { headers, status: shell.status, statusText: shell.statusText } };
   });
   if (generation !== started) throw new Error("The sign-in changed while saving the offline shell");
+  const shellText = await body.text();
+  const version = shellText.match(/<meta name="cockpit-version" content="([^"]+)">/)?.[1];
+  if (generation !== started) throw new Error("The sign-in changed while saving the offline shell");
+  if (version && !requested(version)) return { skipped: true, version };
   progress();
   const old = await current();
   if (generation !== started) throw new Error("The sign-in changed while saving the offline shell");
@@ -137,7 +156,6 @@ async function prepare(data, started, progress) {
   if (changingOwner) await forget();
   if (generation !== saving) throw new Error("The sign-in changed while saving the offline shell");
   const publicCache = await caches.open(STATIC);
-  const shellText = await body.text();
   const assets = new Set([...shellText.matchAll(/(?:src|href)=["'](\/static\/[^"']+)["']/g)].map((match) => new URL(match[1], self.location.origin).href));
   const editor = [...assets].find((path) => new URL(path).pathname === "/static/editor-loader.js");
   if (editor) { const url = new URL(editor); url.pathname = "/static/prompt-editor.js"; assets.add(url.href); }
@@ -154,24 +172,33 @@ async function prepare(data, started, progress) {
       const cached = url.searchParams.has("v") && await publicCache.match(url.href);
       const immutable = (response) => /(?:^|,)\s*immutable\s*(?:,|$)/.test(response.headers.get("Cache-Control") || "");
       const response = cached?.ok && immutable(cached) ? cached
-        : await fetch(url.href, { cache: "default", signal: AbortSignal.timeout(20000) });
-      if (!response.ok) throw Object.assign(new Error(`Offline asset did not load (HTTP ${response.status})`), { status: response.status });
+        : await readDownload(() => fetch(url.href, { cache: "default", signal: AbortSignal.timeout(20000) }));
+      if (!response.ok) {
+        throw Object.assign(new Error(`Offline asset did not load (HTTP ${response.status})`), {
+          status: response.status, download: true,
+        });
+      }
       if (url.searchParams.has("v") && !immutable(response)) {
-        throw new Error("Cockpit restarted while saving offline files. Reload to save the current version.");
+        throw Object.assign(new Error("Cockpit restarted while saving offline files. Reload to save the current version."), {
+          download: true,
+        });
       }
       if (url.pathname.endsWith(".css")) {
-        const text = await response.clone().text();
+        const text = response === cached ? await response.clone().text() : await readDownload(() => response.clone().text());
         for (const match of text.matchAll(/url\(\s*["']?([^"')\s]+)["']?\s*\)/g)) {
           const dependency = new URL(match[1], url);
           if (dependency.origin === self.location.origin && dependency.pathname.startsWith("/static/")) assets.add(dependency.href);
         }
+      } else if (response !== cached) {
+        // Finish the network read separately so Cache.put failures still identify local storage errors.
+        await readDownload(() => response.clone().blob());
       }
       if (response !== cached) await publicCache.put(url.href, response);
       saved.add(path);
       progress();
     }))));
-    const failed = results.find((result) => result.status === "rejected");
-    if (failed) throw failed.reason;
+    const failures = results.filter((result) => result.status === "rejected").map((result) => result.reason);
+    if (failures.length) throw failures.find((error) => !error.download) ?? failures[0];
   }
   await changeSavedCache(async () => {
     const stillSignedIn = () => {
@@ -201,6 +228,7 @@ async function prepare(data, started, progress) {
       throw error;
     }
   });
+  return version ? { ok: true, version } : { ok: true };
 }
 
 self.addEventListener("fetch", (event) => {

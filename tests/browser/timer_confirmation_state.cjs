@@ -16,7 +16,7 @@ const context = vm.createContext({
   AbortSignal: { timeout(ms) { limits.push(ms); return {}; } },
   setTimeout(callback, ms) { retries.push(ms); now += ms; callback(); },
   ui: { timerPresses: 0, timerSent: Promise.resolve() }, TIMER_PRESS_MS: 60000,
-  TIMER_START_TRY_MS: 8000, TIMER_START_RETRY_MS: 500,
+  TIMER_START_FIRST_TRY_MS: 8000, TIMER_START_RETRY_MS: 500,
   requireConnection() { if (!connected) throw new Error("Connect to Cockpit before starting"); },
   run: (_key, action) => action(), holdLeave() {}, noteOwnInput() {},
   optimistic: async (_change, action) => action(),
@@ -33,12 +33,17 @@ for (const [name, prefix] of [["apiStart", "async "], ["answer", ""], ["refused"
   vm.runInContext(extract(name, prefix), context);
 }
 (async () => {
-  replies = [() => { now += 8000; throw new DOMException("signal timed out", "TimeoutError"); }, ok];
+  replies = [() => { now += 8000; throw new DOMException("signal timed out", "TimeoutError"); }, () => {
+    const wait = 29651 - now;
+    assert.ok(limits.at(-1) >= wait, "The retry needs time to hear the already-running action's answer");
+    now += wait;
+    return ok();
+  }];
   await context.sendTimer(621, true);
   assert.deepEqual(requests[0], requests[1], "A retry must reuse the entire press identity");
-  assert.deepEqual(limits, [8000, 8000]);
+  assert.deepEqual(limits, [8000, 51500]);
   assert.deepEqual(retries, [500]);
-  console.log("pass: a stalled start gets two short attempts with the same press id");
+  console.log("pass: a stalled start uses the remaining deadline to confirm the same press id");
 
   replies = [() => ({ ...ok(), json: async () => { throw new TypeError("Body read failed"); } }), ok];
   await context.sendTimer(621, true);

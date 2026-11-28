@@ -22,6 +22,7 @@
 (() => {
   const SYNCED_KEY = "cockpit.drafts-synced";
   const PUSH_MS = 800;
+  const GATEWAY_RETRY_MS = 2000;
   // drafts.CHANGES: at most this many entries go in one request; the rest go in the next.
   const CHANGES = 200;
   // drafts.VALUE_CHARS: a longer entry stays in this browser. A function, as are the kinds, since app.js, which
@@ -240,17 +241,27 @@
     try {
       let response;
       try {
-        response = await fetch("/api/drafts", jsonRequest("POST", sent));
+        const options = jsonRequest("POST", sent);
+        response = await fetch("/api/drafts", options);
+        if (answerIsAway(response.status)) {
+          drainAnswer(response);
+          // Cockpit may have saved the drafts before the proxy lost its reply. Use the same request id.
+          await new Promise((resolve) => setTimeout(resolve, GATEWAY_RETRY_MS));
+          if (!navigator.onLine) return;
+          response = await fetch("/api/drafts", options);
+        }
       } catch {
         // A request that met no network goes again after the next state: the drafts stay in this browser.
         return;
       }
       const data = await answerJson(response);
       if (response.status === 401) return;
+      const record = readSynced();
+      // Another tab may have settled this request and since saved a newer version.
+      if (!record.unanswered.some((other) => other.id === sent.id)) return;
       const failed = new Error(`Cockpit did not keep the drafts: it answered ${response.status} ${JSON.stringify(data.detail || "")}`);
       // Cockpit or a proxy failing may have kept the words, so the request goes again as it is after the next state.
       if (response.status >= 500) throw failed;
-      const record = readSynced();
       record.unanswered = record.unanswered.filter((other) => other.id !== sent.id);
       // A refusal here is a fault in the page or Cockpit, so it is reported (logError leaves out refusals with a
       // status), and the request goes no more: its entries go again in a new one.

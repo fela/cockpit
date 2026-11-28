@@ -3,7 +3,8 @@ const assert = require("node:assert/strict"), fs = require("node:fs"), path = re
 const origin = "https://cockpit.test", owner = "a".repeat(64), until = Math.floor(Date.now() / 1000) + 3600;
 const listeners = {}, stores = new Map(), fetched = [];
 let pending = 0, peak = 0, unavailable = 0, version = "one", refuse = "", held = null, stall = "";
-let dropShell = 0, offlineNavigation = false, readingOwner = null, writingOwner = null, assetGate = null;
+let dropShell = 0, dropShellBody = 0, dropAssetBody = 0, offlineNavigation = false, readingOwner = null, writingOwner = null;
+let assetGate = null;
 let workerNow = 0, shellFailureTime = 0, holdRetry = false, bootFailures = 0;
 const cacheFailures = new Set();
 const stalled = [], deadlines = [], shellRetries = [];
@@ -20,7 +21,9 @@ const caches = {
       const url = absolute(input);
       if (cacheFailures.delete(url)) throw new TypeError("Cache.put() encountered a network error");
       if (url === origin + "/__offline_owner__" && writingOwner) await writingOwner();
-      values.set(url, response.clone());
+      const saved = response.clone();
+      await response.arrayBuffer();
+      values.set(url, saved);
     }, async delete(input) { return values.delete(absolute(input)); } };
   }, async keys() { return [...stores.keys()]; }, async delete(name) { return stores.delete(name); },
 };
@@ -42,8 +45,16 @@ const context = vm.createContext({
       workerNow += shellFailureTime;
       throw new TypeError("Failed to fetch");
     }
-    if (url.pathname === "/") return new Response(Array.from({ length: 48 }, (_, i) => `<script src="/static/file-${i}.js?v=${version}"></script>`).join(""),
-      { headers: { "X-Cockpit-Offline-User": owner, "X-Cockpit-Offline-Until": String(until) } });
+    if (url.pathname === "/") {
+      const response = new Response(`<meta name="cockpit-version" content="${version}">` +
+        Array.from({ length: 48 }, (_, i) => `<script src="/static/file-${i}.js?v=${version}"></script>`).join(""),
+        { headers: { "X-Cockpit-Offline-User": owner, "X-Cockpit-Offline-Until": String(until) } });
+      if (dropShellBody > 0) {
+        dropShellBody--;
+        response.blob = async () => { throw new TypeError("Failed to fetch"); };
+      }
+      return response;
+    }
     pending++; peak = Math.max(peak, pending);
     try {
       if (url.pathname === stall) await new Promise((resolve, reject) => {
@@ -58,6 +69,11 @@ const context = vm.createContext({
         return new Response("bad gateway", { status: 502 });
       }
       if (pending > 8 || url.pathname === refuse) { unavailable++; return new Response("overloaded", { status: 503 }); }
+      if (url.pathname === "/static/file-0.js" && dropAssetBody > 0) {
+        dropAssetBody--;
+        const body = new ReadableStream({ start(controller) { controller.error(new TypeError("Interrupted asset")); } });
+        return new Response(body, { headers: { "Cache-Control": "public, immutable" } });
+      }
       return new Response("asset", { headers: { "Cache-Control": "public, immutable" } });
     } finally { pending--; }
   },
@@ -68,7 +84,9 @@ function message(data) {
   listeners.message({ data, source: { url: origin + "/" }, ports: [{ postMessage(value) { if (value.progress) progress++; else result = value; } }], waitUntil(value) { done = value; } });
   return { get progress() { return progress; }, done: () => Promise.resolve(done).then(() => ({ ...result, progress })) };
 }
-const prepare = () => message({ cockpitOffline: "prepare", user: owner, until, supportsProgress: true });
+const prepare = (pageVersion) => message({
+  cockpitOffline: "prepare", user: owner, until, version: pageVersion, supportsProgress: true,
+});
 function legacyPrepare(capability) {
   const data = { cockpitOffline: "prepare", user: owner, until };
   if (capability !== undefined) data.supportsProgress = capability;
@@ -119,11 +137,27 @@ function legacyPrepare(capability) {
     }
     console.log(`pass: mixed old/new clients share preparation; only opted-in ports receive progress and all receive final ${fails ? "failure" : "success"}`);
   }
+  const beforeDeploy = await (await shellCache.match("/")).text();
+  assert.match(beforeDeploy, /mixed-success/, "A later failed mixed-client save preserves the complete successful shell");
+  version = "deployed"; refuse = "";
+  const fetchesBeforeDeploy = fetched.length;
+  assert.deepEqual(await prepare("mixed-success").done(), { skipped: true, version, progress: 0 });
+  assert.deepEqual(fetched.slice(fetchesBeforeDeploy), [origin + "/"], "A stale tab stops before downloading assets");
+  assert.equal(await (await shellCache.match("/")).text(), beforeDeploy, "Skipping retains the last complete page");
+  const requestedBeforeDeploy = fetched.length;
+  const [stale, current] = await Promise.all([prepare("mixed-success").done(), prepare(version).done()]);
+  assert.equal(stale.version, "deployed");
+  assert.equal(current.ok, true, "A current tab can save while a stale tab is checking");
+  assert.equal(fetched.slice(requestedBeforeDeploy).filter((url) => url === origin + "/").length, 1);
   const previous = await (await shellCache.match("/")).text();
-  assert.match(previous, /mixed-success/, "A later failed mixed-client save preserves the complete successful shell");
+  assert.match(previous, /deployed/);
+  console.log("pass: a lone stale tab skips the offline save; a current tab can share the same job and save");
+
   version = "two"; refuse = "/static/file-5.js";
   const failed = await prepare().done();
   assert.match(failed.error, /file-5\.js.*HTTP 503/);
+  assert.equal(failed.download, true);
+  assert.equal(failed.version, "two", "An asset download failure names the shell it was serving");
   assert.equal(await (await shellCache.match("/")).text(), previous);
   console.log("pass: genuine HTTP503 reports its status and preserves the previous complete shell");
   version = "stalled"; refuse = ""; stall = "/static/file-0.js";
@@ -177,11 +211,14 @@ function legacyPrepare(capability) {
   assert.equal(await vm.runInContext("active = null; current()", context), `${owner}-${until}`);
   console.log("pass: old and new tabs share one delayed retry and receive success; interrupted cache writes recover");
   dropShell = 2;
-  const beforeFailure = await (await shellCache.match("/")).text(), missing = prepare();
+  const beforeFailure = await (await shellCache.match("/")).text(), missing = prepare(version);
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(shellRetries.length, 1);
   shellRetries.shift()();
-  assert.match((await missing.done()).error, /Could not download the offline page: Failed to fetch/);
+  const missingResult = await missing.done();
+  assert.match(missingResult.error, /Could not download the offline page: Failed to fetch/);
+  assert.equal(missingResult.download, true);
+  assert.equal(missingResult.version, version, "A failure before the page loads names the initiating tab's build");
   assert.equal(shellRetries.length, 0, "A second failed fetch is reported");
   assert.equal(await (await shellCache.match("/")).text(), beforeFailure);
   console.log("pass: a second failed root fetch reports the problem and preserves the last complete page");
@@ -192,6 +229,17 @@ function legacyPrepare(capability) {
   assert.equal(slowLegacy.state.ready, true, "A slow first attempt must not add a wait to the retry");
   shellFailureTime = 0; holdRetry = false;
   console.log("pass: a slow first fetch does not take extra time from the old page's wait limit");
+  dropShellBody = 2;
+  const interrupted = await prepare().done();
+  assert.match(interrupted.error, /Could not download the offline page/);
+  assert.equal(interrupted.download, true, "An interrupted response body is a download failure");
+  assert.equal(await (await shellCache.match("/")).text(), beforeFailure);
+  version = "interrupted-asset"; dropAssetBody = 2;
+  const assetInterrupted = await prepare(version).done();
+  assert.match(assetInterrupted.error, /file-0\.js.*Interrupted asset/);
+  assert.equal(assetInterrupted.download, true, "A broken script response body is a download failure too");
+  assert.equal(assetInterrupted.version, version);
+  assert.equal(await (await shellCache.match("/")).text(), beforeFailure);
   version = "priority";
   const heldRetries = new Promise((resolve) => { release = resolve; });
   const attempts = new Map();

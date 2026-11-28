@@ -2,8 +2,8 @@
 // the Cockpit tag (the header's key in small, the jet on amber, and the word). Checks, at 320, 390 and 1280 px in the
 // light and the dark theme:
 // - a session's put of "Cockpit" stores the project as "cockpit";
-// - the tag shows, visible and not clipped, as the key alone at the end of Next up's heading and leading the item's
-//   rows in the list on the left (Inbox, Busy with a handed step, Finished this week), and in Pinned, the search
+// - the tag shows, visible and not clipped, as the key alone leading Next up's heading at the ⋯ menu's size, and
+//   leading the item's rows in the list on the left (Inbox, Busy with a handed step, Finished this week), and in Pinned, the search
 //   menu, and the Pages tab's list and (wide) reader, with its word in Pinned and on Pages;
 // - a step that left the queue while on the card keeps its tag and its whole close button;
 // - beside it, a handed step's title loses at most the key's room;
@@ -111,11 +111,25 @@ async function main() {
       await card.waitFor({ timeout: 30e3 });
       await page.screenshot({ path: path.join(work, `cockpit-tag-${width}-${scheme}.png`) });
 
-      // The tag is the key alone at the end of the task's title, Next up's heading.
+      // The tag is the key alone at the start of the task's title, Next up's heading, the size of the ⋯ menu's key
+      // and centred on the heading's first line.
       const headTag = card.locator(".task-heading > .chip.cockpit");
-      check(`${at}: Next up's heading ends in the Cockpit key`, await shows(headTag, false)
-        && await headTag.evaluate((el) => el.previousElementSibling?.classList.contains("task-heading-text")
+      check(`${at}: Next up's heading starts with the Cockpit key`, await shows(headTag, false)
+        && await headTag.evaluate((el) => el === el.parentElement.firstElementChild
           && getComputedStyle(el.querySelector(".chip-words")).display === "none"), await describe(headTag));
+      const sizes = await headTag.evaluate((el) => {
+        const key = el.querySelector(".cockpit-mark").getBoundingClientRect();
+        const menu = el.closest(".destination-heading").querySelector(".step-menu > summary").getBoundingClientRect();
+        const text = el.parentElement.querySelector(".task-heading-text");
+        const range = document.createRange();
+        range.selectNodeContents(text);
+        const line = range.getClientRects()[0];
+        return { key: [key.width, key.height], menu: [menu.width, menu.height],
+          offCentre: Math.abs((key.top + key.bottom) / 2 - (line.top + line.bottom) / 2), before: key.right <= line.left };
+      });
+      check(`${at}: the key is the ⋯ menu's size, before the words and centred on their first line`,
+        sizes.key[0] === sizes.menu[0] && sizes.key[1] === sizes.menu[1] && sizes.before && sizes.offCentre <= 2,
+        JSON.stringify(sizes));
       const paint = await headTag.evaluate((el) => {
         const mark = el.querySelector(".cockpit-mark");
         const jet = getComputedStyle(mark, "::after");
@@ -259,7 +273,9 @@ async function showsNow(tag, words) {
     const label = el.querySelector(".chip-words");
     const keySeen = mark.checkVisibility({ visibilityProperty: true, opacityProperty: true });
     const whole = label.checkVisibility({ visibilityProperty: true, opacityProperty: true }) && label.scrollWidth <= label.clientWidth + 1 && label.textContent === "Cockpit";
-    return seen && keySeen && inside && key.width === 14 && key.height === 14 && (!words || whole);
+    // The key is 14 px, and 24 px where it leads Next up's heading.
+    const size = el.parentElement.classList.contains("task-heading") ? 24 : 14;
+    return seen && keySeen && inside && key.width === size && key.height === size && (!words || whole);
   }, words);
 }
 

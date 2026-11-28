@@ -5,6 +5,7 @@ window.CockpitOffline = (() => {
   const user = document.documentElement.dataset.offlineUser || "";
   const until = Number(document.documentElement.dataset.offlineUntil || 0);
   const scope = `${user}-${until}`;
+  const version = document.querySelector('meta[name="cockpit-version"]')?.content;
   const PREFIX = "cockpit-offline-v1-";
   const OWNER = "cockpit.offline-owner";
   const signedOut = "cockpit.offline-sign-out";
@@ -141,25 +142,65 @@ window.CockpitOffline = (() => {
       };
       pipe.port1.onmessage = ({ data }) => {
         if (data.progress) { waiting(); return; }
-        finish(data.error ? new Error(data.error) : null, data);
+        if (!data.error) { finish(null, data); return; }
+        // Workers from before this version sent the message alone.
+        const legacyDownload = /^(?:Could not download the offline page|Could not save offline file [^:]+): (.+)$/.exec(data.error);
+        const download = data.download ?? ["Failed to fetch", "Load failed", "NetworkError when attempting to fetch resource."]
+          .includes(legacyDownload?.[1]);
+        finish(Object.assign(new Error(data.error), { download, version: data.version }), data);
       };
       waiting();
       try { worker.postMessage(message, [pipe.port2]); }
       catch (error) { finish(error); }
     });
   }
+  async function outdatedShellPage() {
+    if (window.pageOutdated?.()) return true;
+    if (!version) return false;
+    // The session check is cheap and can see a deploy before the board's first state poll comes back.
+    try {
+      const response = await originalFetch("/api/offline/session", {
+        credentials: "same-origin", cache: "no-store", signal: AbortSignal.timeout(5000),
+      });
+      const running = response.ok && response.headers.get("X-Cockpit-Version");
+      return Boolean(running && running !== version) || Boolean(window.pageOutdated?.());
+    } catch {
+      return Boolean(window.pageOutdated?.());
+    }
+  }
   async function prepareShell() {
-    if (stopped || !("serviceWorker" in navigator)) return;
+    if (stopped || window.pageOutdated?.() || !("serviceWorker" in navigator)) return;
     if (shellPreparation) return shellPreparation;
     shellPreparation = (async () => {
       try {
+        if (!navigator.onLine || await outdatedShellPage() || stopped) return;
         await navigator.serviceWorker.register("/offline-worker.js", { scope: "/", updateViaCache: "none" });
         await navigator.serviceWorker.ready;
+        if (stopped || !navigator.onLine || window.pageOutdated?.()) return;
+        const message = { cockpitOffline: "prepare", user, until, version, supportsProgress: true };
+        const differentVersion = (result) => version && result.version && version !== result.version;
+        // A current tab can join a save whose download started before the deploy. It asks again once
+        // that save has finished, unless the server has since moved past this tab's version.
+        for (let attempt = 0; attempt < 2; attempt++) {
+          let result;
+          try { result = await workerMessage(message); }
+          catch (error) {
+            if (attempt || !error.download || !differentVersion(error)) throw error;
+            result = error;
+          }
+          if (stopped) return;
+          if (!differentVersion(result)) {
+            if (!result.skipped) { shellReady = true; emit(); }
+            return;
+          }
+          if (attempt || !navigator.onLine || await outdatedShellPage() || stopped) return;
+        }
+      } catch (error) {
+        // The server could have changed while the worker was downloading.
         if (stopped || !navigator.onLine) return;
-        await workerMessage({ cockpitOffline: "prepare", user, until, supportsProgress: true });
-        if (stopped) return;
-        shellReady = true; emit();
-      } catch (error) { if (!stopped && navigator.onLine) problem(error); }
+        if (error.download && await outdatedShellPage()) return;
+        if (!stopped && navigator.onLine) problem(error);
+      }
     })().finally(() => { shellPreparation = null; });
     return shellPreparation;
   }

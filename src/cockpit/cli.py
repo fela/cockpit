@@ -109,8 +109,8 @@ JSON fields (left-out fields keep their value; lists are replaced whole):
   stage       planning | building | review | dev | staging | prod | done. Only ${user}'s press sets done; see note.
   waiting_on  [{"kind": "agent" | "bot" | "person" | "release", "who": "<session uuid, bot, name or release>"}].
               A person is someone other than $user. What $user does is a step, and a put naming $user is refused.
-              Any entry takes "what": what they do, in a word or two, such as "review" or "answer"; the page
-              shows "review: Alex" when $user hovers the item in Waiting.
+              Any entry takes "what": what they do, in a word or two (at most 20 characters), such as
+              "review" or "answer"; the page shows "review: Alex" when $user hovers the item in Waiting.
               An agent entry takes "until": "<ISO time>" when its work picks up again then (a timer, a handover).
               Until that time the work rests and does not count as stalled, also while the session is stopped.
               With until goes "why": why the work rests until then, in a few words (at most 60 characters),
@@ -192,7 +192,8 @@ JSON fields (left-out fields keep their value; a done or dismissed step stays cl
               50, for $user to close with one press. The step lists them with your why, all ticked; $user
               unticks any to keep open, and the plum key completes the rest, each as its Task done would,
               from its finish step (Cockpit writes one from your why where none is open). Each task's
-              session hears it; your session hears what closed. null clears it.
+              session hears it; your session hears what closed. Each why is at most 300 characters.
+              null clears it.
   early       true for an early look: an early result, or a question or request for feedback, that the
               session asks while it keeps working. It takes a place in ${user}'s queue only when no other
               step waits for one, and gives that place up when another step does. false makes it an
@@ -304,8 +305,14 @@ def _request_words(request: dict[str, Any]) -> str:
 
 
 def _bar_words(step: dict[str, Any]) -> str:
-    """A step's size and progress (SPEC NEXT-35), so the sweeper sees which it has to fill in."""
-    progress = "unset" if step["progress"] is None else f"{step['progress']}%"
+    """A step's size and progress (SPEC NEXT-35), so the sweeper sees which it has to fill in, with its task's latest
+    estimate when the step has none (SPEC RANK-22)."""
+    if step["progress"] is not None:
+        progress = f"{step['progress']}%"
+    elif step["effort"]["progress"] is not None:
+        progress = f"unset (task at {step['effort']['progress']}%)"
+    else:
+        progress = "unset"
     return f"size {step['size'] or 'unset'}, progress {progress}"
 
 
@@ -333,6 +340,24 @@ def _cache_lines(step: dict[str, Any], indent: str) -> list[str]:
         return [f"{indent}cache {likely}cold, {tokens}"]
     cold = "" if cache["cold_usd"] is None else f", ${cache['cold_usd']:.2f} to reload cold"
     return [f"{indent}cache {likely}warm {cache['minutes_left']} more min, {tokens}{cold}"]
+
+
+def _effort_lines(step: dict[str, Any], indent: str) -> list[str]:
+    """How often the user snoozed the step's task and how much of their time went in since its progress estimate
+    last rose (SPEC RANK-22), when either happened."""
+    effort = step["effort"]
+    if not effort["snoozes"] and not effort["user_minutes"]:
+        return []
+    words = []
+    if effort["snoozes"]:
+        times = "once" if effort["snoozes"] == 1 else f"{effort['snoozes']} times"
+        words.append(f"snoozed {times}, last {effort['last_snoozed_at']}")
+    if effort["user_minutes"]:
+        words.append(
+            f"{user_name()}'s time {effort['user_minutes']} min, {effort['minutes_since_progress']} min"
+            " since progress last rose"
+        )
+    return [f"{indent}{'; '.join(words)}"]
 
 
 def summary(state: dict[str, Any]) -> str:
@@ -444,6 +469,7 @@ def summary(state: dict[str, Any]) -> str:
             f"     step {step['id']}, score {step['score']}, {_bar_words(step)}{_early_words(step)}{_expiry_words(step, now)}",
             f"     item {step['item_id']} {step['item']['key']}, need {step['need']}",
             *_cache_lines(step, "     "),
+            *_effort_lines(step, "     "),
         ]
     if not state["queue"]:
         lines.append("  (empty)")
@@ -455,12 +481,14 @@ def summary(state: dict[str, Any]) -> str:
                 f"    step {step['id']}, score {step['score']}, {_bar_words(step)}{_early_words(step)}{_expiry_words(step, now)}",
                 f"    item {step['item_id']} {step['item']['key']}, need {step['need']}",
                 *_cache_lines(step, "    "),
+                *_effort_lines(step, "    "),
             ]
     if state["snoozed"]:
         lines.append("Snoozed:")
         for step in state["snoozed"]:
             lines.append(f"  step {step['id']} until {step['snoozed_until']}: {step['ask']}")
             lines += _cache_lines(step, "    ")
+            lines += _effort_lines(step, "    ")
     if state["with_agents"]:
         lines.append(f"With agents. {user_name()} handed these off; each stays with its agent until the agent closes or returns it:")
         for step in state["with_agents"]:
@@ -471,6 +499,7 @@ def summary(state: dict[str, Any]) -> str:
                 f"    step {step['id']} to {to}, handed off {_ago(handoff['created_at'], now)}, message {handoff['state']}",
                 f"    item {step['item_id']} {step['item']['key']}, need {step['need']}",
                 *_cache_lines(step, "    "),
+                *_effort_lines(step, "    "),
             ]
     if state["recent_archives"]:
         lines.append(
@@ -1246,7 +1275,8 @@ def main(argv: list[str] | None = None) -> int:
         epilog=Template(ITEM_FIELDS).substitute(user=help_user), formatter_class=raw,
     )
     item_get = item_commands.add_parser("get", help=f"one item with all its steps, open and closed, and {help_user}'s messages on it, as JSON")
-    item_get.add_argument("key")
+    item_get.add_argument("key", metavar="ITEM", help="the item's number or key")
+    item_get.add_argument("--json", action="store_true", help="accepted for symmetry with `cockpit get --json`; the output is always JSON")
     item_merge = item_commands.add_parser(
         "merge", parents=[agent],
         help=f"make two items that are one task into one: SIDE's steps, messages and sessions move to MAIN, SIDE's open"

@@ -294,11 +294,14 @@ def compose(conn: Any, message: dict[str, Any]) -> str:
         lines += [
             "",
             f"{user_name()} completed this item with that message. Cockpit closed its steps and moved it to stage done.",
-            f"Do what the message says in this turn. Then commit, push and end without a question for {user_name()}.",
+            (
+                "Do what the message says in this turn. Then commit and push only as the task allows, and end"
+                f" without a question for {user_name()}."
+            ),
             "Cockpit archives this session after the turn, unless the session has other open steps.",
             (
-                "If the last part fails or work is left after all, put the item back at the stage the work is in. Say"
-                f" what is left in its summary. Put a step if {user_name()} has to act on it."
+                "If the last part fails or work is left after all, put that work on a new item that links this one,"
+                f" item {step['item_id']}. This item stays done. Put a step there if {user_name()} has to act on it."
             ),
         ]
     elif handed or held:

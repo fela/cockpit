@@ -314,6 +314,8 @@ def test_codex_to_claude_transfers_full_context_before_first_model_prompt(world,
     assert original_text in readable and "Continue the unfinished work" in readable
     prompts = [args for args, _ in world.runner.calls if args[:2] == ["claude", "--bg"]]
     assert len(prompts) == 2 + (startup == "resume-failure")
+    note = prompts[-1][-1].split("The Codex agent's latest answers (excerpts, oldest first):")
+    assert "Full original Codex request" in note[0] and "Continue the unfinished work" in note[1]
     assert started["session_id"] == SESSION_B
 
 

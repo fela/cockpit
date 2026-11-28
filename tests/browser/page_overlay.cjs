@@ -11,7 +11,8 @@
 //   checks to start with, and a text box it fills in to start with, once cleared, are saved as cleared and stay
 //   clear when the page opens again, as does a select with no empty option that `cockpit.choose` clears
 //   (regression check);
-//   Escape closes it;
+//   a link within the page adds no history entry, and a link to a screen's address (`#/runs`) shows that screen
+//   without one (regression check); Escape closes it;
 // - opened again, the browser's Back closes it and stays on the main page;
 // - Send with an empty reply box hands the step off with the choices, and they show as sent, while a choice saved
 //   for another step failed (regression check);
@@ -57,9 +58,10 @@ body{font:16px/1.5 system-ui;margin:24px}label{display:block;margin:6px 0}.card{
 <label><input type="checkbox" name="notify" value="yes" checked> Tell the team</label>
 <label>Report title <input type="text" name="title" value="Exports"></label>
 <label>Size <select name="size"><option value="s">Small</option><option value="l">Large</option></select></label>
-<p><a href="#extra">To the extras</a></p>
+<p><a href="#extra">To the extras</a> <a href="#/runs">Runs</a> <a href="#">Home</a> <span id="screen">home</span></p>
 <div class="card" id="extra">Add the weekly chart</div>
-<script>document.getElementById("extra").addEventListener("click", () => cockpit.choose("extras", ["chart"], "Weekly chart"));</script>
+<script>addEventListener("hashchange", () => { document.getElementById("screen").textContent = location.hash || "home"; });
+document.getElementById("extra").addEventListener("click", () => cockpit.choose("extras", ["chart"], "Weekly chart"));</script>
 </body></html>`;
 
 const { chromium } = require(PLAYWRIGHT);
@@ -265,6 +267,19 @@ async function main() {
       await figure2.locator("a[href='#extra']").click();
       const entries = await page.evaluate(() => history.length);
       check(`${at}: a link within the page adds no history entry`, entries === depth + 1, `${entries} entries, ${depth} before opening`);
+      // A screen's address in a page that draws its screens from the address after `#` shows that screen, again with
+      // no history entry (regression check: the click did nothing).
+      await figure2.locator("a[href='#/runs']").click();
+      const screen = await waitFor(() => figure2.locator("#screen").textContent(), (words) => words === "#/runs");
+      check(`${at}: a link to a screen's address shows that screen`, screen === "#/runs", screen);
+      const routed = await page.evaluate(() => history.length);
+      check(`${at}: and adds no history entry`, routed === depth + 1, `${routed} entries, ${depth} before opening`);
+      // A bare `#` Home link goes back to the first screen (regression check: it only scrolled to the top).
+      await figure2.locator("a[href='#']").click();
+      const home = await waitFor(() => figure2.locator("#screen").textContent(), (words) => words === "home");
+      check(`${at}: a bare # link goes back to the first screen`, home === "home", home);
+      const homed = await page.evaluate(() => history.length);
+      check(`${at}: and adds no history entry`, homed === depth + 1, `${homed} entries, ${depth} before opening`);
       await figure2.locator("h1").click();
       // A page that handles an Escape itself keeps it: the layer stays open.
       await figure2.evaluate(() => document.addEventListener("keydown", (event) => event.preventDefault(), { once: true }));

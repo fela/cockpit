@@ -31,8 +31,9 @@ function hubWeeks(hub, fam) {
 // the foot while its figure is missing. A family the hub has no account for is its mark alone. A week keeps
 // its colours however old its figure is, since only a request through the hub changes it; the week of an account the
 // hub is resting or cannot use is dimmed, and an account without a figure is a dimmed empty track. A red sign follows
-// the lanes while the hub cannot be reached.
-function hubCaps(hub, machine) {
+// the lanes while the hub cannot be reached. While Gemini is enabled its lane, which Antigravity reports apart from the
+// hub, follows the link with its own hover card (geminiCaps), the two sharing the line by their lanes' spans.
+function hubCaps(hub, gemini, machine) {
   const families = HUB_FOOT.map((fam) => ({ fam, weeks: hubAccountWeeks(hub, fam) }));
   const share = (week) => (hubKnown(week) ? `${week.used}%` : "no figure");
   const said = families.map(({ fam, weeks }) => `${fam.name} ${weeks.length ? weeks.map(({ week }) => share(week)).join(" and ") : "no account"}`).join("; ");
@@ -43,7 +44,7 @@ function hubCaps(hub, machine) {
     hub.error && h("span", { class: "hub-fail" }, icon("alert")));
   pill.tipCard = () => hubCard(hub);
   const lamp = machineLamp(machine);
-  return lamp ? [pill, h("span", { class: "fam-sep" }), lamp] : [pill];
+  return [laneUnits(pill), gemini && geminiCaps(gemini, 0.46), lamp && h("span", { class: "fam-sep" }), lamp].filter(Boolean);
 }
 
 // An account in few letters: its address up to the @.
@@ -277,7 +278,7 @@ function noticeHubSignIn(state) {
     renderUsage(state) {
       if (!state.hub) return false;
       if (state.hub.accounts === null && document.querySelector("#usage .lane")) return true;
-      fill("usage", hubCaps(state.hub, state.usage.machine));
+      fill("usage", hubCaps(state.hub, state.usage.gemini, state.usage.machine));
       return true;
     },
     notice: noticeHubSignIn,

@@ -153,6 +153,26 @@ def test_item_by_key_lists_every_step(world: World) -> None:
     assert agent.get("/api/items", params={"key": "note:none"}, headers=world.agent()).status_code == 404
 
 
+def test_item_get_finds_an_item_by_its_number(world: World, monkeypatch, capsys) -> None:
+    """Cockpit's messages name items by number, so `cockpit item get 12` finds item 12; `--json` changes nothing,
+    as the output is JSON already."""
+    agent = TestClient(world.client.app, base_url=ORIGIN)
+    item = agent.put("/api/items", json={"key": "note:weekly", "title": "Weekly reminder"}, headers=world.agent()).json()
+    route_cli_to(world, monkeypatch)
+    for args in (["item", "get", str(item["id"])], ["item", "get", "note:weekly", "--json"], ["item", "get", str(item["id"]), "--json"]):
+        assert cli.main(args) == 0
+        shown = json.loads(capsys.readouterr().out)
+        assert (shown["id"], shown["key"], shown["steps"]) == (item["id"], "note:weekly", [])
+    assert cli.main(["item", "get", "999"]) == 1
+    assert capsys.readouterr().err == "cockpit: GET /api/items?key=999: HTTP 404: item 999 does not exist\n"
+    # A superscript digit is a key, not a number; a number past SQLite's integers names no item.
+    for odd, detail in (("\u00b2", "no item with key \u00b2"), ("9223372036854775808", "item 9223372036854775808 does not exist")):
+        response = agent.get("/api/items", params={"key": odd}, headers=world.agent())
+        assert (response.status_code, response.json()["detail"]) == (404, detail)
+    # Past Python's 4,300-digit limit on turning text into a number.
+    assert agent.get("/api/items", params={"key": "9" * 4301}, headers=world.agent()).status_code == 404
+
+
 def route_cli_to(world: World, monkeypatch) -> None:
     """Send the CLI's HTTP calls to the test app as an agent."""
     agent = TestClient(world.client.app, base_url=ORIGIN)

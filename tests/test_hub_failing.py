@@ -116,7 +116,7 @@ def test_failures_start_an_item_and_a_session_in_cockpits_checkout_that_hold_the
 def test_a_warning_the_user_handed_or_snoozed_starts_nothing(world: World):
     conn = db.connect(world.db_path)
     mine = store.add_item(conn, "The Codex failures", None, False,
-                          dict.fromkeys(("provider", "model", "effort", "account")), False, None)
+                          dict.fromkeys(("provider", "model", "effort", "account")), False, None, None)
     store.hand_warning(conn, "hub-failing-codex", mine["id"])
     assert hub_failing.investigate(conn, FAILING_CODEX, NOW, world.checkout, world.settings.checkouts_dir, ENABLED) == []
     conn.execute("UPDATE items SET stage = 'done' WHERE id = ?", (mine["id"],))

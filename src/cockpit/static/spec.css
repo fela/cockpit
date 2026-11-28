@@ -399,6 +399,16 @@ textarea.field.grow { field-sizing: content; min-height: 52px; max-height: 60vh;
 /* A skill's frontmatter shows as its description, above the skill's title. */
 .skill-lead { margin: 0; color: var(--text-2); }
 .skill-back b { color: var(--text); }
+/* A skill's files (SKILL.md and its references/), a wrapping row above the text; the open one is filled. */
+.skill-files { display: flex; flex-wrap: wrap; gap: 2px 4px; margin: 0 -8px 20px; }
+.skill-file {
+  display: inline-flex; align-items: center; gap: 6px; min-height: 28px; padding: 0 8px;
+  border-radius: var(--radius-sm); color: var(--text-2); text-decoration: none; white-space: nowrap;
+  transition: color var(--dur-press) var(--ease-out);
+}
+.skill-file[aria-current] { background: var(--selected); color: var(--text); font-weight: 600; }
+@media (hover: hover) { .skill-file:not([aria-current]):hover { background: var(--hover); color: var(--text); } }
+@media (max-width: 600px) { .skill-file { min-height: 36px; } }
 
 /* The skills list (/skills): one column without a table of contents; each skill one line with its
    name, the start of its description, waiting comments and length. The lines share the list's columns

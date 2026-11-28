@@ -392,10 +392,14 @@ def check_agent_title(fields: dict[str, Any], actor: str) -> None:
 def refuse_long_stored_title(item: sqlite3.Row | None, fields: dict[str, Any], actor: str) -> None:
     """Refuse an agent's write on an item whose stored title is still past the limit, unless the write renames it
     (SPEC SESSION-3). Add titles a to-do with the first line of the user's text; a write that left the title out
-    kept it, so a whole sentence headed the item's card for as long as the task lived."""
+    kept it, so a whole sentence headed the item's card for as long as the task lived. A to-do of a text run on
+    several models (SPEC SESSION-31) counts its title without the model's name that Add put in front of it. The
+    item keeps that name in `compared_on`, so words the user adds later leave the exemption in place."""
     if not actor.startswith("agent:") or item is None or "title" in fields:
         return
     title = item["title"]
+    if item["compared_on"]:
+        title = title.removeprefix(f"{item['compared_on']} · ")
     words = len(title.split())
     if words <= AGENT_TITLE_WORDS and len(title) <= AGENT_TITLE_CHARS:
         return
@@ -1029,13 +1033,11 @@ def _ask_to_finish(conn: sqlite3.Connection, item: dict[str, Any], actor: str, n
     return shown["id"]
 
 
-def item_by_key(conn: sqlite3.Connection, key: str) -> dict[str, Any]:
-    """The item with every step it ever had (open, closed, withdrawn), so an agent sees which needs are taken, and
-    the user's messages on it, so a session that closes a task it did not work on can say what the user asked
-    (SPEC CONTROL-19)."""
-    item = db.row(conn.execute("SELECT * FROM items WHERE key = ?", (key,)).fetchone())
-    if item is None:
-        raise NotFound(f"no item with key {key}")
+def item_by_ref(conn: sqlite3.Connection, ref: str) -> dict[str, Any]:
+    """The item, by its number or its key, with every step it ever had (open, closed, withdrawn), so an agent sees
+    which needs are taken, and the user's messages on it, so a session that closes a task it did not work on can say
+    what the user asked (SPEC CONTROL-19). Cockpit's messages name items by number, so agents look them up by it."""
+    item = _item_by_ref(conn, ref)
     steps = db.rows(conn.execute("SELECT * FROM steps WHERE item_id = ? ORDER BY id", (item["id"],)).fetchall())
     messages = db.rows(conn.execute(
         "SELECT id, step_id, step_ask, text, created_at FROM messages WHERE item_id = ? AND author = 'user' ORDER BY id",
@@ -1076,7 +1078,7 @@ def clip_title(text: str) -> str:
 
 def add_item(
     conn: sqlite3.Connection, text: str, part: dict[str, str] | None, pinned: bool, start: dict[str, str | None],
-    fire_and_forget: bool, priority: str | None,
+    fire_and_forget: bool, priority: str | None, compared_on: str | None,
 ) -> dict[str, Any]:
     """The user adds an item with Add: a to-do the sweeper picks up (SPEC CONTROL-8, SESSION-5).
 
@@ -1094,6 +1096,9 @@ def add_item(
     its session (SPEC SESSION-22), each None for the default; the session
     started for it gets them (create_message). A `fire_and_forget` to-do's
     session works to the end on its own and closes it itself (SPEC CONTROL-24).
+    `compared_on` is the label of this to-do's model when the user runs the same
+    text on several models (`add_on_models`, SPEC SESSION-31), else None: the
+    item keeps it, its title starts with it and its text ends with COMPARE_NOTE.
     The key is `todo-<id>`, a form agents' keys cannot take. Returns the item as
     `state.items` shows it.
     """
@@ -1107,23 +1112,25 @@ def add_item(
         priority = next(
             (name for name, words in ADD_PRIORITY_WORDS if any(words.fullmatch(clause) for clause in clauses)), None
         )
-    title = clip_title(text)
+    title = clip_title(f"{compared_on} · {text}" if compared_on else text)
     attached = ""
     if part is not None:
         quote = " ".join(part["quote"].split())
         attached = f"\n\nAttached part of the page ({part['target']})" + (f': "{quote}"' if quote else ", which shows no text")
         if part["detail"]:
             attached += f"\nHow to find it: {part['detail']}"
-    provider, options = start_options(start["provider"], {key: start.get(key) for key in START_OPTION_KEYS})
+    if compared_on:
+        attached += f"\n\n{COMPARE_NOTE}"
+    provider, options = start_options(conn, start["provider"], {key: start.get(key) for key in START_OPTION_KEYS})
     kept = {"provider": provider, **(options or dict.fromkeys(START_OPTION_KEYS))}
     now = db.now_iso()
     with db.transaction(conn):
         item_id = conn.execute("SELECT COALESCE(MAX(id), 0) + 1 FROM items").fetchone()[0]
         conn.execute(
             "INSERT INTO items (id, key, title, summary, todo, fire_and_forget, user_fields, pinned_at, created_at,"
-            " updated_at, updated_by) VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?, 'user')",
+            " updated_at, updated_by, compared_on) VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?, 'user', ?)",
             (item_id, f"todo-{item_id}", title, text + attached, int(fire_and_forget), json.dumps(["summary"]),
-             now if pinned else None, now, now),
+             now if pinned else None, now, now, compared_on),
         )
         if any(kept.values()):
             conn.execute("UPDATE items SET start_options = ? WHERE id = ?", (json.dumps(kept), item_id))
@@ -1154,6 +1161,53 @@ def add_item(
         return _with_attachments(conn, [item])[0]
 
 
+# What each to-do of a text run on several models (SPEC SESSION-31) tells its session, in the user's words.
+COMPARE_NOTE = (
+    "(multiple agents are working on this with the exact same initial prompt, this is done to compare the results"
+    " or see different directions, do not look at the other agent's result, instead work independently and do not"
+    " merge or touch shared components until the user says so)"
+)
+# How many more models Add's "Also on" pick runs the same text on, besides the main pick.
+ADD_ALSO_MAX = 3
+
+
+def model_label(conn: sqlite3.Connection, provider: str | None, model: str | None) -> str:
+    """What the page calls the model a session with these picks runs on: the model's label, or the agent's name
+    for an agent's own default model (an ACP agent's "default")."""
+    runs = provider or config.setup().default_provider
+    models = db.session_models(conn, runs)
+    chosen = model or models[0][0]
+    if chosen == "default":
+        return config.PROVIDER_NAMES[runs]
+    return dict(models)[chosen]
+
+
+def add_on_models(
+    conn: sqlite3.Connection, text: str, part: dict[str, str] | None, pinned: bool,
+    starts: list[dict[str, str | None]], fire_and_forget: bool, priority: str | None,
+) -> dict[str, Any]:
+    """The user runs the same text on several models from Add (SPEC SESSION-31): one to-do per pick in `starts`,
+    the main pick first, each as `add_item` makes it with its own start picks, its model's label at the start of
+    its title and COMPARE_NOTE at the end of its text. Two picks on one model are refused. Returns the first
+    to-do as `state.items` shows it, with the others in `also`."""
+    if not 2 <= len(starts) <= 1 + ADD_ALSO_MAX:
+        raise Invalid(f"a text runs on 2 to {1 + ADD_ALSO_MAX} models")
+    runs = []
+    for start in starts:
+        start_options(conn, start["provider"], {key: start.get(key) for key in START_OPTION_KEYS})
+        provider = start["provider"] or config.setup().default_provider
+        runs.append((provider, start.get("model") or db.session_models(conn, provider)[0][0]))
+    if len(set(runs)) < len(runs):
+        raise Invalid("the same model is picked twice")
+    with db.transaction(conn):
+        items = [
+            add_item(conn, text, part, pinned, start, fire_and_forget, priority,
+                     model_label(conn, start["provider"], start.get("model")))
+            for start in starts
+        ]
+    return items[0] | {"also": items[1:]}
+
+
 def fork(
     conn: sqlite3.Connection, item_id: int, session_id: str, cwd: str, text: str, checkouts_dir: Path
 ) -> dict[str, Any]:
@@ -1165,7 +1219,7 @@ def fork(
     and the queued message that starts the fork."""
     with db.transaction(conn):
         project = get_item(conn, item_id)["project"]
-        item = add_item(conn, text, None, False, dict.fromkeys(("provider", *START_OPTION_KEYS)), False, None)
+        item = add_item(conn, text, None, False, dict.fromkeys(("provider", *START_OPTION_KEYS)), False, None, None)
         conn.execute("UPDATE items SET project = ? WHERE id = ?", (project, item["id"]))
         message = create_message(
             conn, "user", text, {"item_id": item["id"], "new_cwd": cwd, "fork_of": session_id}, checkouts_dir
@@ -1488,11 +1542,12 @@ def all_pages(conn: sqlite3.Connection, now: datetime) -> list[dict[str, Any]]:
     """Every shared page with its item's title, stage and state, last changed first, for the Pages tab (SPEC API-4).
     `item_on_board` says whether All work shows the item, so the tab links to it only then; `item_has_session` whether
     comments can go to the item's session. Metadata only, never the HTML."""
+    # Each table row holds its HTML before these columns, so reading them from the table walks every page's HTML.
     pages = db.rows(conn.execute(
         "SELECT p.id, p.title, p.size, p.created_at, p.updated_at, p.revision, p.added_by, p.public_token, p.access, p.item_id,"
         " i.title AS item_title, i.project AS item_project, i.stage AS item_stage, i.archived AS item_archived, i.sessions != '[]' AS item_has_session,"
         " i.updated_at AS item_updated_at, i.done_at AS item_done_at, i.pinned_at AS item_pinned_at"
-        " FROM item_pages p JOIN items i ON i.id = p.item_id ORDER BY p.updated_at DESC, p.id DESC"
+        " FROM item_pages p INDEXED BY item_pages_metadata JOIN items i ON i.id = p.item_id ORDER BY p.updated_at DESC, p.id DESC"
     ).fetchall())
     people = _page_people(conn, [page["id"] for page in pages])
     for page in pages:
@@ -1774,7 +1829,7 @@ def add_page_comments_item(conn: sqlite3.Connection, page_id: int, comment_ids: 
             f'Comments on the page "{_one_line(page["title"])}"\n\n'
             f"{user_name()} chose to open these page comments as a separate item.\n\n{_comment_lines(conn, comments)}"
         )
-        item = add_item(conn, body, None, False, {"provider": None, **dict.fromkeys(START_OPTION_KEYS)}, False, None)
+        item = add_item(conn, body, None, False, {"provider": None, **dict.fromkeys(START_OPTION_KEYS)}, False, None, None)
         conn.execute(
             f"UPDATE page_comments SET state = 'added', item_id = ?, updated_at = ?"
             f" WHERE id IN ({','.join('?' * len(comments))})",
@@ -2103,6 +2158,8 @@ def refuse_on_merged_item(item: dict[str, Any], actor: str) -> None:
     )
 
 
+SQLITE_MAX_INTEGER = 2**63 - 1
+
 # What an item merge moves from the side item to the item it joins, by table: every row tied to the item. Events
 # move only for the side item's steps, so the joined item's own life (created, edited, completed) stays its own.
 MERGE_MOVES = (
@@ -2113,9 +2170,16 @@ MERGE_MOVES = (
 
 
 def _item_by_ref(conn: sqlite3.Connection, ref: int | str) -> dict[str, Any]:
-    """The item by id, or by key when `ref` is text that is not all digits."""
-    if isinstance(ref, int) or str(ref).isdigit():
-        return get_item(conn, int(ref))
+    """The item by id, or by key when `ref` is text that is not all ASCII digits. A number past SQLite's largest
+    integer names no item."""
+    if isinstance(ref, str) and ref.isascii() and ref.isdigit():
+        # Compared as text: Python refuses to turn more than 4,300 digits into a number.
+        digits, largest = ref.lstrip("0") or "0", str(SQLITE_MAX_INTEGER)
+        if (len(digits), digits) > (len(largest), largest):
+            raise NotFound(f"item {ref} does not exist")
+        ref = int(digits)
+    if isinstance(ref, int):
+        return get_item(conn, ref)
     found = db.row(conn.execute("SELECT * FROM items WHERE key = ?", (ref,)).fetchone())
     if found is None:
         raise NotFound(f"no item with key {ref}")
@@ -3178,6 +3242,82 @@ def _timers(conn: sqlite3.Connection) -> dict[int, dict[str, Any]]:
     }
 
 
+# A wake this soon after a snooze is its Undo, which records the same event as a later Unsnooze; the page offers Undo
+# for eight seconds.
+SNOOZE_UNDO_SECONDS = 60
+NO_EFFORT: dict[str, Any] = {
+    "snoozes": 0, "last_snoozed_at": None, "user_minutes": 0, "progress": None, "minutes_since_progress": 0,
+}
+
+
+def _item_efforts(conn: sqlite3.Connection, item_ids: set[int], now: datetime) -> dict[int, dict[str, Any]]:
+    """Per item of `item_ids`, what the sweeper weighs for work the user puts off or sinks time into (SPEC RANK-22):
+    how often the user snoozed its steps, leaving out a snooze they took back with Undo, and when last; the user's
+    tracked minutes on it, a running timer counted to `now`; its latest estimate of the user's time spent; and the
+    user's minutes since that estimate last rose, or all their minutes when it never rose. The estimates of the earlier
+    kind (how far the work was, `of_user_time` 0) measure something else and are left out."""
+    efforts: dict[int, dict[str, Any]] = {}
+    ids = json.dumps(sorted(item_ids))
+
+    def effort(item_id: int) -> dict[str, Any]:
+        return efforts.setdefault(item_id, dict(NO_EFFORT))
+
+    # The times of each item's snoozes that stand, per step. A wake takes back only the snooze just before it.
+    # The item-first index reads only these items' snoozes; for the order the planner would pick events_kind_at.
+    standing: dict[int, dict[int, list[datetime]]] = {}
+    asleep: set[int] = set()
+    for event in conn.execute(
+        "SELECT item_id, step_id, at, json_extract(data, '$.aside') AS aside"
+        " FROM events INDEXED BY events_item_actor_kind_at"
+        " WHERE kind = 'step.snooze' AND actor = 'user' AND step_id IS NOT NULL"
+        " AND item_id IN (SELECT value FROM json_each(?)) ORDER BY at, id",
+        (ids,),
+    ).fetchall():
+        times = standing.setdefault(event["item_id"], {}).setdefault(event["step_id"], [])
+        at = rank.parse_time(event["at"])
+        if event["aside"]:
+            times.append(at)
+            asleep.add(event["step_id"])
+            continue
+        if event["step_id"] in asleep and (at - times[-1]).total_seconds() <= SNOOZE_UNDO_SECONDS:
+            times.pop()
+        asleep.discard(event["step_id"])
+    for item_id, steps in standing.items():
+        times = [at for each in steps.values() for at in each]
+        if times:
+            effort(item_id).update(snoozes=len(times), last_snoozed_at=_iso(max(times)))
+
+    rose_at: dict[int, datetime] = {}
+    for mark in conn.execute(
+        "SELECT item_id, at, progress FROM progress_marks WHERE of_user_time = 1"
+        " AND item_id IN (SELECT value FROM json_each(?)) ORDER BY at, id",
+        (ids,),
+    ).fetchall():
+        item = effort(mark["item_id"])
+        if item["progress"] is not None and mark["progress"] > item["progress"]:
+            rose_at[mark["item_id"]] = rank.parse_time(mark["at"])
+        item["progress"] = mark["progress"]
+
+    seconds: dict[int, float] = {}
+    stalled: dict[int, float] = {}
+    for span in conn.execute(
+        "SELECT s.item_id, t.started_at, t.ended_at FROM time_spans t JOIN steps s ON s.id = t.step_id"
+        " WHERE s.item_id IN (SELECT value FROM json_each(?))",
+        (ids,),
+    ).fetchall():
+        item_id = span["item_id"]
+        started = rank.parse_time(span["started_at"])
+        ended = rank.parse_time(span["ended_at"]) or now
+        rose = rose_at.get(item_id)
+        seconds[item_id] = seconds.get(item_id, 0) + max(0, (ended - started).total_seconds())
+        stalled[item_id] = stalled.get(item_id, 0) + max(0, (ended - max(started, rose or started)).total_seconds())
+    for item_id, total in seconds.items():
+        item = effort(item_id)
+        item["user_minutes"] = round(total / 60)
+        item["minutes_since_progress"] = round(stalled[item_id] / 60)
+    return efforts
+
+
 def _unarchived_items(conn: sqlite3.Connection) -> dict[int, dict[str, Any]]:
     return {item["id"]: item for item in db.rows(conn.execute("SELECT * FROM items WHERE archived = 0").fetchall())}
 
@@ -3232,8 +3372,9 @@ def _started_in_place(conn: sqlite3.Connection) -> set[int]:
     }
 
 
-# How far a ready-next step's score must pass a queued step's to take its place (`_stronger_first`), so a small
-# change of scores between sweeps does not move places back and forth while the user works through the queue.
+# How far a ready-next step's score must pass a queued step's to take its place when a step is put or returned
+# between sweeps (`_swap_places`), so one new score does not move places back and forth while the user works through
+# the queue. A sweep that rescored the queue and the user's close re-sort with no margin (SPEC RANK-19, RANK-23).
 PLACE_MARGIN = 10
 
 
@@ -3267,8 +3408,8 @@ def _stronger_first(conn: sqlite3.Connection, now: datetime, margin: int) -> Non
     """A ready-next step whose score passes a queued step's by more than `margin` takes its place, and the
     other step waits as ready next (SPEC RANK-16, RANK-18): a place someone took while scores were lower does not
     keep a stronger step out. Only movable steps (`_movable`) give up their places. The highest waiting step meets
-    the lowest movable step first. Runs with PLACE_MARGIN when a step is put or returned (`_swap_places`) and when a
-    sweep finishes, and with no margin after the user's close (`_resort_after_close`); not on every fill, so the
+    the lowest movable step first. Runs with PLACE_MARGIN when a step is put or returned (`_swap_places`), and with no
+    margin when a sweep that rescored the queue finishes (`finish_sweep`) and after the user's close (`_resort_after_close`); not on every fill, so the
     user's Undo (`_give_back_places`) leaves the queue as it was."""
     ranked = _ranked_open(conn, _items_with_open_steps(conn), now)
     held = _started_in_place(conn)
@@ -3816,7 +3957,7 @@ def archive_text(step_id: int) -> str:
         f"{user_name()} archived step {step_id}, your last open step on Cockpit, so Cockpit archives this session."
         " Once this turn is over, Cockpit stops the session, and it leaves the main view of Cockpit and of"
         " `claude agents`. The conversation stays, and a later message brings the session back.\n\n"
-        "Use this turn to finish up. Commit and push your work, and bring your Cockpit item up to date. End the"
+        "Use this turn to finish up. Commit and push your work only as the task allows, and bring your Cockpit item up to date. End the"
         f" turn without a question for {user_name()}.\n\n"
         "When work that needs this session is left, such as a PR waiting on CI or a review, say so in your item's"
         " summary. The sweep checks every archived session and sends it a message when its work needs it. Put a"
@@ -3905,10 +4046,10 @@ def finish_text(how: str, item: dict[str, Any], reason: str, archiving: bool) ->
     )
     return (
         f"{did}{then}\n\n"
-        f"Use this turn to finish up. Commit and push your work, and end the turn without a question for {user_name()}."
-        " If work on the item is left after all, such as a PR still waiting on CI or a release, put the item back"
-        " at the stage the work is in. Say what is left in its summary, and put a step if"
-        f" {user_name()} has to act on it."
+        "Use this turn to finish up. Commit and push your work only as the task allows, and end the turn without a"
+        f" question for {user_name()}. If work on the item is left after all, such as a PR still waiting on CI or a"
+        f" release, put that work on a new item that links this one, item {item['id']}. This item stays closed. Put a"
+        f" step there if {user_name()} has to act on it."
     )
 
 
@@ -4762,7 +4903,8 @@ def checkouts(conn: sqlite3.Connection, checkouts_dir: Path) -> list[str]:
 START_OPTION_KEYS = ("model", "effort", "account", "speed")
 
 
-def still_offered(provider: str | None, chosen: dict[str, str | None]) -> tuple[str | None, dict[str, str | None], list[str]]:
+def still_offered(conn: sqlite3.Connection, provider: str | None,
+                  chosen: dict[str, str | None]) -> tuple[str | None, dict[str, str | None], list[str]]:
     """Picks kept from earlier (an item's from Add) with each one the setup no longer offers left to the default, as
     the page's startPicks does: all of them for an agent since turned off. Also returns the picks it dropped."""
     if provider is not None and provider not in config.setup().providers:
@@ -4770,7 +4912,7 @@ def still_offered(provider: str | None, chosen: dict[str, str | None]) -> tuple[
     runs = provider or config.setup().default_provider
     offered = config.SESSION_OPTIONS[runs]
     allowed = {
-        "model": [name for name, _ in offered["models"]],
+        "model": [name for name, _ in db.session_models(conn, runs)],
         "effort": offered["efforts"],
         "account": [each.name for each in accounts.in_use(config.ACCOUNTS, [])] if runs == "claude" else [],
         "speed": [each["name"] for each in config.session_speeds(runs, chosen.get("model") or offered["models"][0][0])],
@@ -4779,9 +4921,10 @@ def still_offered(provider: str | None, chosen: dict[str, str | None]) -> tuple[
     return provider, kept, [f"{key} {chosen[key]}" for key in START_OPTION_KEYS if chosen[key] != kept[key]]
 
 
-def start_options(provider: str | None, chosen: dict[str, str | None]) -> tuple[str | None, dict[str, str | None] | None]:
+def start_options(conn: sqlite3.Connection, provider: str | None,
+                  chosen: dict[str, str | None]) -> tuple[str | None, dict[str, str | None] | None]:
     """The provider, model, effort, account and speed the user picked for a new session (SPEC SESSION-22), checked
-    against what config.SESSION_OPTIONS offers for that provider: None for a choice left to the default, and for
+    against what config.SESSION_OPTIONS (and for models, db.session_models) offers for that provider: None for a choice left to the default, and for
     the options when every one is. A Codex session runs on the one Codex login Cockpit's app server uses."""
     if provider is not None and provider not in config.setup().providers:
         raise Invalid(f"provider {provider} is not enabled")
@@ -4790,7 +4933,7 @@ def start_options(provider: str | None, chosen: dict[str, str | None]) -> tuple[
     runs = provider or config.setup().default_provider
     offered = config.SESSION_OPTIONS[runs]
     model, effort, account, speed = (chosen.get(key) for key in START_OPTION_KEYS)
-    if model is not None and model not in [name for name, _ in offered["models"]]:
+    if model is not None and model not in [name for name, _ in db.session_models(conn, runs)]:
         raise Invalid(f"{runs} offers no model {model}")
     if effort is not None and effort not in offered["efforts"]:
         raise Invalid(f"{runs} offers no effort {effort}")
@@ -4857,7 +5000,8 @@ def create_message(
         kept = conn.execute("SELECT start_options FROM items WHERE id = ?", (item_id,)).fetchone()
         if kept is not None and kept[0] is not None:
             stored = json.loads(kept[0])
-            provider, chosen, dropped = still_offered(stored["provider"], {key: stored.get(key) for key in START_OPTION_KEYS})
+            provider, chosen, dropped = still_offered(conn, stored["provider"],
+                                                      {key: stored.get(key) for key in START_OPTION_KEYS})
             if dropped:
                 log.error("item %s's picks from Add no longer offered start at the defaults: %s", item_id, ", ".join(dropped))
     if session_id is None and new_cwd is None:
@@ -4881,7 +5025,7 @@ def create_message(
         session_id = destination(conn, session_id)
     if selected and new_cwd is None and provider is None:
         provider = "codex" if conn.execute("SELECT 1 FROM codex_threads WHERE session_id = ?", (session_id,)).fetchone() else "claude"
-    provider, new_options = start_options(provider, chosen)
+    provider, new_options = start_options(conn, provider, chosen)
     cursor = conn.execute(
         "INSERT INTO messages (author, item_id, step_id, step_ask, step_version, session_id, new_cwd, new_name, text,"
         " state, created_at, as_prompt, provider, new_options, fork_of) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?)",
@@ -5714,7 +5858,10 @@ def finish_sweep(conn: sqlite3.Connection, sweep_id: str, summary: str, error: s
         sweep |= {"finished_at": db.now_iso(), "summary": summary, "error": error}
         db.kv_set(conn, "last_sweep", sweep)
         db.kv_set(conn, "sweep_recovery", None)  # a finished sweep leaves no stopped one to restart
-        _stronger_first(conn, datetime.now(UTC), PLACE_MARGIN)  # the sweep's scores, all in (`_swap_places`)
+        # The sweep's scores, all in (`_swap_places`). A sweep that rescored the queue re-sorts with no margin (SPEC RANK-23);
+        # a fill, which only scores the steps it brought, or a sweep that failed, keeps the margin.
+        rescored = not error and patterns.sweep_kind(summary) != "fill"
+        _stronger_first(conn, datetime.now(UTC), 0 if rescored else PLACE_MARGIN)
         patterns.record(
             conn, "sweep.finished", actor, None, None, None, {"sweep_id": sweep_id, "summary": summary, "error": error}
         )
@@ -6296,6 +6443,7 @@ def page_state(
     # The page ticks a running timer from `started_at`, so the state changes only when a timer
     # starts or stops, not on every poll.
     timers = _timers(conn)
+    efforts = _item_efforts(conn, {step["item_id"] for group in ordered.values() for step in group}, now)
     # The page's Take moves the same step back to ready next as `_take_place`.
     started = _started_in_place(conn)
     for group in ordered.values():
@@ -6303,6 +6451,7 @@ def page_state(
             step["target"] = target(step)
             step["run"] = runs.get(step["id"])
             step["timer"] = timers.get(step["id"])
+            step["effort"] = dict(efforts.get(step["item_id"], NO_EFFORT))
             step["user_on_it"] = bool(step["timer"] and step["timer"]["started_at"])
             step["started_in_place"] = step["id"] in started
     item_time: dict[int, dict[str, Any]] = {}

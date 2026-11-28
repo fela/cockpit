@@ -1,8 +1,8 @@
 """Markdown files the user reads and edits block by block: the living spec and the user's skills.
 
 The spec is docs/SPEC.md in Cockpit's repo, on the branch Cockpit deploys. Each
-skill is a SKILL.md in the checkout every session loads the user's skills from, on
-its sync branch.
+skill is a SKILL.md, and the Markdown files in its references/ folder, in the checkout
+every session loads the user's skills from, on its sync branch.
 
 The server is the one writer that both the page and every session can reach, so
 edits from either go through here. A part edit names the exact block it
@@ -19,6 +19,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
+import posixpath
 import re
 import subprocess
 import threading
@@ -34,6 +35,8 @@ log = logging.getLogger(__name__)
 
 SPEC_FILE = "docs/SPEC.md"
 SKILL_NAME = re.compile(r"[a-z0-9][a-z0-9-]*")
+# A skill's file the page shows: its SKILL.md, or a Markdown file of its own in its references/ folder.
+SKILL_FILE = re.compile(r"SKILL\.md|references/[a-z0-9][a-z0-9-]*\.md")
 REQUIREMENT_ID = re.compile(r"[A-Z]+-\d+")
 TABLE_SEPARATOR = re.compile(r"\|[\s:|-]+\|?")
 UNESCAPED_PIPE = re.compile(r"(?<!\\)\|")
@@ -63,19 +66,42 @@ class Doc:
     # The checkout holds only its branch (the deploy checkout, SPEC CODE-8): an edit refuses uncommitted changes
     # there instead of setting them aside in git's stash.
     clean: bool
+    # Where the file's relative links lead: a skill's links to its other files open them on the page.
+    links: render.DocLinks
 
 
 def spec_doc(repo: Path, branch: str) -> Doc:
     """The spec, synced on `branch`, the one Cockpit deploys; "" (deploy turned off) commits only."""
-    return Doc(repo, SPEC_FILE, "spec:", "the spec", "Spec", branch or None, True)
+    return Doc(repo, SPEC_FILE, "spec:", "the spec", "Spec", branch or None, True, render.DocLinks("", ()))
 
 
-def skill_doc(repo: Path, folder: str, branch: str, name: str) -> Doc:
-    """The user's skill `name`: a folder of its own in `folder` of the skills checkout, synced on `branch`."""
-    file = f"{folder}/{name}/SKILL.md"
-    if not SKILL_NAME.fullmatch(name) or not (repo / file).is_file():
+def skill_doc(repo: Path, folder: str, branch: str, name: str, file: str) -> Doc:
+    """The file `file` of the user's skill `name`, "SKILL.md" or "references/<file>.md": the skill is a folder of
+    its own in `folder` of the skills checkout, synced on `branch`.
+
+    Comments on SKILL.md keep the keys "skill:<name>:..."; those on a reference start "skill:<name>/<file>:".
+    """
+    if not SKILL_NAME.fullmatch(name) or not (repo / folder / name / "SKILL.md").is_file():
         raise store.NotFound(f"no skill named {name} in {repo / folder}")
-    return Doc(repo, file, f"skill:{name}:", f"the {name} skill", name, branch, False)
+    if not SKILL_FILE.fullmatch(file) or not (repo / folder / name / file).is_file():
+        raise store.NotFound(f"the {name} skill has no file {file}")
+    links = render.DocLinks(posixpath.dirname(file), tuple((other, skill_page(name, other)) for other in skill_files(repo, folder, name)))
+    if file == "SKILL.md":
+        return Doc(repo, f"{folder}/{name}/{file}", f"skill:{name}:", f"the {name} skill", name, branch, False, links)
+    return Doc(
+        repo, f"{folder}/{name}/{file}", f"skill:{name}/{file}:", f"{file} of the {name} skill", f"{name}/{file}", branch, False, links
+    )
+
+
+def skill_files(repo: Path, folder: str, name: str) -> list[str]:
+    """The files of skill `name` the page shows: "SKILL.md", then its references by name."""
+    found = (f"references/{path.name}" for path in sorted((repo / folder / name / "references").glob("*.md")) if path.is_file())
+    return ["SKILL.md", *(file for file in found if SKILL_FILE.fullmatch(file))]
+
+
+def skill_page(name: str, file: str) -> str:
+    """The skills page's address of a skill's file."""
+    return f"/skills/{name}" if file == "SKILL.md" else f"/skills/{name}/{file}"
 
 
 def skills(repo: Path, folder: str) -> list[dict[str, Any]]:
@@ -213,22 +239,23 @@ def blocks(markdown: str, prefix: str) -> list[dict[str, Any]]:
     return found
 
 
-def page_blocks(markdown: str, prefix: str) -> list[dict[str, Any]]:
-    """Blocks with HTML for the page: Markdown rendered without raw HTML, links allowlisted."""
+def page_blocks(markdown: str, prefix: str, links: render.DocLinks) -> list[dict[str, Any]]:
+    """Blocks with HTML for the page: Markdown rendered without raw HTML, links allowlisted, and relative links to
+    the files `links` knows leading to their pages."""
     shown = []
     for block in blocks(markdown, prefix):
         if block["kind"] == "row":
-            block["cells_html"] = [render.markdown_inline_html(cell, render.NO_REFS) for cell in block["cells"]]
+            block["cells_html"] = [render.doc_inline_html(cell, links) for cell in block["cells"]]
         elif block["kind"] == "item":
             # The page numbers a numbered item itself, so its text renders without the number.
             numbered = NUMBERED.match(block["text"])
             block["number"] = int(numbered.group(1)) if numbered else None
-            block["html"] = render.markdown_html(block["text"][numbered.end():] if numbered else block["text"].removeprefix("- "), render.NO_REFS)
+            block["html"] = render.doc_html(block["text"][numbered.end():] if numbered else block["text"].removeprefix("- "), links)
         elif block["kind"] == "code":
             fenced = block["text"] if render.FENCE.match(block["text"]) else f"```\n{block['text']}\n```"
-            block["html"] = render.markdown_html(fenced, render.NO_REFS)
+            block["html"] = render.doc_html(fenced, links)
         elif block["kind"] == "paragraph":
-            block["html"] = render.markdown_html(block["text"], render.NO_REFS)
+            block["html"] = render.doc_html(block["text"], links)
         shown.append(block)
     return shown
 

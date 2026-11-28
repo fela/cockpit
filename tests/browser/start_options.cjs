@@ -66,10 +66,10 @@ async function main() {
       return { context, page, posted };
     };
     const wide = (page) => page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
-    // The start buttons under `scope` as they read, such as "Claude | Opus 5.5 | high | Auto", and their icons.
-    const line = (page, scope) => page.evaluate((scope) => [...document.querySelectorAll(`${scope} .start-options .start-button`)]
+    // The start buttons under `scope` as they read, such as "Claude | Opus 5.5 | high | Auto", and their icons; the Also pick (SPEC SESSION-31) is not one of them.
+    const line = (page, scope) => page.evaluate((scope) => [...document.querySelectorAll(`${scope} .start-options:not(.add-also) .start-button`)]
       .map((button) => button.textContent.trim()).join(" | "), scope);
-    const buttonIcons = (page, scope) => page.evaluate((scope) => [...document.querySelectorAll(`${scope} .start-options .start-button`)]
+    const buttonIcons = (page, scope) => page.evaluate((scope) => [...document.querySelectorAll(`${scope} .start-options:not(.add-also) .start-button`)]
       .map((button) => [...button.querySelectorAll(".icon:not(.icon-chevron)")].map((each) => each.classList[1].slice("icon-".length))), scope);
     // Opens the list of the button `key` under `scope` and picks `value` ("" for Automatic).
     const choose = async (page, scope, key, value) => {
@@ -319,7 +319,7 @@ async function main() {
     // A refusal this page receives while Add is open puts the refused picks back, and the open Add box shows them.
     const restored = await idle.evaluate(() => {
       putBack("add:new", "Refused words", null, { provider: "codex", model: "gpt-6.1-terra", effort: "xhigh", account: null });
-      return [...document.querySelectorAll("#add-box .start-options .start-button")].map((button) => button.textContent.trim()).join(" | ");
+      return [...document.querySelectorAll("#add-box .start-options:not(.add-also) .start-button")].map((button) => button.textContent.trim()).join(" | ");
     });
     check("a refusal received while Add is open shows the picks put back", restored === "Codex | GPT-6.1 Terra | xhigh | Standard", restored);
     // Its words show in the open box too, and typing there keeps them.
@@ -339,12 +339,12 @@ async function main() {
     const followed = await idle.evaluate(() => {
       ui.starts.set("add:new", { provider: "codex", model: "gpt-6.1-terra", effort: "xhigh", account: null });
       drawStartLines();
-      const before = [...document.querySelectorAll("#add-box .start-options .start-button")].map((button) => button.textContent.trim()).join(" | ");
+      const before = [...document.querySelectorAll("#add-box .start-options:not(.add-also) .start-button")].map((button) => button.textContent.trim()).join(" | ");
       document.querySelector("#add-box .start-button").focus();
       const codex = ui.state.session_options.codex;
       delete ui.state.session_options.codex;
       render(false);
-      const after = [...document.querySelectorAll("#add-box .start-options .start-button")].map((button) => button.textContent.trim()).join(" | ");
+      const after = [...document.querySelectorAll("#add-box .start-options:not(.add-also) .start-button")].map((button) => button.textContent.trim()).join(" | ");
       const focused = document.activeElement.classList.contains("start-button");
       ui.state.session_options.codex = codex;
       render(false);
@@ -365,7 +365,7 @@ async function main() {
         putBack("add:new", "Words for a disabled agent", null, { provider: "codex", model: "gpt-6.1-terra", effort: "xhigh", account: null });
       } catch (error) { thrown = error.message; }
       return { thrown, words: ui.drafts.get("add:new"), sends: startPicks("add:new", null),
-        line: [...document.querySelectorAll("#add-box .start-options .start-button")].map((button) => button.textContent.trim()).join(" | ") };
+        line: [...document.querySelectorAll("#add-box .start-options:not(.add-also) .start-button")].map((button) => button.textContent.trim()).join(" | ") };
     });
     check("picks for an agent no longer enabled count as the defaults, and the refused words still come back",
       disabled.thrown === null && (disabled.words || "").includes("Words for a disabled agent")

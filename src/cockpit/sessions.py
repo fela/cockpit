@@ -360,11 +360,11 @@ def _instruction(entry: Any) -> dict[str, str] | None:
     Tool results, notices of finished background tasks, a subagent's result, skills' text, images, notes
     Claude Code adds (`isMeta`) and the summary of a compacted conversation are not.
     """
-    prompt = _prompt(entry)
+    prompt = transcript_prompt(entry)
     return None if prompt is None else instruction(*prompt)
 
 
-def _prompt(entry: Any) -> tuple[str, str, bool] | None:
+def transcript_prompt(entry: Any) -> tuple[str, str, bool] | None:
     """A transcript entry that is a prompt the session got (`_instruction`) as its whole text, when it came and
     whether another session sent it; None for any other entry."""
     if not isinstance(entry, dict) or entry.get("isCompactSummary"):
@@ -455,7 +455,7 @@ def received(session_id: str, sent: str, since: str) -> str | None:
     size = TRANSCRIPT_TAIL_BYTES
     while True:
         for entry in _tail_entries(session_id, size):
-            prompt = _prompt(entry)
+            prompt = transcript_prompt(entry)
             if prompt is None:
                 continue
             text, at, _peer = prompt
@@ -1149,7 +1149,7 @@ def running_version(pid: int) -> str:
 
 def _local_command_finished(session_id: str, started_ms: int) -> bool:
     for entry in _tail_entries(session_id, TRANSCRIPT_TAIL_BYTES):
-        if not isinstance(entry, dict) or (_prompt(entry) is None and entry.get("type") != "assistant"):
+        if not isinstance(entry, dict) or (transcript_prompt(entry) is None and entry.get("type") != "assistant"):
             continue
         message = entry.get("message")
         content = message.get("content") if isinstance(message, dict) else None

@@ -121,10 +121,10 @@ SESSION_OPTIONS: dict[str, dict[str, Any]] = {
             {"name": "ultrafast", "label": "Ultrafast", "hint": "8× included usage · Pro $500"},
         ],
     },
-    # The ACP agents (acp_agent.py, SPEC SESSION-30) pick no effort, and each runs on its CLI's own default model:
-    # Antigravity's ("gemini") is the one its settings choose, from those the signed-in Google account offers.
+    # The ACP agents (acp_agent.py, SPEC SESSION-30) pick no effort. "default" uses the CLI's own model choice.
+    # For Antigravity ("gemini"), db.session_models also adds the models reported for the signed-in Google account.
     "gemini": {
-        "models": [("default", "Default")],
+        "models": [("gemini-4-neon", "Gemini 4 Neon"), ("default", "Default")],
         "efforts": [],
         "effort": None,
     },

@@ -117,8 +117,8 @@ async function main() {
     await page.evaluate(() => selectItem(null));
     await page.waitForFunction((ids) => ids.every((id) => [...ui.state.queue, ...ui.state.ready_next].some((s) => s.id === id)),
       urgent.map((step) => step.id), { timeout: 20e3 });
-    const resorted = "#next > .resorted-pin > .reorder.resorted";
-    const shown = await page.waitForFunction((id) => ui.next && ui.next.id === id && document.querySelector("#next > .resorted-pin > .reorder.resorted"),
+    const resorted = "#next > .next-card > .resorted-pin > .reorder.resorted";
+    const shown = await page.waitForFunction((id) => ui.next && ui.next.id === id && document.querySelector("#next > .next-card > .resorted-pin > .reorder.resorted"),
       steps[0].id, { timeout: 20e3 }).then(() => true, () => false);
     check("Next up stays the pressed step and shows Resorted", shown,
       await page.evaluate(() => `order ${ui.order.join(",")}; state ${ui.state.queue.map((s) => s.id).join(",")}; placed ${[...ui.placed].join(";")}; active ${document.activeElement && document.activeElement.dataset.key}`));

@@ -27,7 +27,8 @@ async function usageChecks() {
     readState: async () => state, URLSearchParams, ADDS_WAIT_MS: 1000, ARRIVED_MS: 10000, RERENDER_MS: 60000,
     SAVED_PAGE_NOTE: "Showing the saved page; checking for updates",
     commentDeletions: new Map(), noticeCodexSignIns: noop,
-    forgetSentMarks: noop, settleUploads: noop, noticeSideAnswers: noop, noticeSnoozeReads: noop, renderStatus: noop, caughtUp: noop,
+    forgetSentMarks: noop, forgetListedMentions: noop, settleUploads: noop, noticeSideAnswers: noop, noticeSnoozeReads: noop,
+    renderStatus: noop, caughtUp: noop,
     fill: () => calls.usage++, usagePill: noop,
     logError: (_label, error) => { throw error; }, Motion: { redraw: (work) => work() }, renderBanner: noop,
   });

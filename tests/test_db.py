@@ -1188,6 +1188,14 @@ def test_status_metadata_reads_stay_on_small_indexes_after_upgrade(tmp_path):
             query = f"SELECT {columns} FROM {table} WHERE item_id IN (?, ?) ORDER BY id"
             plan = [row[3] for row in conn.execute("EXPLAIN QUERY PLAN " + query, ids)]
             assert any(f"USING COVERING INDEX {table}_metadata" in line for line in plan), plan
+        # The Pages tab lists every page; its read stays on the metadata index too, apart from the HTML.
+        statements: list[str] = []
+        conn.set_trace_callback(statements.append)
+        assert len(store.all_pages(conn, datetime(2026, 11, 16, tzinfo=UTC))) == 2
+        conn.set_trace_callback(None)
+        listing = next(sql for sql in statements if "FROM item_pages p" in sql)
+        plan = [row[3] for row in conn.execute("EXPLAIN QUERY PLAN " + listing)]
+        assert any("USING COVERING INDEX item_pages_metadata" in line for line in plan), plan
     finally:
         conn.close()
 
@@ -1245,6 +1253,8 @@ def test_page_agent_activity_skips_message_bodies_after_upgrade(tmp_path):
         for state in (before, after):
             state.pop("now")
             state.pop("local_now")
+        for each in after["items"]:
+            each.pop("compared_on")  # a column a later migration adds to items
         assert after == before
         query = next(query for query in queries if "MAX(created_at) AS at FROM messages" in query)
         plan = [row[3] for row in conn.execute("EXPLAIN QUERY PLAN " + query)]
@@ -1296,6 +1306,8 @@ def test_page_reads_sends_failures_and_sweeps_by_index_after_upgrade(tmp_path):
         for state in (before[0], after[0]):
             state.pop("now")
             state.pop("local_now")
+        for each in after[0]["items"]:
+            each.pop("compared_on")  # a column a later migration adds to items
         assert after == before
         for marker, index in (("state = 'sent' AND item_id IS NOT NULL", "messages_sent_session"),
                               ("(state = 'failed' AND dismissed_at IS NULL)", "messages_state"),

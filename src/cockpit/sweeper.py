@@ -37,7 +37,7 @@ sweeps again; the restart is a change that wakes the sweeper.
 
 A reorder (SPEC SWEEP-25) is a short sweep that only rescores the user's queue and ready next. It marks no change as seen,
 so the wake-up after a restart still lists what changed during the pause, and its scores count all at once when it
-finishes, as a sweep's do (`store._swap_places`). `reorder_due` stays until a sweep that started after it finished well.
+finishes, as a sweep's do (`store.finish_sweep`). `reorder_due` stays until a sweep that started after it finished well.
 """
 
 from __future__ import annotations
@@ -126,8 +126,10 @@ QUIET_KINDS = (
     "codex.answered",
     "gemini.requested",
     "gemini.answered",
+    "gemini.auto_allowed",
     "grok.requested",
     "grok.answered",
+    "grok.auto_allowed",
     "item.image_added",
     "item.image_removed",
     "item.page_added",

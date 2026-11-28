@@ -226,6 +226,60 @@ check("F9: a session view opened before the first state draws its box once the s
   assert.deepEqual(box.children.map((made) => made.session), ["S1"], "the first state leaves the box empty");
 });
 
+// The card's choice of a picked task the page does not hold, as renderSelected makes it: the task it keeps, or null
+// once it dropped the selection for the queue's first step.
+function unarchiveWorld(answer, toast = noop) {
+  const archived = { id: 7, title: "Shelve the old draft", stage: "build", action: "archived", closed_at: "2026-11-01T10:00:00Z" };
+  let selected = 7;
+  const w = world({ ui: { state: { items: [], closed_recently: { items: [] } }, mentionedClosed: new Map([[7, archived]]),
+    closedLookups: new Map() },
+    patchItem: async () => true, nextState: async () => {}, closedTask: () => answer instanceof Promise ? answer : Promise.resolve(answer), toast,
+    selectedItem: () => selected, dropSelection: () => { selected = null; }, stepOfItem: () => null });
+  w.run(part("sidebar.js", "function closedEntry(state, itemId)", "// After the user answers"));
+  w.run(`function cardItem(state, lists) {\n${part("sidebar.js", "  let itemId = selectedItem();", "  const warnings = warningList(state);")}\n  return itemId;\n}`);
+  w.run("function render() { cardItem(ui.state, null); }");
+  w.run(part("app.js", "async function unarchiveClosed(entry)", "// What a session holding"));
+  return { w, archived, selected: () => selected };
+}
+const settle = async () => { for (let n = 0; n < 10; n++) await tick(); };
+
+check("F10: Unarchive whose next refresh fails keeps the task on the card until a state holds it", async () => {
+  // The closed work no longer has the task once it is open again.
+  const { w, archived, selected } = unarchiveWorld(null);
+  await w.run("unarchiveClosed(ui.mentionedClosed.get(7))");
+  await settle();
+  w.run("render()");
+  await settle();
+  assert.equal(selected(), 7, "the card drops the task for the queue after a failed refresh");
+  assert.equal(w.run("closedEntry(ui.state, 7)"), archived, "the card loses the task's copy before a state holds it");
+  w.run(part("app.js", "function forgetListedMentions(state)", "// Unarchive on a closed task's row."));
+  w.run("ui.state = { items: [{ id: 7, title: 'Shelve the old draft' }], closed_recently: { items: [] } }; forgetListedMentions(ui.state); render();");
+  assert.equal(w.run("ui.mentionedClosed.has(7)"), false, "the archived copy outlives the state that holds the task");
+  assert.equal(selected(), 7);
+});
+
+check("F10: Unarchive on a task done before this week shows it done from the closed work", async () => {
+  const done = { id: 7, title: "Shelve the old draft", stage: "done", action: "stage done", closed_at: "2026-11-01T10:00:00Z" };
+  const { w, selected } = unarchiveWorld(done);
+  await w.run("unarchiveClosed(ui.mentionedClosed.get(7))");
+  await settle();
+  assert.equal(selected(), 7);
+  assert.equal(w.run("closedEntry(ui.state, 7)"), done, "the card keeps the archived copy of a task done before this week");
+});
+
+check("F10: a lookup that fails after a state holds the task again shows no error", async () => {
+  let fail;
+  const toasts = [];
+  const { w, selected } = unarchiveWorld(new Promise((_, reject) => { fail = reject; }), (text) => toasts.push(text));
+  await w.run("unarchiveClosed(ui.mentionedClosed.get(7))");
+  w.run(part("app.js", "function forgetListedMentions(state)", "// Unarchive on a closed task's row."));
+  w.run("ui.state = { items: [{ id: 7, title: 'Shelve the old draft' }], closed_recently: { items: [] } }; forgetListedMentions(ui.state); render();");
+  fail(new Error("offline"));
+  await settle();
+  assert.deepEqual(toasts, [], "a lookup the page no longer waits for shows its error");
+  assert.equal(selected(), 7);
+});
+
 (async () => {
   const failures = [];
   for (const [name, body] of tests) {

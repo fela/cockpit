@@ -1038,6 +1038,14 @@ checks that Run takes the card and its Inbox row off before the server answers a
 refused Deny brings the card back with the server's reason on it (SPEC PERM-30). The page logs when the card goes off,
 so a slow machine cannot blur the order; leaving-animation copies do not count as the card.
 
+## Answering an agent's question
+
+`question_card.cjs` adds two question requests to the page's state through `serve_preview.py` (no agent runs) and
+holds their answers, at 1280 px light and 390 px dark (SPEC SESSION-30). On Gemini's one pick-one question, the
+options show as answer keys with no text box and no Send answer, and a press sends that option. On Codex's two
+questions, a press picks an option and shows it picked, a second press moves the pick, nothing goes until Send
+answer, and Send answer carries the pick and the written answer together.
+
 ## A handed step's card while the agent works
 
 `working_step.cjs` checks the card of a step the user handed to an agent, picked in Busy, at laptop width in light
@@ -1054,3 +1062,19 @@ node tests/browser/working_step.cjs
 ```
 
 It prints one line per check and exits 0 when all passed. A run takes about a minute.
+
+## A skill's reference files
+
+`skill_references.cjs` writes a made-up skill with two files in its `references/` folder into the harness's skills
+checkout (`serve_preview.py`), at 1440 px and 390 px (SPEC SKILLS-1):
+
+- the skill's page lists its files, SKILL.md first and marked open;
+- a link in the text (`references/steps.md#second-part`) opens that file's page at the section;
+- the open file's links point at the other files' pages, and the file row leads back to SKILL.md;
+- a path out of `references/` gets 404, and the pages log no error.
+
+```
+node tests/browser/skill_references.cjs
+```
+
+It prints one line per check and saves a screenshot of the reference page at each width in its work folder.

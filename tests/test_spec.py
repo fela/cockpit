@@ -8,8 +8,10 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from cockpit import spec, store
+from cockpit import render, spec, store
 from tests.conftest import GIT_REDIRECTS, ORIGIN, SPEC_TEXT, World, make_spec_template
+
+NO_LINKS = render.DocLinks("", ())
 
 
 def test_the_spec_template_is_built_in_its_own_repos_under_an_inherited_git_dir(tmp_path, monkeypatch) -> None:
@@ -34,7 +36,7 @@ def test_the_spec_template_is_built_in_its_own_repos_under_an_inherited_git_dir(
 
 @pytest.mark.parametrize("clean", [True, False])
 def test_first_document_save_pushes_a_branch_missing_from_remote(tmp_path, monkeypatch, clean):
-    doc = spec.Doc(tmp_path, "SPEC.md", "spec:", "the spec", "Spec", "my-main", clean)
+    doc = spec.Doc(tmp_path, "SPEC.md", "spec:", "the spec", "Spec", "my-main", clean, NO_LINKS)
     calls = []
 
     def git(repo, args):
@@ -60,7 +62,7 @@ def test_first_document_save_pushes_a_branch_missing_from_remote(tmp_path, monke
 @pytest.mark.parametrize("remote", ["exists", "error", "pull error"])
 @pytest.mark.parametrize("clean", [True, False])
 def test_document_pull_preserves_existing_branch_and_remote_errors(tmp_path, monkeypatch, remote, clean):
-    doc = spec.Doc(tmp_path, "SPEC.md", "spec:", "the spec", "Spec", "my-main", clean)
+    doc = spec.Doc(tmp_path, "SPEC.md", "spec:", "the spec", "Spec", "my-main", clean, NO_LINKS)
     calls = []
 
     def git(repo, args):
@@ -127,13 +129,13 @@ def test_a_fence_line_with_text_after_it_stays_inside_the_code_block() -> None:
 
 def test_numbered_steps_are_items_of_their_own_with_their_number() -> None:
     text = "# Sweep\n\nDo this in order:\n1. Start the sweep.\n2. Collect what needs Sam:\n   - **Sessions**: the state.\n10. Finish.\n"
-    found = spec.page_blocks(text, "skill:cockpit:")
+    found = spec.page_blocks(text, "skill:cockpit:", NO_LINKS)
     assert [entry["kind"] for entry in found] == ["heading", "paragraph", "item", "item", "item"]
     assert found[1]["text"] == "Do this in order:"
     assert [entry["number"] for entry in found[2:]] == [1, 2, 10]
     assert found[3]["text"] == "2. Collect what needs Sam:\n   - **Sessions**: the state."
     assert found[3]["html"].startswith("<p>Collect what needs Sam:</p>") and "<strong>Sessions</strong>" in found[3]["html"]
-    assert spec.page_blocks("- One step at a time.\n", "skill:cockpit:")[0]["number"] is None
+    assert spec.page_blocks("- One step at a time.\n", "skill:cockpit:", NO_LINKS)[0]["number"] is None
 
 
 def test_spec_page_shows_blocks_with_their_comments(world: World) -> None:

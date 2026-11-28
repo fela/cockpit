@@ -866,6 +866,32 @@ def test_the_state_and_the_page_script_come_compressed(world: World) -> None:
     assert "content-encoding" not in world.client.get("/api/state", headers={"Accept-Encoding": "identity"}).headers
 
 
+def test_the_page_worker_builds_the_page_while_the_state_reads_the_spend(world: World, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Each side waits for the other to start, which only reading both at once gets past.
+    spend_read = threading.Event()
+    page_read = threading.Event()
+    per_session = world.spend_index.per_session
+
+    def reading_spend(now: datetime) -> dict:
+        spend_read.set()
+        assert page_read.wait(5), "the state read the spend before starting the page"
+        return per_session(now)
+
+    def waiting_view(*args: object) -> object:
+        page_read.set()
+        assert spend_read.wait(5), "the state read the spend only after the page"
+        return read_view(*args)
+
+    monkeypatch.setattr(world.spend_index, "per_session", reading_spend)
+    app = create_app(world.settings, world.deliverer, world.cache, world.spend_index, world.codex_index, [], waiting_view)
+    browser = TestClient(app, base_url=ORIGIN)
+    browser.cookies.set(auth.SESSION_COOKIE, auth.session_cookie_value(COOKIE_KEY, EMAIL, int(time.time()) + 3600))
+    put_item(world)
+    state = browser.get("/api/state")
+    assert state.status_code == 200
+    assert [item["title"] for item in state.json()["items"]] == ["PR 10"]
+
+
 def test_a_background_tab_state_is_no_sign_the_user_is_here(world: World) -> None:
     # A hidden tab keeps its cards current (SPEC UI-60) without counting as the user at the page (SWEEP-11).
     conn = db.connect(world.db_path)

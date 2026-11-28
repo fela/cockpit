@@ -499,6 +499,7 @@ def check_pulls_forever() -> None:
     (SPEC NEXT-66), at startup and every github.CHECK_SECONDS."""
     failed: dict[str, datetime] = {}
     failed_states: dict[str, datetime] = {}
+    state_backoff = github.StateBackoff()
     while True:
         try:
             conn = db.connect(config.DB_PATH)
@@ -514,7 +515,7 @@ def check_pulls_forever() -> None:
             conn = db.connect(config.DB_PATH)
             try:
                 changed = github.check_states(
-                    conn, github.ask_states, store.linked_pulls(conn), failed_states, datetime.now(UTC)
+                    conn, github.ask_states, store.linked_pulls(conn), failed_states, datetime.now(UTC), state_backoff,
                 )
             finally:
                 conn.close()

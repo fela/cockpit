@@ -26,10 +26,14 @@ const QUOTED_ID = /^\|\s*([A-Z]+-\d+)\s*\|/;
 const DOC = pageDoc(location.pathname);
 
 function pageDoc(path) {
-  const skill = path.match(/^\/skills\/([a-z0-9][a-z0-9-]*)\/?$/);
+  // A skill's SKILL.md at /skills/<name>, each of its reference files at /skills/<name>/references/<file>.
+  const skill = path.match(/^\/skills\/([a-z0-9][a-z0-9-]*)(?:\/references\/([a-z0-9][a-z0-9-]*\.md))?\/?$/);
   if (skill) {
+    const [, name, file] = skill;
     return {
-      tab: "/skills", api: `/api/skills/${skill[1]}`, name: `the ${skill[1]} skill`, title: `${skill[1]} skill`, skill: skill[1],
+      tab: "/skills", api: file ? `/api/skills/${name}/references/${file}` : `/api/skills/${name}`,
+      name: file ? `${file} of the ${name} skill` : `the ${name} skill`, title: file ? `${name} ${file}` : `${name} skill`,
+      skill: name, file: file ?? null,
       commentWords: "A session changes the skill to answer your comment",
       commentSent: "Comment sent: a sweep hands it to a session within minutes, which changes the skill",
       saveWords: "Saves and pushes to the skills branch",
@@ -1068,7 +1072,22 @@ function renderDoc() {
     }
   }
   if (ui.filter !== null && !visible.some(isRequirement)) nodes.push(h("p", { class: "note", text: "Choose another status to see requirements" }));
-  fill("doc", nodes);
+  fill("doc", skillFiles(), nodes);
+}
+
+// A skill with reference files lists them all above the text, SKILL.md first, the open one marked,
+// with the comments still waiting for a session on each.
+function skillFiles() {
+  const references = ui.spec.references ?? [];
+  if (!references.length) return null;
+  const link = (file, href, unread) => h("a", {
+    class: "skill-file", href, "aria-current": (DOC.file ?? "SKILL.md") === file ? "page" : null,
+  }, h("span", { text: file }), unread > 0 && h("span", {
+    class: "skill-waiting", title: `${plural(unread, "comment")} waiting for a session`,
+  }, icon("chat"), h("span", { class: "comment-count", text: unread })));
+  return h("nav", { class: "skill-files", "aria-label": `Files of the ${DOC.skill} skill` },
+    link("SKILL.md", `/skills/${DOC.skill}`, 0),
+    references.map((ref) => link(ref.file, `/skills/${DOC.skill}/references/${ref.file}`, ref.unread_comments)));
 }
 
 // With a status filter: the requirements with that status under their section headings.
@@ -1118,6 +1137,18 @@ function render() {
   watchSections();
   const button = document.getElementById("edit-all");
   button.disabled = ui.editing === "all";
+  // A link to a section (another file's "sweep.md#done") opens there once the file has drawn.
+  if (!ui.reachedHash) {
+    ui.reachedHash = true;
+    let id = location.hash.slice(1);
+    try {
+      id = decodeURIComponent(id);
+    } catch {
+      // A malformed escape such as "#%ZZ" names no heading as written; look it up undecoded.
+    }
+    const target = id && document.getElementById(id);
+    if (target) target.scrollIntoView();
+  }
 }
 
 document.title = `Cockpit ${DOC.title}`;

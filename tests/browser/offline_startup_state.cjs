@@ -6,7 +6,7 @@ const original = `${"b".repeat(64)}-${until}`, newer = `${"c".repeat(64)}-${unti
 const storage = new Map([["cockpit.offline-owner", original]]), broadcasts = [];
 let release, opened = 0, removed = 0;
 const context = vm.createContext({
-  document: { documentElement: { dataset: { offlineUser: owner, offlineUntil: String(until) } }, readyState: "complete", addEventListener() {} },
+  document: { documentElement: { dataset: { offlineUser: owner, offlineUntil: String(until) } }, readyState: "complete", querySelector: () => null, addEventListener() {} },
   navigator: { onLine: true }, location: { origin: "https://cockpit.test", href: "https://cockpit.test/" },
   localStorage: { getItem: (key) => storage.get(key) ?? null, setItem: (key, value) => storage.set(key, value), removeItem: (key) => storage.delete(key) },
   indexedDB: { open() { opened++; throw new Error("The stale page must not open a database"); }, deleteDatabase() { removed++; throw new Error("The stale page must not delete a database"); } },

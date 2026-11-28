@@ -379,7 +379,8 @@ check("Q3: refreshed missing comments drop retained deletion failures", async ()
     const logged = [];
     const w = actionWorld({ document: { hidden: false }, ADDS_WAIT_MS: 1000, ARRIVED_MS: 10000, RERENDER_MS: 1000,
       readState: async () => state, usageGeneration: 0, safeRender: noop, renderStatus: noop, renderUsage: noop, fitHeader: noop,
-      forgetSentMarks: noop, settleUploads: noop, noticeSideAnswers: noop, noticeCodexSignIns: noop, noticeSnoozeReads: noop, caughtUp: noop,
+      forgetSentMarks: noop, forgetListedMentions: noop, settleUploads: noop, noticeSideAnswers: noop, noticeCodexSignIns: noop,
+      noticeSnoozeReads: noop, caughtUp: noop,
       logError: (label, error) => { logged.push([label, error]); },
       api: () => deletion.promise, CockpitChoices: { settled: async () => {} } });
     Object.assign(w.context.ui, { pending: new Map(), handing: new Map(), tick: 0, error: "", state, renderedAt: 0, catchUpFrom: null, openedHidden: new Set() });

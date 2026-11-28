@@ -14,6 +14,7 @@
 // - words typed on the laptop while its last words are on their way, then the page goes away before their answer
 //   comes, reach Cockpit and the phone;
 // - words Cockpit failed to take (a 503) reach Cockpit and the phone when the page goes away straight after;
+// - a 502 gets a quiet retry with the same request, and a second gateway error is reported;
 // - no page errors.
 // Saves screenshots of both devices holding the same draft in the work dir.
 //
@@ -234,6 +235,43 @@ async function main() {
     check("words Cockpit failed to take reach Cockpit and the phone when the page goes away straight after",
       retriedCockpit && await holds(phone, retried),
       `${JSON.stringify((await user("GET", "/api/state")).drafts.entries[entry])} / ${JSON.stringify(await phone.box.inputValue())}`);
+
+    const reports = [], attempts = [];
+    phone.page.on("request", (request) => {
+      if (request.url().endsWith("/api/drafts") && request.method() === "POST") attempts.push(request.postData());
+      if (!request.url().endsWith("/api/page-errors")) return;
+      const report = request.postDataJSON();
+      if (report?.place === "keeping drafts on Cockpit") {
+        reports.push({ message: report.message, attempts: attempts.slice() });
+      }
+    });
+    const gatewayDraft = "Eleven still works";
+    const draftsRoute = "**/api/drafts";
+    let savedBeforeLostReply = false;
+    const loseFirstReply = async (route) => {
+      const saved = await route.fetch();
+      if (!saved.ok()) return route.fulfill({ response: saved });
+      const result = await saved.json();
+      savedBeforeLostReply = result.taken.includes(entry) && result.entries[entry]?.[0] === JSON.stringify(gatewayDraft);
+      return route.fulfill({ status: 502, body: "" });
+    };
+    await phone.page.route(draftsRoute, loseFirstReply, { times: 1 });
+    await phone.box.fill(gatewayDraft);
+    const recovered = await waitFor(() => attempts.length >= 2 && phone.page.evaluate(() =>
+      JSON.parse(localStorage.getItem("cockpit.drafts-synced")).unanswered.length === 0));
+    await phone.page.unroute(draftsRoute, loseFirstReply);
+    check("a 502 retries the same draft request without reporting an error",
+      savedBeforeLostReply && recovered && attempts.length === 2 && attempts[0] === attempts[1] && reports.length === 0,
+      `${savedBeforeLostReply ? "saved" : "unsaved"} before lost reply, ${attempts.length} requests, ${JSON.stringify(reports)}`);
+
+    attempts.length = 0;
+    await phone.page.route(draftsRoute, (route) => route.fulfill({ status: 503, body: "{}" }), { times: 2 });
+    await phone.box.fill("Eleven or twelve");
+    await waitFor(() => reports.length > 0);
+    const failure = reports[0];
+    check("the browser reports a 503 after retrying the same request once",
+      failure?.message.includes("answered 503") && failure.attempts.length === 2 && failure.attempts[0] === failure.attempts[1],
+      JSON.stringify(reports));
 
     // An entry of a kind only a newer page keeps stays on Cockpit while this page sends its own changes, also once a
     // newer tab in the same browser recorded it: this page holds no value of it, so a change it sent would empty it.
